@@ -1,0 +1,45 @@
+syntax = "proto3";
+package test.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/wrappers.proto";
+
+message AllTypes {
+  string string_field = 1;
+  int32 int32_field = 2;
+  int64 int64_field = 3;
+  uint32 uint32_field = 4;
+  uint64 uint64_field = 5;
+  float float_field = 6;
+  double double_field = 7;
+  bool bool_field = 8;
+  bytes bytes_field = 9;
+  Status enum_field = 10;
+  Nested nested_field = 11;
+  repeated string repeated_string = 12;
+  repeated Nested repeated_nested = 13;
+  map<string, string> string_map = 14;
+  map<string, Nested> nested_map = 15;
+  map<int32, string> int_map = 16;
+  google.protobuf.Timestamp ts_field = 17;
+  google.protobuf.Duration dur_field = 18;
+  oneof choice {
+    string text_choice = 19;
+    int32 number_choice = 20;
+  }
+  google.protobuf.StringValue nullable_string = 21;
+  google.protobuf.Int32Value nullable_int = 22;
+  google.protobuf.BoolValue nullable_bool = 23;
+}
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_ACTIVE = 1;
+  STATUS_INACTIVE = 2;
+}
+
+message Nested {
+  string name = 1;
+  int32 value = 2;
+}

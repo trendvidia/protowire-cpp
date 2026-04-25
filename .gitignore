@@ -1,0 +1,17 @@
+# CMake build trees
+build/
+build_*/
+cmake-build-*/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Compile artefacts
+*.o
+*.a
+*.dylib
+*.so

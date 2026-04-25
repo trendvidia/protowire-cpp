@@ -1,0 +1,177 @@
+syntax = "proto3";
+
+package protoregistry.v1;
+
+option go_package = "github.com/trendvidia/protoregistry/proto/protoregistry/v1;registrypb";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/descriptor.proto";
+
+// RegistryService provides a gRPC API for the proto schema registry.
+service RegistryService {
+  // Publish compiles and stages a new schema version within a namespace.
+  rpc Publish(PublishRequest) returns (PublishResponse);
+
+  // Promote atomically moves all staged versions to current in a namespace.
+  rpc Promote(PromoteRequest) returns (PromoteResponse);
+
+  // DiscardStaging clears all staged versions in a namespace.
+  rpc DiscardStaging(DiscardStagingRequest) returns (DiscardStagingResponse);
+
+  // Rollback stages a previous version for promotion.
+  rpc Rollback(RollbackRequest) returns (RollbackResponse);
+
+  // GetSchema returns metadata for a schema.
+  rpc GetSchema(GetSchemaRequest) returns (GetSchemaResponse);
+
+  // ListSchemas lists all schemas in a namespace.
+  rpc ListSchemas(ListSchemasRequest) returns (ListSchemasResponse);
+
+  // GetDescriptor returns the compiled FileDescriptorSet for a schema version.
+  rpc GetDescriptor(GetDescriptorRequest) returns (GetDescriptorResponse);
+
+  // GetSource returns the original source files for a schema version.
+  rpc GetSource(GetSourceRequest) returns (GetSourceResponse);
+
+  // ListNamespaces lists all namespaces.
+  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
+
+  // CreateNamespace creates a new namespace.
+  rpc CreateNamespace(CreateNamespaceRequest) returns (CreateNamespaceResponse);
+}
+
+// --- Publish ---
+
+message PublishRequest {
+  string namespace_id = 1;
+  string schema_id = 2;
+  // Source proto files: filename → content.
+  map<string, bytes> sources = 3;
+  string created_by = 4;
+  map<string, string> metadata = 5;
+  // When true, allows publishing files that shadow well-known types
+  // (e.g., google/protobuf/timestamp.proto). Defaults to false.
+  bool force = 6;
+}
+
+message PublishResponse {
+  uint64 version = 1;
+  string fingerprint = 2;
+  bool no_change = 3;
+}
+
+// --- Promote ---
+
+message PromoteRequest {
+  string namespace_id = 1;
+}
+
+message PromoteResponse {
+  repeated PromotedSchema promoted = 1;
+}
+
+message PromotedSchema {
+  string schema_id = 1;
+  uint64 current_version = 2;
+}
+
+// --- DiscardStaging ---
+
+message DiscardStagingRequest {
+  string namespace_id = 1;
+}
+
+message DiscardStagingResponse {}
+
+// --- Rollback ---
+
+message RollbackRequest {
+  string namespace_id = 1;
+  string schema_id = 2;
+  uint64 version = 3;
+}
+
+message RollbackResponse {}
+
+// --- GetSchema ---
+
+message GetSchemaRequest {
+  string namespace_id = 1;
+  string schema_id = 2;
+}
+
+message GetSchemaResponse {
+  SchemaInfo schema = 1;
+}
+
+message SchemaInfo {
+  string namespace_id = 1;
+  string schema_id = 2;
+  optional uint64 current_version = 3;
+  optional uint64 staged_version = 4;
+  google.protobuf.Timestamp created_at = 5;
+  map<string, string> metadata = 6;
+  repeated uint64 versions = 7;
+}
+
+// --- ListSchemas ---
+
+message ListSchemasRequest {
+  string namespace_id = 1;
+}
+
+message ListSchemasResponse {
+  repeated SchemaInfo schemas = 1;
+}
+
+// --- GetDescriptor ---
+
+message GetDescriptorRequest {
+  string namespace_id = 1;
+  string schema_id = 2;
+  // If 0, returns the current version.
+  uint64 version = 3;
+}
+
+message GetDescriptorResponse {
+  uint64 version = 1;
+  google.protobuf.FileDescriptorSet file_descriptor_set = 2;
+}
+
+// --- GetSource ---
+
+message GetSourceRequest {
+  string namespace_id = 1;
+  string schema_id = 2;
+  // If 0, returns the current version.
+  uint64 version = 3;
+}
+
+message GetSourceResponse {
+  uint64 version = 1;
+  // filename → source content.
+  map<string, bytes> sources = 2;
+}
+
+// --- ListNamespaces ---
+
+message ListNamespacesRequest {}
+
+message ListNamespacesResponse {
+  repeated NamespaceInfo namespaces = 1;
+}
+
+message NamespaceInfo {
+  string id = 1;
+  google.protobuf.Timestamp created_at = 2;
+  map<string, string> metadata = 3;
+}
+
+// --- CreateNamespace ---
+
+message CreateNamespaceRequest {
+  string id = 1;
+  map<string, string> metadata = 2;
+}
+
+message CreateNamespaceResponse {}
