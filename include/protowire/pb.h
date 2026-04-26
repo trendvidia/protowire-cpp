@@ -22,7 +22,8 @@
 // fields are omitted on the wire.
 //
 // Supported member types:
-//   bool, integers (zig-zag for signed), float/double, std::string,
+//   bool, integers (proto3 int32/int64 plain varint by default; PROTOWIRE_ZIGZAG
+//   selects sint32/sint64 zigzag), float/double, std::string,
 //   std::vector<uint8_t> (bytes), nested struct (must also use the macros),
 //   std::vector<T> (repeated; one tag+value per element),
 //   std::optional<T> (presence — zero values still emitted when set),
@@ -59,11 +60,17 @@ template <class Class, class Member>
 struct FieldDef {
   uint32_t number;
   Member Class::*ptr;
+  bool zigzag = false;  // signed ints: zigzag (sint32/sint64) vs plain varint (int32/int64)
 };
 
 template <uint32_t N, class Class, class Member>
 constexpr FieldDef<Class, Member> MakeField(Member Class::*ptr) {
-  return {N, ptr};
+  return {N, ptr, false};
+}
+
+template <uint32_t N, class Class, class Member>
+constexpr FieldDef<Class, Member> MakeFieldZigzag(Member Class::*ptr) {
+  return {N, ptr, true};
 }
 
 // ---- Type traits --------------------------------------------------------
@@ -179,7 +186,8 @@ inline bool IsZeroValue(const T& v) {
 }
 
 template <class T>
-inline void MarshalScalar(std::vector<uint8_t>& out, uint32_t num, const T& v) {
+inline void MarshalScalar(std::vector<uint8_t>& out, uint32_t num, const T& v,
+                          bool zigzag = false) {
   if constexpr (std::is_same_v<T, bool>) {
     wire::AppendTag(out, num, wire::kVarint);
     wire::AppendVarint(out, v ? 1 : 0);
@@ -195,7 +203,12 @@ inline void MarshalScalar(std::vector<uint8_t>& out, uint32_t num, const T& v) {
     wire::AppendFixed32(out, bits);
   } else if constexpr (std::is_signed_v<T>) {
     wire::AppendTag(out, num, wire::kVarint);
-    wire::AppendVarint(out, wire::EncodeZigZag(static_cast<int64_t>(v)));
+    if (zigzag) {
+      wire::AppendVarint(out, wire::EncodeZigZag(static_cast<int64_t>(v)));
+    } else {
+      // proto3 int32/int64: plain varint; negatives sign-extend to uint64.
+      wire::AppendVarint(out, static_cast<uint64_t>(static_cast<int64_t>(v)));
+    }
   } else if constexpr (std::is_unsigned_v<T>) {
     wire::AppendTag(out, num, wire::kVarint);
     wire::AppendVarint(out, static_cast<uint64_t>(v));
@@ -231,12 +244,13 @@ inline void MarshalScalar(std::vector<uint8_t>& out, uint32_t num, const T& v) {
 }
 
 template <class T>
-inline void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v) {
+inline void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v,
+                         bool zigzag = false) {
   if constexpr (IsOptional<T>::value) {
-    if (v.has_value()) MarshalScalar(out, num, *v);
+    if (v.has_value()) MarshalScalar(out, num, *v, zigzag);
     return;
   } else if constexpr (IsSmartPtr<T>::value) {
-    if (v) MarshalScalar(out, num, *v);
+    if (v) MarshalScalar(out, num, *v, zigzag);
     return;
   } else if constexpr (IsMap<T>::value) {
     // proto3 maps: each entry is a length-prefixed MapEntry message with
@@ -245,18 +259,18 @@ inline void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v) {
     if (v.empty()) return;
     for (const auto& [k, val] : v) {
       std::vector<uint8_t> entry;
-      MarshalField(entry, 1, k);
-      MarshalField(entry, 2, val);
+      MarshalField(entry, 1, k, zigzag);
+      MarshalField(entry, 2, val, zigzag);
       wire::AppendTag(out, num, wire::kBytes);
       wire::AppendBytes(out, entry);
     }
     return;
   } else if constexpr (IsVector<T>::value &&
                        !std::is_same_v<T, std::vector<uint8_t>>) {
-    for (const auto& el : v) MarshalScalar(out, num, el);
+    for (const auto& el : v) MarshalScalar(out, num, el, zigzag);
   } else {
     if (IsZeroValue(v)) return;
-    MarshalScalar(out, num, v);
+    MarshalScalar(out, num, v, zigzag);
   }
 }
 
@@ -264,7 +278,7 @@ template <class T>
 inline void MarshalStruct(const T& v, std::vector<uint8_t>& out) {
   std::apply(
       [&](auto&&... f) {
-        ((MarshalField(out, f.number, v.*(f.ptr))), ...);
+        ((MarshalField(out, f.number, v.*(f.ptr), f.zigzag)), ...);
       },
       T::_protowire_fields());
 }
@@ -273,7 +287,8 @@ inline void MarshalStruct(const T& v, std::vector<uint8_t>& out) {
 
 template <class T>
 inline Status UnmarshalScalar(std::span<const uint8_t> data,
-                              wire::WireType type, T& v, int& consumed) {
+                              wire::WireType type, T& v, int& consumed,
+                              bool zigzag = false) {
   if constexpr (std::is_same_v<T, bool>) {
     uint64_t x;
     int n = wire::ConsumeVarint(data, x);
@@ -297,7 +312,12 @@ inline Status UnmarshalScalar(std::span<const uint8_t> data,
     int n = wire::ConsumeVarint(data, x);
     if (n < 0) return Status::Error("corrupt signed int");
     consumed = n;
-    v = static_cast<T>(wire::DecodeZigZag(x));
+    if (zigzag) {
+      v = static_cast<T>(wire::DecodeZigZag(x));
+    } else {
+      // proto3 int32/int64: low bits as signed.
+      v = static_cast<T>(static_cast<int64_t>(x));
+    }
   } else if constexpr (std::is_unsigned_v<T> && std::is_integral_v<T>) {
     uint64_t x;
     int n = wire::ConsumeVarint(data, x);
@@ -348,18 +368,19 @@ inline Status UnmarshalScalar(std::span<const uint8_t> data,
 
 template <class T>
 inline Status UnmarshalField(std::span<const uint8_t> data, uint32_t num,
-                             wire::WireType type, T& v, int& consumed) {
+                             wire::WireType type, T& v, int& consumed,
+                             bool zigzag = false) {
   if constexpr (IsOptional<T>::value) {
     using E = typename IsOptional<T>::element;
     E tmp{};
-    Status st = UnmarshalScalar(data, type, tmp, consumed);
+    Status st = UnmarshalScalar(data, type, tmp, consumed, zigzag);
     if (!st.ok()) return st;
     v = std::move(tmp);
     return Status::OK();
   } else if constexpr (IsSmartPtr<T>::value) {
     using E = typename IsSmartPtr<T>::element;
     if (!v) v.reset(new E());
-    return UnmarshalScalar(data, type, *v, consumed);
+    return UnmarshalScalar(data, type, *v, consumed, zigzag);
   } else if constexpr (IsMap<T>::value) {
     using K = typename IsMap<T>::key_type;
     using V = typename IsMap<T>::mapped_type;
@@ -377,11 +398,11 @@ inline Status UnmarshalField(std::span<const uint8_t> data, uint32_t num,
       entry_bytes = entry_bytes.subspan(en);
       int sub_consumed = 0;
       if (enum_num == 1) {
-        Status st = UnmarshalField(entry_bytes, 1, etyp, key, sub_consumed);
+        Status st = UnmarshalField(entry_bytes, 1, etyp, key, sub_consumed, zigzag);
         if (!st.ok()) return st;
         entry_bytes = entry_bytes.subspan(sub_consumed);
       } else if (enum_num == 2) {
-        Status st = UnmarshalField(entry_bytes, 2, etyp, val, sub_consumed);
+        Status st = UnmarshalField(entry_bytes, 2, etyp, val, sub_consumed, zigzag);
         if (!st.ok()) return st;
         entry_bytes = entry_bytes.subspan(sub_consumed);
       } else {
@@ -397,12 +418,12 @@ inline Status UnmarshalField(std::span<const uint8_t> data, uint32_t num,
                        !std::is_same_v<T, std::vector<uint8_t>>) {
     using E = typename IsVector<T>::element;
     E tmp{};
-    Status st = UnmarshalScalar(data, type, tmp, consumed);
+    Status st = UnmarshalScalar(data, type, tmp, consumed, zigzag);
     if (!st.ok()) return st;
     v.push_back(std::move(tmp));
     return Status::OK();
   } else {
-    return UnmarshalScalar(data, type, v, consumed);
+    return UnmarshalScalar(data, type, v, consumed, zigzag);
   }
 }
 
@@ -422,7 +443,7 @@ inline Status UnmarshalStruct(std::span<const uint8_t> data, T& v) {
         [&](auto&&... f) {
           (((!matched && f.number == num)
                 ? (matched = true,
-                   st = UnmarshalField(data, num, type, v.*(f.ptr), consumed),
+                   st = UnmarshalField(data, num, type, v.*(f.ptr), consumed, f.zigzag),
                    0)
                 : 0),
            ...);
@@ -476,6 +497,12 @@ Status Unmarshal(const std::vector<uint8_t>& data, T& v) {
 
 #define PROTOWIRE_FIELD(N, MEMBER) \
   ::protowire::pb::MakeField<(N)>(&_protowire_self_t::MEMBER)
+
+// Like PROTOWIRE_FIELD, but encodes signed integers with zigzag varint
+// (proto3 sint32 / sint64). More compact than plain int32 / int64 for
+// negative values.
+#define PROTOWIRE_ZIGZAG(N, MEMBER) \
+  ::protowire::pb::MakeFieldZigzag<(N)>(&_protowire_self_t::MEMBER)
 
 #define PROTOWIRE_FIELDS(SELF, ...)                  \
   using _protowire_self_t = SELF;                    \

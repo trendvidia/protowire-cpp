@@ -199,4 +199,26 @@ TEST(Pb, ParseFormatDecimal) {
   EXPECT_EQ(protowire::pb::FormatDecimal(neg), "-1.000");
 }
 
+struct WithZigZag {
+  int64_t a = 0;  // proto3 int64 (plain varint)
+  int64_t b = 0;  // proto3 sint64 (zigzag varint)
+  PROTOWIRE_FIELDS(WithZigZag,
+                   PROTOWIRE_FIELD(1, a),
+                   PROTOWIRE_ZIGZAG(2, b))
+  bool operator==(const WithZigZag&) const = default;
+};
+
+TEST(Pb, ZigZagMacro) {
+  WithZigZag orig{-1, -1};
+  auto bytes = Marshal(orig);
+  // Field 1 (a=-1, plain varint): tag 0x08 + 10 bytes (sign-extended).
+  // Field 2 (b=-1, zigzag): tag 0x10 + 1 byte (zigzag(-1) = 1 = 0x01).
+  // Total: 1 + 10 + 1 + 1 = 13 bytes.
+  EXPECT_EQ(bytes.size(), 13u);
+
+  WithZigZag got;
+  ASSERT_TRUE(Unmarshal(bytes, got).ok());
+  EXPECT_EQ(orig, got);
+}
+
 }  // namespace
