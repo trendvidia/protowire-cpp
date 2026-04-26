@@ -168,6 +168,12 @@ if(PROTOWIRE_BUILD_CLI AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cmd/protowire/main
   add_subdirectory(cmd/protowire)
 endif()
 
+# Cross-port envelope wire-compat dumper. Cheap to build (links only against
+# the envelope/pb static libs) so always included when those libs are built.
+if(TARGET protowire_envelope AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cmd/dump_envelope/main.cc)
+  add_subdirectory(cmd/dump_envelope)
+endif()
+
 if(PROTOWIRE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(test)
