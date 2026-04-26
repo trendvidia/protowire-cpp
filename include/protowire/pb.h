@@ -25,7 +25,9 @@
 //   bool, integers (zig-zag for signed), float/double, std::string,
 //   std::vector<uint8_t> (bytes), nested struct (must also use the macros),
 //   std::vector<T> (repeated; one tag+value per element),
-//   std::optional<T> (presence — zero values still emitted when set).
+//   std::optional<T> (presence — zero values still emitted when set),
+//   std::unique_ptr<T> / std::shared_ptr<T> (presence — null skipped on wire),
+//   std::map<K,V> / std::unordered_map<K,V> (proto3 maps as repeated MapEntry).
 //
 // Big numbers (BigInt, Decimal, BigFloat) live in protowire/pb_big.h and are
 // encoded as nested messages matching the pxf.BigInt/Decimal/BigFloat schemas.
@@ -33,12 +35,16 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "protowire/detail/status.h"
@@ -74,6 +80,30 @@ struct IsOptional : std::false_type {};
 template <class T>
 struct IsOptional<std::optional<T>> : std::true_type {
   using element = T;
+};
+
+template <class T>
+struct IsSmartPtr : std::false_type {};
+template <class T, class D>
+struct IsSmartPtr<std::unique_ptr<T, D>> : std::true_type {
+  using element = T;
+};
+template <class T>
+struct IsSmartPtr<std::shared_ptr<T>> : std::true_type {
+  using element = T;
+};
+
+template <class T>
+struct IsMap : std::false_type {};
+template <class K, class V, class C, class A>
+struct IsMap<std::map<K, V, C, A>> : std::true_type {
+  using key_type = K;
+  using mapped_type = V;
+};
+template <class K, class V, class H, class E, class A>
+struct IsMap<std::unordered_map<K, V, H, E, A>> : std::true_type {
+  using key_type = K;
+  using mapped_type = V;
 };
 
 // Detect a struct that has registered protowire fields — i.e. one that
@@ -205,6 +235,22 @@ inline void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v) {
   if constexpr (IsOptional<T>::value) {
     if (v.has_value()) MarshalScalar(out, num, *v);
     return;
+  } else if constexpr (IsSmartPtr<T>::value) {
+    if (v) MarshalScalar(out, num, *v);
+    return;
+  } else if constexpr (IsMap<T>::value) {
+    // proto3 maps: each entry is a length-prefixed MapEntry message with
+    // key at field 1 and value at field 2. Standard proto3 zero-skip applies
+    // within the entry; missing fields decode to zero.
+    if (v.empty()) return;
+    for (const auto& [k, val] : v) {
+      std::vector<uint8_t> entry;
+      MarshalField(entry, 1, k);
+      MarshalField(entry, 2, val);
+      wire::AppendTag(out, num, wire::kBytes);
+      wire::AppendBytes(out, entry);
+    }
+    return;
   } else if constexpr (IsVector<T>::value &&
                        !std::is_same_v<T, std::vector<uint8_t>>) {
     for (const auto& el : v) MarshalScalar(out, num, el);
@@ -309,6 +355,43 @@ inline Status UnmarshalField(std::span<const uint8_t> data, uint32_t num,
     Status st = UnmarshalScalar(data, type, tmp, consumed);
     if (!st.ok()) return st;
     v = std::move(tmp);
+    return Status::OK();
+  } else if constexpr (IsSmartPtr<T>::value) {
+    using E = typename IsSmartPtr<T>::element;
+    if (!v) v.reset(new E());
+    return UnmarshalScalar(data, type, *v, consumed);
+  } else if constexpr (IsMap<T>::value) {
+    using K = typename IsMap<T>::key_type;
+    using V = typename IsMap<T>::mapped_type;
+    std::span<const uint8_t> entry_bytes;
+    int n = wire::ConsumeBytes(data, entry_bytes);
+    if (n < 0) return Status::Error("corrupt map entry");
+    consumed = n;
+    K key{};
+    V val{};
+    while (!entry_bytes.empty()) {
+      wire::FieldNumber enum_num;
+      wire::WireType etyp;
+      int en = wire::ConsumeTag(entry_bytes, enum_num, etyp);
+      if (en < 0) return Status::Error("corrupt tag in map entry");
+      entry_bytes = entry_bytes.subspan(en);
+      int sub_consumed = 0;
+      if (enum_num == 1) {
+        Status st = UnmarshalField(entry_bytes, 1, etyp, key, sub_consumed);
+        if (!st.ok()) return st;
+        entry_bytes = entry_bytes.subspan(sub_consumed);
+      } else if (enum_num == 2) {
+        Status st = UnmarshalField(entry_bytes, 2, etyp, val, sub_consumed);
+        if (!st.ok()) return st;
+        entry_bytes = entry_bytes.subspan(sub_consumed);
+      } else {
+        int skipped = wire::ConsumeFieldValue(entry_bytes, enum_num, etyp);
+        if (skipped < 0)
+          return Status::Error("corrupt unknown field in map entry");
+        entry_bytes = entry_bytes.subspan(skipped);
+      }
+    }
+    v.insert_or_assign(std::move(key), std::move(val));
     return Status::OK();
   } else if constexpr (IsVector<T>::value &&
                        !std::is_same_v<T, std::vector<uint8_t>>) {

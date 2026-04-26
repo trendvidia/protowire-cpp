@@ -46,11 +46,8 @@ struct AppError {
                    PROTOWIRE_FIELD(1, code),
                    PROTOWIRE_FIELD(2, message),
                    PROTOWIRE_FIELD(3, args),
-                   PROTOWIRE_FIELD(4, details))
-  // Note: `metadata` (map<string,string>) is intentionally not serialized via
-  // PROTOWIRE_FIELDS yet — pb maps require a paired-message wire layout that
-  // would balloon the example. Use a separate helper if you need it on the
-  // wire; in-memory it still functions identically to the Go map.
+                   PROTOWIRE_FIELD(4, details),
+                   PROTOWIRE_FIELD(5, metadata))
 };
 
 struct Envelope {
@@ -72,13 +69,11 @@ struct Envelope {
   const std::string& ErrorCode() const;
   std::unordered_map<std::string, const FieldError*> FieldErrors() const;
 
-  // Note: PROTOWIRE_FIELDS skips `error` (unique_ptr<AppError>) — the pb
-  // layer doesn't wrap pointers transparently yet. Callers who need binary
-  // round-trip should set/serialize via the AppError directly.
   PROTOWIRE_FIELDS(Envelope,
                    PROTOWIRE_FIELD(1, status),
                    PROTOWIRE_FIELD(2, transport_error),
-                   PROTOWIRE_FIELD(3, data))
+                   PROTOWIRE_FIELD(3, data),
+                   PROTOWIRE_FIELD(4, error))
 };
 
 // --- Free-function constructors mirroring the Go API ---
