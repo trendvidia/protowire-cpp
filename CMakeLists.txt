@@ -174,6 +174,12 @@ if(TARGET protowire_envelope AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cmd/dump_env
   add_subdirectory(cmd/dump_envelope)
 endif()
 
+# Cross-port PXF microbench. Same shape as the Go/Rust/TS/Java bench-pxf
+# binaries; output is aggregated by `protowire/scripts/cross_pxf_bench.sh`.
+if(TARGET protowire_pxf AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cmd/bench_pxf/main.cc)
+  add_subdirectory(cmd/bench_pxf)
+endif()
+
 if(PROTOWIRE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(test)
