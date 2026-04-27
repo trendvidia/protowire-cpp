@@ -180,6 +180,11 @@ if(TARGET protowire_pxf AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cmd/bench_pxf/mai
   add_subdirectory(cmd/bench_pxf)
 endif()
 
+# Cross-port SBE microbench. Aggregated by `protowire/scripts/cross_sbe_bench.sh`.
+if(TARGET protowire_sbe AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cmd/bench_sbe/main.cc)
+  add_subdirectory(cmd/bench_sbe)
+endif()
+
 if(PROTOWIRE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(test)
