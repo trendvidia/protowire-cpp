@@ -12,8 +12,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_NO_SYSTEM_FROM_IMPORTED ON)
 
 option(PROTOWIRE_BUILD_TESTS "Build unit tests" ON)
-option(PROTOWIRE_BUILD_CLI "Build the protowire CLI" OFF)
-option(PROTOWIRE_WITH_REGISTRY "Build CLI registry-mode (gRPC client)" OFF)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
@@ -78,7 +76,7 @@ _pwx_existing_sources(_sbe_srcs
   src/sbe/marshal.cc src/sbe/unmarshal.cc src/sbe/view.cc
   src/sbe/xmlschema.cc src/sbe/xmltoproto.cc src/sbe/prototoxml.cc)
 
-if(_pxf_srcs OR _sbe_srcs OR PROTOWIRE_BUILD_CLI)
+if(_pxf_srcs OR _sbe_srcs)
   find_package(Protobuf REQUIRED CONFIG)
 
   # Homebrew's protobuf CONFIG exports PROTOBUF_USE_DLLS as an interface
@@ -162,10 +160,6 @@ if(_sbe_srcs)
     $<BUILD_INTERFACE:${PROTO_GEN_DIR}>)
   target_link_libraries(protowire_sbe PUBLIC
     protowire_detail protobuf::libprotobuf protowire_protos tinyxml2::tinyxml2)
-endif()
-
-if(PROTOWIRE_BUILD_CLI AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cmd/protowire/main.cc)
-  add_subdirectory(cmd/protowire)
 endif()
 
 # Cross-port envelope wire-compat dumper. Cheap to build (links only against

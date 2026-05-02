@@ -19,27 +19,15 @@ cmake --build build
 ctest --test-dir build
 ```
 
-Options:
+## Command-line tool
 
-- `-DPROTOWIRE_BUILD_CLI=ON` — build the `protowire` CLI (off by default).
-- `-DPROTOWIRE_WITH_REGISTRY=ON` — link the gRPC client for the remote `protoregistry` service. Requires `gRPC` C++ to be findable via `find_package(gRPC CONFIG)`.
-
-## CLI
-
-Standalone (compile schemas locally):
+The `protowire` CLI is shared across every port and lives in the spec repo at [github.com/trendvidia/protowire/cmd/protowire](https://github.com/trendvidia/protowire/tree/main/cmd/protowire). Install:
 
 ```sh
-protowire encode   -p schema.proto -m pkg.Type input.pxf > out.pb
-protowire decode   -p schema.proto -m pkg.Type input.pb  > out.pxf
-protowire validate -p schema.proto -m pkg.Type input.pxf
-protowire fmt      -p schema.proto -m pkg.Type input.pxf
+go install github.com/trendvidia/protowire/cmd/protowire@latest
 ```
 
-Registry mode (talk to the remote `protoregistry` gRPC service):
-
-```sh
-protowire encode -s host:port -n NS --schema NAME -m pkg.Type input.pxf
-```
+C++ users use this library for in-process encode/decode and the shared CLI for command-line operations. There is no separate C++ CLI binary.
 
 ## Wire compatibility
 
@@ -71,7 +59,7 @@ SBE (`encoding/sbe`):
 - ✅ `Marshal` / `Unmarshal` for proto messages, including composites and repeating groups.
 - ✅ Type-narrowing via `(sbe.encoding)` overrides (e.g. `uint32 → uint8`).
 - ✅ Zero-allocation `View` / `GroupView`.
-- ⏳ XML schema parsing and the `sbe2proto` / `proto2sbe` converters (file stubs are present in `src/sbe/xml*.cc`).
+- ⏳ XML schema parsing (file stubs are present in `src/sbe/xml*.cc`). The `sbe2proto` / `proto2sbe` CLI subcommands are provided by the shared CLI in the spec repo, not by this library.
 
 `pb` (`encoding/pb`):
 
@@ -88,13 +76,13 @@ SBE (`encoding/sbe`):
 ## Repository layout
 
 ```
-protowire4cpp/
+protowire-cpp/
 ├── CMakeLists.txt
 ├── proto/                              # vendored .proto files
 ├── include/protowire/                  # public headers
 ├── src/{pb,pxf,sbe,envelope,detail}/   # implementations
-├── cmd/protowire/main.cc               # CLI
-├── third_party/CLI11.hpp               # vendored single-header
+├── cmd/{bench_pxf,bench_sbe,dump_envelope}/  # cross-port test harnesses
+├── third_party/CLI11.hpp               # vendored single-header (used by harnesses)
 ├── testdata/                           # test.proto + example.pxf (from Go module)
 └── test/                               # GoogleTest suites
 ```
