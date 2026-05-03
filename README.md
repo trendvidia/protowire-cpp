@@ -90,3 +90,22 @@ protowire-cpp/
 ## Notes for macOS users
 
 Homebrew's `protobuf` package is current; older installs at `/usr/local/include/google/protobuf/` will silently win the include-path race. The CMake build detects this and prepends `/opt/homebrew/include` to the compile search path; if you have similar issues elsewhere, removing the stale install is the cleanest fix.
+
+## Limitations & open gaps
+
+The C++ port targets `protobuf` (`libprotobuf` / `libprotobuf-lite`) and `abseil`; a few items fall out of that or are deferred:
+
+- **C++17 minimum**, with C++20-friendly internals where it doesn't break the public ABI. Toolchains pinning to C++14 are not supported.
+- **No header-only single-include build.** The library is structured for static linking via CMake. A header-only mode is a frequent ask but requires inline'ing the protobuf descriptor wiring and is open work.
+- **Exceptions are used internally.** Embedded targets that compile with `-fno-exceptions` are not supported today; converting the public surface to `std::expected`-style error returns is open work.
+- **macOS Homebrew include-path quirk** documented above is a known footgun. The CMake build handles it; if you wire this library into a non-CMake build, mirror the include-order tweak.
+- **The CLI lives in [trendvidia/protowire/cmd/protowire](https://github.com/trendvidia/protowire/tree/main/cmd/protowire), not here.** This repo ships only the cross-port test harnesses (`cmd/bench_pxf`, `cmd/bench_sbe`, `cmd/dump_envelope`).
+- **SBE schema XML import is one-way at runtime.** `proto2sbe` is shipped via the harness; full bidirectional XML / `.proto` interop happens in the shared CLI.
+
+## Contributing & governance
+
+This repository is part of the `protowire-*` family and is governed by [**Steward**](https://github.com/trendvidia/steward) — the meritocratic, AI-driven governance engine that runs all of the ports. Voting weight is per-directory expertise, the constitution is public in [`governance.pxf`](https://github.com/trendvidia/steward/blob/main/governance.pxf), and Steward routes draft / first-time PRs through a [private mentorship pipeline](https://github.com/trendvidia/steward#-private-mentorship-mode) so initial contributions get private feedback rather than public-review friction.
+
+If any of the items above sound interesting, pull requests are welcome. New contributors start at zero trust and accumulate influence by shipping merged PRs in the directories they actually work on — the [escrow pipeline](https://github.com/trendvidia/steward#%EF%B8%8F-the-escrow-pipeline-zero-trust-onboarding) auto-routes large first-time PRs through 2–3 sandbox issues before unlocking them for community review.
+
+See the [Steward README](https://github.com/trendvidia/steward) for a longer walkthrough of vector reputation, escrow, and the immune system.
