@@ -836,10 +836,158 @@ void DirectDecoder::SkipBracketed() {
   }
 }
 
+// ApplyMessageDefault handles defaults for well-known message types:
+// google.protobuf.Timestamp / Duration, the wrapper types (StringValue,
+// Int32Value, …), and pxf.BigInt / Decimal / BigFloat. Mirrors
+// protowire-go's applyMessageDefault.
+Status ApplyMessageDefault(Message* msg, const FieldDescriptor* fd,
+                           std::string_view def) {
+  const auto* mdesc = fd->message_type();
+
+  if (IsTimestamp(mdesc)) {
+    auto ts = detail::ParseRFC3339(def);
+    if (!ts.has_value()) {
+      return Status::Error("invalid default timestamp \"" + std::string(def) +
+                           "\" for field \"" + std::string(fd->name()) + "\"");
+    }
+    Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
+    SetTimestampFields(sub, ts->seconds, ts->nanos);
+    return Status::OK();
+  }
+
+  if (IsDuration(mdesc)) {
+    auto dur = detail::ParseDuration(def);
+    if (!dur.has_value()) {
+      return Status::Error("invalid default duration \"" + std::string(def) +
+                           "\" for field \"" + std::string(fd->name()) + "\"");
+    }
+    Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
+    SetDurationFields(sub, dur->seconds, dur->nanos);
+    return Status::OK();
+  }
+
+  if (int inner = WrapperInnerCppType(mdesc); inner != -1) {
+    Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
+    const auto* value_fd = mdesc->FindFieldByName("value");
+    if (value_fd == nullptr) {
+      return Status::Error("wrapper type \"" + std::string(mdesc->full_name()) +
+                           "\" has no `value` field");
+    }
+    const Reflection* sr = sub->GetReflection();
+    switch (inner) {
+      case FieldDescriptor::CPPTYPE_STRING:
+        if (value_fd->type() == FieldDescriptor::TYPE_BYTES) {
+          auto decoded = detail::Base64DecodeStd(def);
+          if (!decoded.has_value())
+            return Status::Error("invalid default bytes \"" +
+                                 std::string(def) + "\" for field \"" +
+                                 std::string(fd->name()) + "\"");
+          sr->SetString(sub, value_fd,
+                        std::string(decoded->begin(), decoded->end()));
+        } else {
+          sr->SetString(sub, value_fd, std::string(def));
+        }
+        return Status::OK();
+      case FieldDescriptor::CPPTYPE_BOOL:
+        sr->SetBool(sub, value_fd, def == "true");
+        return Status::OK();
+      case FieldDescriptor::CPPTYPE_INT32: {
+        int32_t n;
+        if (!ParseInteger(def, n))
+          return Status::Error("invalid default int32 \"" + std::string(def) +
+                               "\" for field \"" + std::string(fd->name()) +
+                               "\"");
+        sr->SetInt32(sub, value_fd, n);
+        return Status::OK();
+      }
+      case FieldDescriptor::CPPTYPE_INT64: {
+        int64_t n;
+        if (!ParseInteger(def, n))
+          return Status::Error("invalid default int64 \"" + std::string(def) +
+                               "\" for field \"" + std::string(fd->name()) +
+                               "\"");
+        sr->SetInt64(sub, value_fd, n);
+        return Status::OK();
+      }
+      case FieldDescriptor::CPPTYPE_UINT32: {
+        uint32_t n;
+        if (!ParseInteger(def, n))
+          return Status::Error("invalid default uint32 \"" + std::string(def) +
+                               "\" for field \"" + std::string(fd->name()) +
+                               "\"");
+        sr->SetUInt32(sub, value_fd, n);
+        return Status::OK();
+      }
+      case FieldDescriptor::CPPTYPE_UINT64: {
+        uint64_t n;
+        if (!ParseInteger(def, n))
+          return Status::Error("invalid default uint64 \"" + std::string(def) +
+                               "\" for field \"" + std::string(fd->name()) +
+                               "\"");
+        sr->SetUInt64(sub, value_fd, n);
+        return Status::OK();
+      }
+      case FieldDescriptor::CPPTYPE_FLOAT: {
+        double d;
+        if (!ParseDouble(def, d))
+          return Status::Error("invalid default float \"" + std::string(def) +
+                               "\" for field \"" + std::string(fd->name()) +
+                               "\"");
+        sr->SetFloat(sub, value_fd, static_cast<float>(d));
+        return Status::OK();
+      }
+      case FieldDescriptor::CPPTYPE_DOUBLE: {
+        double d;
+        if (!ParseDouble(def, d))
+          return Status::Error("invalid default double \"" + std::string(def) +
+                               "\" for field \"" + std::string(fd->name()) +
+                               "\"");
+        sr->SetDouble(sub, value_fd, d);
+        return Status::OK();
+      }
+      default:
+        return Status::Error("unsupported wrapper inner type for field \"" +
+                             std::string(fd->name()) + "\"");
+    }
+  }
+
+  if (IsBigInt(mdesc)) {
+    Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
+    if (!SetBigIntFromString(sub, def)) {
+      return Status::Error("invalid default pxf.BigInt \"" +
+                           std::string(def) + "\" for field \"" +
+                           std::string(fd->name()) + "\"");
+    }
+    return Status::OK();
+  }
+  if (IsDecimal(mdesc)) {
+    Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
+    if (!SetDecimalFromString(sub, def)) {
+      return Status::Error("invalid default pxf.Decimal \"" +
+                           std::string(def) + "\" for field \"" +
+                           std::string(fd->name()) + "\"");
+    }
+    return Status::OK();
+  }
+  if (IsBigFloat(mdesc)) {
+    Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
+    if (!SetBigFloatFromString(sub, def)) {
+      return Status::Error("invalid default pxf.BigFloat \"" +
+                           std::string(def) + "\" for field \"" +
+                           std::string(fd->name()) + "\"");
+    }
+    return Status::OK();
+  }
+
+  return Status::Error("default values not supported for message type \"" +
+                       std::string(mdesc->full_name()) + "\" (field \"" +
+                       std::string(fd->name()) + "\")");
+}
+
 // ApplyDefault parses `def` (the (pxf.default) string) and writes it into
 // `msg`'s `fd` slot. Mirrors protowire-go applyDefault — handles every scalar
-// kind plus enum and bytes. Message-typed defaults (well-known types) are
-// reported as unsupported; add as needed when a user requires them.
+// kind plus enum, bytes, and the well-known message types in
+// ApplyMessageDefault above.
 Status ApplyDefault(Message* msg, const FieldDescriptor* fd,
                     std::string_view def) {
   const Reflection* r = msg->GetReflection();
@@ -924,11 +1072,7 @@ Status ApplyDefault(Message* msg, const FieldDescriptor* fd,
       return Status::OK();
     }
     case FieldDescriptor::CPPTYPE_MESSAGE:
-      // Go applies well-known type defaults here (Timestamp, Duration,
-      // wrappers). Wire as needed when a consumer requires it.
-      return Status::Error(
-          "default values for message fields not yet supported (field \"" +
-          std::string(fd->name()) + "\")");
+      return ApplyMessageDefault(msg, fd, def);
     default:
       return Status::Error("default values not supported for field \"" +
                            std::string(fd->name()) + "\"");
