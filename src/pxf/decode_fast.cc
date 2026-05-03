@@ -39,6 +39,7 @@
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
 #include "protowire/detail/rfc3339.h"
+#include "protowire/pxf/annotations.h"
 #include "protowire/pxf/lexer.h"
 #include "protowire/pxf/wellknown.h"
 
@@ -835,6 +836,141 @@ void DirectDecoder::SkipBracketed() {
   }
 }
 
+// ApplyDefault parses `def` (the (pxf.default) string) and writes it into
+// `msg`'s `fd` slot. Mirrors protowire-go applyDefault — handles every scalar
+// kind plus enum and bytes. Message-typed defaults (well-known types) are
+// reported as unsupported; add as needed when a user requires them.
+Status ApplyDefault(Message* msg, const FieldDescriptor* fd,
+                    std::string_view def) {
+  const Reflection* r = msg->GetReflection();
+  switch (fd->cpp_type()) {
+    case FieldDescriptor::CPPTYPE_STRING: {
+      if (fd->type() == FieldDescriptor::TYPE_BYTES) {
+        auto decoded = detail::Base64DecodeStd(def);
+        if (!decoded.has_value()) {
+          return Status::Error(
+              "invalid default bytes for field \"" +
+              std::string(fd->name()) + "\"");
+        }
+        r->SetString(msg, fd,
+                     std::string(decoded->begin(), decoded->end()));
+      } else {
+        r->SetString(msg, fd, std::string(def));
+      }
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_BOOL:
+      r->SetBool(msg, fd, def == "true");
+      return Status::OK();
+    case FieldDescriptor::CPPTYPE_INT32: {
+      int32_t n;
+      if (!ParseInteger(def, n))
+        return Status::Error("invalid default int32 \"" + std::string(def) +
+                             "\" for field \"" + std::string(fd->name()) + "\"");
+      r->SetInt32(msg, fd, n);
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_INT64: {
+      int64_t n;
+      if (!ParseInteger(def, n))
+        return Status::Error("invalid default int64 \"" + std::string(def) +
+                             "\" for field \"" + std::string(fd->name()) + "\"");
+      r->SetInt64(msg, fd, n);
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_UINT32: {
+      uint32_t n;
+      if (!ParseInteger(def, n))
+        return Status::Error("invalid default uint32 \"" + std::string(def) +
+                             "\" for field \"" + std::string(fd->name()) + "\"");
+      r->SetUInt32(msg, fd, n);
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_UINT64: {
+      uint64_t n;
+      if (!ParseInteger(def, n))
+        return Status::Error("invalid default uint64 \"" + std::string(def) +
+                             "\" for field \"" + std::string(fd->name()) + "\"");
+      r->SetUInt64(msg, fd, n);
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_FLOAT: {
+      double d;
+      if (!ParseDouble(def, d))
+        return Status::Error("invalid default float \"" + std::string(def) +
+                             "\" for field \"" + std::string(fd->name()) + "\"");
+      r->SetFloat(msg, fd, static_cast<float>(d));
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_DOUBLE: {
+      double d;
+      if (!ParseDouble(def, d))
+        return Status::Error("invalid default double \"" + std::string(def) +
+                             "\" for field \"" + std::string(fd->name()) + "\"");
+      r->SetDouble(msg, fd, d);
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_ENUM: {
+      const auto* enum_desc = fd->enum_type();
+      if (const auto* ev = enum_desc->FindValueByName(std::string(def))) {
+        r->SetEnumValue(msg, fd, ev->number());
+        return Status::OK();
+      }
+      int32_t n;
+      if (!ParseInteger(def, n))
+        return Status::Error("invalid default enum \"" + std::string(def) +
+                             "\" for field \"" + std::string(fd->name()) + "\"");
+      r->SetEnumValue(msg, fd, n);
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_MESSAGE:
+      // Go applies well-known type defaults here (Timestamp, Duration,
+      // wrappers). Wire as needed when a consumer requires it.
+      return Status::Error(
+          "default values for message fields not yet supported (field \"" +
+          std::string(fd->name()) + "\")");
+    default:
+      return Status::Error("default values not supported for field \"" +
+                           std::string(fd->name()) + "\"");
+  }
+}
+
+// PostDecode validates required fields and applies defaults, recursing into
+// nested messages that were present in the input. Mirrors postDecode in
+// protowire-go/encoding/pxf/decode_fast.go.
+Status PostDecode(Message* msg, const Result* result,
+                  const FieldDescriptor* null_mask_fd, std::string prefix) {
+  const auto* desc = msg->GetDescriptor();
+  for (int i = 0; i < desc->field_count(); ++i) {
+    const auto* fd = desc->field(i);
+    if (null_mask_fd != nullptr && fd->number() == null_mask_fd->number()) {
+      continue;
+    }
+    std::string path = prefix + std::string(fd->name());
+    bool present = result->Has(path);
+    if (!present) {
+      if (IsRequired(fd)) {
+        return Status::Error("required field \"" + path + "\" is absent");
+      }
+      if (auto def = GetDefault(fd); def.has_value()) {
+        if (Status st = ApplyDefault(msg, fd, *def); !st.ok()) return st;
+      }
+      continue;
+    }
+    if (fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE && !fd->is_repeated() &&
+        !fd->is_map() && !result->IsNull(path) &&
+        msg->GetReflection()->HasField(*msg, fd)) {
+      Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
+      if (Status st = PostDecode(sub, result, /*null_mask_fd=*/nullptr,
+                                 path + ".");
+          !st.ok()) {
+        return st;
+      }
+    }
+  }
+  return Status::OK();
+}
+
 }  // namespace
 
 // --- Public API ------------------------------------------------------------
@@ -851,6 +987,8 @@ StatusOr<Result> UnmarshalFull(std::string_view data, Message* msg,
   DirectDecoder d(data, msg, &r, opts.type_resolver, opts.discard_unknown);
   Status st = d.Run();
   if (!st.ok()) return st;
+  const auto* null_mask_fd = FindNullMaskField(msg->GetDescriptor());
+  if (Status pst = PostDecode(msg, &r, null_mask_fd, ""); !pst.ok()) return pst;
   return r;
 }
 

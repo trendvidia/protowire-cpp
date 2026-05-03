@@ -24,6 +24,46 @@ bool IsDurationUnit(uint8_t c) {
 }
 bool IsLowerAlpha(uint8_t c) { return c >= 'a' && c <= 'z'; }
 
+// HexVal decodes one hex digit; returns {value, ok}.
+std::pair<int, bool> HexVal(uint8_t c) {
+  if (c >= '0' && c <= '9') return {c - '0', true};
+  if (c >= 'a' && c <= 'f') return {c - 'a' + 10, true};
+  if (c >= 'A' && c <= 'F') return {c - 'A' + 10, true};
+  return {0, false};
+}
+
+// OctVal decodes one octal digit; returns {value, ok}.
+std::pair<int, bool> OctVal(uint8_t c) {
+  if (c >= '0' && c <= '7') return {c - '0', true};
+  return {0, false};
+}
+
+// EncodeRune writes the UTF-8 encoding of a Unicode scalar value into out.
+// Caller must ensure the rune is valid (not a surrogate, <= 0x10FFFF).
+void EncodeRune(uint32_t r, std::string& out) {
+  if (r <= 0x7F) {
+    out.push_back(static_cast<char>(r));
+  } else if (r <= 0x7FF) {
+    out.push_back(static_cast<char>(0xC0 | (r >> 6)));
+    out.push_back(static_cast<char>(0x80 | (r & 0x3F)));
+  } else if (r <= 0xFFFF) {
+    out.push_back(static_cast<char>(0xE0 | (r >> 12)));
+    out.push_back(static_cast<char>(0x80 | ((r >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (r & 0x3F)));
+  } else {
+    out.push_back(static_cast<char>(0xF0 | (r >> 18)));
+    out.push_back(static_cast<char>(0x80 | ((r >> 12) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | ((r >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (r & 0x3F)));
+  }
+}
+
+// IsValidRune mirrors Go's utf8.ValidRune: rune must be in [0, 0x10FFFF]
+// and not a UTF-16 surrogate half.
+bool IsValidRune(uint32_t r) {
+  return r <= 0x10FFFF && (r < 0xD800 || r > 0xDFFF);
+}
+
 // Strip leading newline and indent of closing triple-quote.
 std::string Dedent(std::string_view raw) {
   if (!raw.empty() && raw[0] == '\n') raw.remove_prefix(1);
@@ -212,13 +252,109 @@ Token Lexer::LexString(Position pos) {
       switch (esc) {
         case '"': sb.push_back('"'); break;
         case '\\': sb.push_back('\\'); break;
+        case '\'': sb.push_back('\''); break;
+        case '?': sb.push_back('?'); break;
+        case 'a': sb.push_back('\x07'); break;
+        case 'b': sb.push_back('\x08'); break;
+        case 'f': sb.push_back('\x0C'); break;
         case 'n': sb.push_back('\n'); break;
-        case 't': sb.push_back('\t'); break;
         case 'r': sb.push_back('\r'); break;
-        default:
-          sb.push_back('\\');
-          sb.push_back(static_cast<char>(esc));
+        case 't': sb.push_back('\t'); break;
+        case 'v': sb.push_back('\x0B'); break;
+        case 'x': {
+          // Exactly 2 hex digits → 1 byte.
+          if (pos_ + 1 >= input_.size()) {
+            return Token{TokenKind::kIllegal,
+                         R"(invalid \x escape: expected 2 hex digits)", pos};
+          }
+          auto hi = HexVal(static_cast<uint8_t>(input_[pos_]));
+          auto lo = HexVal(static_cast<uint8_t>(input_[pos_ + 1]));
+          if (!hi.second || !lo.second) {
+            return Token{TokenKind::kIllegal,
+                         R"(invalid \x escape: expected 2 hex digits)", pos};
+          }
+          Advance();
+          Advance();
+          sb.push_back(static_cast<char>((hi.first << 4) | lo.first));
           break;
+        }
+        case '0': case '1': case '2': case '3': {
+          // \nnn — exactly 3 octal digits, leading 0-3 keeps result <= 0xFF.
+          if (pos_ + 1 >= input_.size()) {
+            return Token{TokenKind::kIllegal,
+                         R"(invalid octal escape: expected 3 octal digits)",
+                         pos};
+          }
+          auto d1 = OctVal(static_cast<uint8_t>(input_[pos_]));
+          auto d2 = OctVal(static_cast<uint8_t>(input_[pos_ + 1]));
+          if (!d1.second || !d2.second) {
+            return Token{TokenKind::kIllegal,
+                         R"(invalid octal escape: expected 3 octal digits)",
+                         pos};
+          }
+          Advance();
+          Advance();
+          int v = ((esc - '0') << 6) | (d1.first << 3) | d2.first;
+          sb.push_back(static_cast<char>(v));
+          break;
+        }
+        case 'u': {
+          // \uHHHH — exactly 4 hex digits → rune.
+          if (pos_ + 4 > input_.size()) {
+            return Token{TokenKind::kIllegal,
+                         R"(invalid \u escape: expected 4 hex digits forming a valid codepoint)",
+                         pos};
+          }
+          uint32_t r = 0;
+          for (int i = 0; i < 4; ++i) {
+            auto h = HexVal(static_cast<uint8_t>(input_[pos_]));
+            if (!h.second) {
+              return Token{TokenKind::kIllegal,
+                           R"(invalid \u escape: expected 4 hex digits forming a valid codepoint)",
+                           pos};
+            }
+            r = (r << 4) | static_cast<uint32_t>(h.first);
+            Advance();
+          }
+          if (!IsValidRune(r)) {
+            return Token{TokenKind::kIllegal,
+                         R"(invalid \u escape: expected 4 hex digits forming a valid codepoint)",
+                         pos};
+          }
+          EncodeRune(r, sb);
+          break;
+        }
+        case 'U': {
+          // \UHHHHHHHH — exactly 8 hex digits → rune.
+          if (pos_ + 8 > input_.size()) {
+            return Token{TokenKind::kIllegal,
+                         R"(invalid \U escape: expected 8 hex digits forming a valid codepoint)",
+                         pos};
+          }
+          uint32_t r = 0;
+          for (int i = 0; i < 8; ++i) {
+            auto h = HexVal(static_cast<uint8_t>(input_[pos_]));
+            if (!h.second) {
+              return Token{TokenKind::kIllegal,
+                           R"(invalid \U escape: expected 8 hex digits forming a valid codepoint)",
+                           pos};
+            }
+            r = (r << 4) | static_cast<uint32_t>(h.first);
+            Advance();
+          }
+          if (!IsValidRune(r)) {
+            return Token{TokenKind::kIllegal,
+                         R"(invalid \U escape: expected 8 hex digits forming a valid codepoint)",
+                         pos};
+          }
+          EncodeRune(r, sb);
+          break;
+        }
+        default: {
+          std::string msg = R"(unknown escape sequence \)";
+          msg.push_back(static_cast<char>(esc));
+          return Token{TokenKind::kIllegal, Store(std::move(msg)), pos};
+        }
       }
       continue;
     }
@@ -249,14 +385,29 @@ Token Lexer::LexTripleString(Position pos) {
 
 Token Lexer::LexBytes(Position pos) {
   Advance();  // 'b'
-  Token tok = LexString(pos);
-  if (tok.kind != TokenKind::kString) return tok;
-  // Validate base64.
-  if (!detail::Base64DecodeStd(tok.value).has_value()) {
-    return Token{TokenKind::kIllegal, "invalid base64 in bytes literal", pos};
+  if (pos_ >= input_.size() || input_[pos_] != '"') {
+    return Token{TokenKind::kIllegal, R"(expected '"' after b)", pos};
   }
-  tok.kind = TokenKind::kBytes;
-  return tok;
+  Advance();  // opening "
+  size_t start = pos_;
+  while (pos_ < input_.size()) {
+    char c = input_[pos_];
+    if (c == '"') {
+      std::string_view raw =
+          input_.substr(start, pos_ - start);
+      Advance();  // closing "
+      if (!detail::Base64DecodeStd(raw).has_value()) {
+        return Token{TokenKind::kIllegal,
+                     "invalid base64 in bytes literal", pos};
+      }
+      return Token{TokenKind::kBytes, raw, pos};
+    }
+    if (c == '\n') {
+      return Token{TokenKind::kIllegal, "unterminated bytes literal", pos};
+    }
+    Advance();
+  }
+  return Token{TokenKind::kIllegal, "unterminated bytes literal", pos};
 }
 
 Token Lexer::LexDirective(Position pos) {

@@ -92,15 +92,24 @@ class Encoder {
 };
 
 void Encoder::EmitString(std::string_view s) {
+  static constexpr char kHex[] = "0123456789abcdef";
   out_ += '"';
-  for (char c : s) {
+  for (unsigned char c : s) {
     switch (c) {
       case '"': out_ += "\\\""; break;
       case '\\': out_ += "\\\\"; break;
       case '\n': out_ += "\\n"; break;
       case '\t': out_ += "\\t"; break;
       case '\r': out_ += "\\r"; break;
-      default: out_ += c; break;
+      default:
+        if (c < 0x20) {
+          out_ += "\\x";
+          out_ += kHex[c >> 4];
+          out_ += kHex[c & 0xF];
+        } else {
+          out_ += static_cast<char>(c);
+        }
+        break;
     }
   }
   out_ += '"';
