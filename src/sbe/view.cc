@@ -92,6 +92,12 @@ std::string_view View::String(std::string_view name) const {
   return std::string_view(p, n);
 }
 
+std::span<const uint8_t> View::Bytes(std::string_view name) const {
+  const FieldTemplate* ft = FindField(name);
+  if (!ft) return {};
+  return block_.subspan(ft->offset, ft->size);
+}
+
 GroupView View::Group(std::string_view name) const {
   if (!groups_) return GroupView({}, 0, 0, nullptr);
   // Groups follow the root block in declaration order. Each begins at

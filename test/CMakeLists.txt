@@ -55,7 +55,7 @@ endif()
 
 if(TARGET protowire_sbe)
   set(_sbe_test_srcs "")
-  foreach(f sbe_codec_test sbe_convert_test)
+  foreach(f sbe_codec_test sbe_convert_test sbe_navigation_test)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${f}.cc)
       list(APPEND _sbe_test_srcs ${f}.cc)
     endif()

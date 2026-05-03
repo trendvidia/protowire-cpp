@@ -66,7 +66,11 @@ class View {
   int64_t Int(std::string_view name) const;
   uint64_t Uint(std::string_view name) const;
   double Float(std::string_view name) const;
+  // String reads a fixed-length char field and trims trailing zero padding.
   std::string_view String(std::string_view name) const;
+  // Bytes reads a fixed-length bytes field as the full N-byte sub-span — no
+  // trim. Returns an empty span if the field name is unknown.
+  std::span<const uint8_t> Bytes(std::string_view name) const;
 
   GroupView Group(std::string_view name) const;
   View Composite(std::string_view name) const;
