@@ -101,6 +101,56 @@ TEST_F(PxfFast, OneofSingleFieldOK) {
   ASSERT_TRUE(st.ok());
 }
 
+// HARDENING.md § UTF-8: proto3 string fields must reject invalid byte
+// sequences materialized via PXF \xHH escapes (which the lexer accepts
+// because it doesn't know the destination field type).
+TEST_F(PxfFast, RejectsInvalidUtf8InStringField) {
+  auto msg = NewAllTypes();
+  // \xFF\xFE is not a valid UTF-8 sequence.
+  auto st = protowire::pxf::Unmarshal(R"(string_field = "\xFF\xFE")",
+                                       msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("UTF-8"), std::string::npos) << st.message();
+}
+
+TEST_F(PxfFast, AcceptsValidUtf8InStringField) {
+  auto msg = NewAllTypes();
+  // \xc3\xa9 is valid UTF-8 for U+00E9 (é).
+  auto st = protowire::pxf::Unmarshal(R"(string_field = "\xc3\xa9")",
+                                       msg.get());
+  EXPECT_TRUE(st.ok()) << st.ToString();
+}
+
+TEST_F(PxfFast, AcceptsInvalidUtf8InBytesField) {
+  // bytes fields impose no UTF-8 constraint per HARDENING.md.
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(bytes_field = "\xFF\xFE")",
+                                       msg.get());
+  EXPECT_TRUE(st.ok()) << st.ToString();
+}
+
+// HARDENING.md § Recursion: 200 levels of `nested_field { ... }` would
+// crash via stack overflow without the depth cap. The schema's nested_field
+// isn't self-recursive so we use the PXF parser directly via Parse() —
+// arbitrarily deep `{` blocks exercise the parser's depth counter.
+TEST_F(PxfFast, ParserRejectsExcessivelyDeepNesting) {
+  std::string src;
+  for (int i = 0; i < 200; ++i) src += "x{";
+  for (int i = 0; i < 200; ++i) src += "}";
+  auto doc = protowire::pxf::Parse(src);
+  ASSERT_FALSE(doc.ok());
+  EXPECT_NE(doc.status().message().find("nesting depth"), std::string::npos)
+      << doc.status().message();
+}
+
+TEST_F(PxfFast, ParserAcceptsBaselineNesting) {
+  std::string src;
+  for (int i = 0; i < 50; ++i) src += "x{";
+  for (int i = 0; i < 50; ++i) src += "}";
+  auto doc = protowire::pxf::Parse(src);
+  EXPECT_TRUE(doc.ok()) << doc.status().ToString();
+}
+
 TEST_F(PxfFast, FastPathRoundTripHeavy) {
   // Reasonably broad input — make sure the fast path covers all the
   // primitive types and structural cases at once.

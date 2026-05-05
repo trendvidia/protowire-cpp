@@ -54,6 +54,11 @@
 
 namespace protowire::pb {
 
+// HARDENING.md § Recursion: cap submessage / map-entry recursion depth on
+// untrusted input. Bounds native call-stack growth — a 100-deep `Tree`
+// rejects cleanly instead of overflowing the host thread's stack.
+inline constexpr int kMaxNestingDepth = 100;
+
 // ---- Field descriptor ---------------------------------------------------
 
 template <class Class, class Member>
@@ -146,14 +151,15 @@ template <class T>
 void MarshalStruct(const T& v, std::vector<uint8_t>& out);
 
 template <class T>
-Status UnmarshalStruct(std::span<const uint8_t> data, T& v);
+Status UnmarshalStruct(std::span<const uint8_t> data, T& v, int depth = 0);
 
 template <class T>
 void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v);
 
 template <class T>
 Status UnmarshalField(std::span<const uint8_t> data, uint32_t num,
-                      wire::WireType type, T& v, int& consumed);
+                      wire::WireType type, T& v, int& consumed,
+                      bool zigzag = false, int depth = 0);
 
 // ---- Big-number helpers (defined in big.cc) ------------------------------
 
@@ -288,7 +294,7 @@ inline void MarshalStruct(const T& v, std::vector<uint8_t>& out) {
 template <class T>
 inline Status UnmarshalScalar(std::span<const uint8_t> data,
                               wire::WireType type, T& v, int& consumed,
-                              bool zigzag = false) {
+                              bool zigzag = false, int depth = 0) {
   if constexpr (std::is_same_v<T, bool>) {
     uint64_t x;
     int n = wire::ConsumeVarint(data, x);
@@ -359,7 +365,11 @@ inline Status UnmarshalScalar(std::span<const uint8_t> data,
     int n = wire::ConsumeBytes(data, bytes);
     if (n < 0) return Status::Error("corrupt embedded message");
     consumed = n;
-    return UnmarshalStruct(bytes, v);
+    if (depth >= kMaxNestingDepth) {
+      return Status::Error("submessage nesting depth exceeds " +
+                           std::to_string(kMaxNestingDepth));
+    }
+    return UnmarshalStruct(bytes, v, depth + 1);
   } else {
     static_assert(sizeof(T) == 0, "protowire::pb: unsupported field type");
   }
@@ -369,18 +379,18 @@ inline Status UnmarshalScalar(std::span<const uint8_t> data,
 template <class T>
 inline Status UnmarshalField(std::span<const uint8_t> data, uint32_t num,
                              wire::WireType type, T& v, int& consumed,
-                             bool zigzag = false) {
+                             bool zigzag, int depth) {
   if constexpr (IsOptional<T>::value) {
     using E = typename IsOptional<T>::element;
     E tmp{};
-    Status st = UnmarshalScalar(data, type, tmp, consumed, zigzag);
+    Status st = UnmarshalScalar(data, type, tmp, consumed, zigzag, depth);
     if (!st.ok()) return st;
     v = std::move(tmp);
     return Status::OK();
   } else if constexpr (IsSmartPtr<T>::value) {
     using E = typename IsSmartPtr<T>::element;
     if (!v) v.reset(new E());
-    return UnmarshalScalar(data, type, *v, consumed, zigzag);
+    return UnmarshalScalar(data, type, *v, consumed, zigzag, depth);
   } else if constexpr (IsMap<T>::value) {
     using K = typename IsMap<T>::key_type;
     using V = typename IsMap<T>::mapped_type;
@@ -388,6 +398,11 @@ inline Status UnmarshalField(std::span<const uint8_t> data, uint32_t num,
     int n = wire::ConsumeBytes(data, entry_bytes);
     if (n < 0) return Status::Error("corrupt map entry");
     consumed = n;
+    if (depth >= kMaxNestingDepth) {
+      return Status::Error("submessage nesting depth exceeds " +
+                           std::to_string(kMaxNestingDepth));
+    }
+    const int child_depth = depth + 1;
     K key{};
     V val{};
     while (!entry_bytes.empty()) {
@@ -398,11 +413,13 @@ inline Status UnmarshalField(std::span<const uint8_t> data, uint32_t num,
       entry_bytes = entry_bytes.subspan(en);
       int sub_consumed = 0;
       if (enum_num == 1) {
-        Status st = UnmarshalField(entry_bytes, 1, etyp, key, sub_consumed, zigzag);
+        Status st = UnmarshalField(entry_bytes, 1, etyp, key, sub_consumed,
+                                   zigzag, child_depth);
         if (!st.ok()) return st;
         entry_bytes = entry_bytes.subspan(sub_consumed);
       } else if (enum_num == 2) {
-        Status st = UnmarshalField(entry_bytes, 2, etyp, val, sub_consumed, zigzag);
+        Status st = UnmarshalField(entry_bytes, 2, etyp, val, sub_consumed,
+                                   zigzag, child_depth);
         if (!st.ok()) return st;
         entry_bytes = entry_bytes.subspan(sub_consumed);
       } else {
@@ -418,17 +435,17 @@ inline Status UnmarshalField(std::span<const uint8_t> data, uint32_t num,
                        !std::is_same_v<T, std::vector<uint8_t>>) {
     using E = typename IsVector<T>::element;
     E tmp{};
-    Status st = UnmarshalScalar(data, type, tmp, consumed, zigzag);
+    Status st = UnmarshalScalar(data, type, tmp, consumed, zigzag, depth);
     if (!st.ok()) return st;
     v.push_back(std::move(tmp));
     return Status::OK();
   } else {
-    return UnmarshalScalar(data, type, v, consumed, zigzag);
+    return UnmarshalScalar(data, type, v, consumed, zigzag, depth);
   }
 }
 
 template <class T>
-inline Status UnmarshalStruct(std::span<const uint8_t> data, T& v) {
+inline Status UnmarshalStruct(std::span<const uint8_t> data, T& v, int depth) {
   while (!data.empty()) {
     wire::FieldNumber num;
     wire::WireType type;
@@ -443,7 +460,8 @@ inline Status UnmarshalStruct(std::span<const uint8_t> data, T& v) {
         [&](auto&&... f) {
           (((!matched && f.number == num)
                 ? (matched = true,
-                   st = UnmarshalField(data, num, type, v.*(f.ptr), consumed, f.zigzag),
+                   st = UnmarshalField(data, num, type, v.*(f.ptr), consumed,
+                                       f.zigzag, depth),
                    0)
                 : 0),
            ...);
