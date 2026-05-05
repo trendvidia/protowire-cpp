@@ -30,7 +30,13 @@ if(TARGET protowire_envelope AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/envelope_tes
   gtest_discover_tests(protowire_envelope_test)
 endif()
 
-if(TARGET protowire_pxf)
+# pxf/sbe tests use google::protobuf::compiler::Importer to load .proto
+# files at runtime, which requires linking libprotoc. Some installs (notably
+# Ubuntu's libprotobuf-dev without libprotoc-dev) don't ship libprotoc, in
+# which case FindProtobuf doesn't define protobuf::libprotoc. Skip these test
+# binaries when that target isn't available rather than failing configure —
+# non-test consumers (e.g. dump_envelope) shouldn't pay for missing test deps.
+if(TARGET protowire_pxf AND TARGET protobuf::libprotoc)
   set(_pxf_test_srcs "")
   foreach(f pxf_lexer_test pxf_parser_test pxf_decode_test pxf_encode_test
             pxf_null_test pxf_bignum_test pxf_features_test pxf_any_test
@@ -53,7 +59,7 @@ if(TARGET protowire_pxf)
   endif()
 endif()
 
-if(TARGET protowire_sbe)
+if(TARGET protowire_sbe AND TARGET protobuf::libprotoc)
   set(_sbe_test_srcs "")
   foreach(f sbe_codec_test sbe_convert_test sbe_navigation_test)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${f}.cc)
