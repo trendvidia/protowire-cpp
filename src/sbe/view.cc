@@ -101,18 +101,26 @@ std::span<const uint8_t> View::Bytes(std::string_view name) const {
 GroupView View::Group(std::string_view name) const {
   if (!groups_) return GroupView({}, 0, 0, nullptr);
   // Groups follow the root block in declaration order. Each begins at
-  // root + block_length + sum-of-prior-groups bytes.
+  // root + block_length + sum-of-prior-groups bytes. Every span/offset
+  // computation here is bounded against data_.size() — HARDENING.md § SBE
+  // step 3 requires that `pos + 4 + count*block_length` is checked in
+  // 64-bit before being used as a span offset.
   size_t pos = block_.size();  // Root block ends at block_.size() bytes.
   for (const GroupTemplate& gt : *groups_) {
-    if (data_.size() < pos + 4) break;
+    // Use checked subtraction to keep `pos + 8 + 4` from wrapping size_t.
+    if (data_.size() < 8u + 4u || pos > data_.size() - 8u - 4u) break;
     uint16_t entry_block = LoadU16(data_.data() + 8 + pos);
     uint16_t count = LoadU16(data_.data() + 8 + pos + 2);
+    // Reject the same zero-block-length × non-zero-count amplification
+    // pattern the active decoder rejects.
+    if (entry_block == 0 && count > 0) return GroupView({}, 0, 0, nullptr);
+    size_t body = size_t{entry_block} * count;
+    if (data_.size() - 8u - pos - 4u < body) break;
     if (gt.fd->name() == name) {
-      auto group_data = data_.subspan(8 + pos + 4,
-                                      static_cast<size_t>(entry_block) * count);
+      auto group_data = data_.subspan(8 + pos + 4, body);
       return GroupView(group_data, entry_block, count, &gt.fields);
     }
-    pos += 4 + size_t{entry_block} * count;
+    pos += 4 + body;
   }
   return GroupView({}, 0, 0, nullptr);
 }
@@ -122,11 +130,23 @@ View View::Composite(std::string_view name) const {
   if (!ft || ft->composite.empty()) {
     return View({}, {}, nullptr, nullptr, nullptr);
   }
+  // HARDENING.md § SBE step 5: validate composite_offset+composite_size ≤
+  // enclosing_block.size before constructing the sub-view.
+  if (size_t{ft->offset} + ft->size > block_.size()) {
+    return View({}, {}, nullptr, nullptr, nullptr);
+  }
   return View(data_, block_.subspan(ft->offset, ft->size), tmpl_,
               &ft->composite, nullptr);
 }
 
 View GroupView::Entry(size_t i) const {
+  // Bounds-check both the start and the end of the entry sub-span before
+  // calling subspan (whose precondition violation is UB).
+  if (block_length_ == 0 ||
+      i >= data_.size() / block_length_ ||
+      (i + 1) * block_length_ > data_.size()) {
+    return View({}, {}, nullptr, fields_, nullptr);
+  }
   auto entry = data_.subspan(i * block_length_, block_length_);
   return View({}, entry, nullptr, fields_, nullptr);
 }

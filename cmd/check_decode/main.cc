@@ -38,6 +38,7 @@
 
 #include "protowire/pb.h"
 #include "protowire/pxf.h"
+#include "protowire/sbe.h"
 
 namespace {
 
@@ -157,6 +158,35 @@ int PbDecode(const std::string& input, const std::string& schema) {
   return 1;
 }
 
+int SbeDecode(const std::string& input, const std::string& schema,
+              const std::string& proto) {
+  google::protobuf::DescriptorPool pool;
+  const auto* desc = LoadDescriptor(proto, &pool, schema);
+  google::protobuf::DynamicMessageFactory factory(&pool);
+  std::unique_ptr<google::protobuf::Message> msg(
+      factory.GetPrototype(desc)->New());
+
+  // Build a Codec over every file in the pool so any sbe.template_id under
+  // the adversarial.proto file (and its imports) is registered.
+  std::vector<const google::protobuf::FileDescriptor*> files;
+  files.push_back(desc->file());
+  auto codec = protowire::sbe::Codec::New(std::move(files));
+  if (!codec.ok()) {
+    std::fprintf(stderr, "reject: sbe codec build: %s\n",
+                 codec.status().message().c_str());
+    return 1;
+  }
+  std::string raw = ReadFile(input);
+  std::span<const uint8_t> bytes(reinterpret_cast<const uint8_t*>(raw.data()),
+                                 raw.size());
+  auto status = codec->Unmarshal(bytes, msg.get());
+  if (!status.ok()) {
+    std::fprintf(stderr, "reject: sbe: %s\n", status.message().c_str());
+    return 1;
+  }
+  return 0;
+}
+
 void Usage() {
   std::fprintf(stderr,
                "usage: check_decode --format <pxf|pb|sbe|envelope> "
@@ -191,10 +221,16 @@ int main(int argc, char** argv) {
   if (format == "pb") {
     return PbDecode(input, schema);
   }
-  if (format == "envelope" || format == "sbe") {
+  if (format == "sbe") {
+    if (proto.empty()) {
+      std::fprintf(stderr, "reject: --proto required for format=sbe\n");
+      return 1;
+    }
+    return SbeDecode(input, schema, proto);
+  }
+  if (format == "envelope") {
     std::fprintf(stderr,
-                 "reject: %s decode not yet implemented in this reference\n",
-                 format.c_str());
+                 "reject: envelope decode not yet implemented in this reference\n");
     return 1;
   }
   std::fprintf(stderr, "reject: unsupported format: %s\n", format.c_str());
