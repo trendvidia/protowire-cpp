@@ -39,6 +39,7 @@
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
 #include "protowire/detail/rfc3339.h"
+#include "protowire/detail/utf8.h"
 #include "protowire/pxf/annotations.h"
 #include "protowire/pxf/lexer.h"
 #include "protowire/pxf/wellknown.h"
@@ -52,6 +53,12 @@ using Reflection = pb::Reflection;
 using Message = pb::Message;
 
 namespace {
+
+// HARDENING.md § Recursion: every recursive descent on attacker-controlled
+// input must reject past this cap before allocating frame memory. Bounds
+// native call-stack growth so a 100k-deep input rejects cleanly instead of
+// SIGSEGV'ing on the host thread's fixed stack.
+constexpr int kMaxNestingDepth = 100;
 
 Status PosError(Position p, std::string msg) {
   if (p.line > 0) return Status::Error(p.line, p.column, std::move(msg));
@@ -144,6 +151,18 @@ class DirectDecoder {
   TypeResolver* resolver_ = nullptr;
   bool discard_unknown_ = false;
   std::string path_prefix_;
+  int depth_ = 0;
+};
+
+// Increments depth_ on construction, decrements on scope exit. Callers must
+// check `depth_ < kMaxNestingDepth` *before* constructing the guard so an
+// over-deep input rejects without ever growing the counter past the cap.
+struct DepthGuard {
+  int* depth;
+  explicit DepthGuard(int* d) : depth(d) { ++*depth; }
+  ~DepthGuard() { --*depth; }
+  DepthGuard(const DepthGuard&) = delete;
+  DepthGuard& operator=(const DepthGuard&) = delete;
 };
 
 // --- top-level body --------------------------------------------------------
@@ -243,10 +262,18 @@ Status DirectDecoder::DecodeFields(Message* msg, bool in_block) {
           if (!st.ok()) return st;
           break;
         }
+        if (depth_ >= kMaxNestingDepth) {
+          return PosError(current_.pos,
+                          "nesting depth exceeds " +
+                              std::to_string(kMaxNestingDepth));
+        }
         std::string saved = path_prefix_;
         path_prefix_ += std::string(fd->name());
         path_prefix_ += '.';
-        st = DecodeFields(sub, /*in_block=*/true);
+        {
+          DepthGuard g(&depth_);
+          st = DecodeFields(sub, /*in_block=*/true);
+        }
         path_prefix_ = std::move(saved);
         if (!st.ok()) return st;
         break;
@@ -357,10 +384,19 @@ Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
                         std::string(fd->name()) + "\"");
   }
   Advance();
+  if (depth_ >= kMaxNestingDepth) {
+    return PosError(current_.pos,
+                    "nesting depth exceeds " +
+                        std::to_string(kMaxNestingDepth));
+  }
   std::string saved = path_prefix_;
   path_prefix_ += std::string(fd->name());
   path_prefix_ += '.';
-  Status st = DecodeFields(sub, /*in_block=*/true);
+  Status st;
+  {
+    DepthGuard g(&depth_);
+    st = DecodeFields(sub, /*in_block=*/true);
+  }
   path_prefix_ = std::move(saved);
   return st;
 }
@@ -389,7 +425,16 @@ Status DirectDecoder::DecodeAnyInner(Message* any_msg) {
   }
   pb::DynamicMessageFactory factory(inner_desc->file()->pool());
   std::unique_ptr<Message> inner(factory.GetPrototype(inner_desc)->New());
-  Status st = DecodeFields(inner.get(), /*in_block=*/true);
+  if (depth_ >= kMaxNestingDepth) {
+    return PosError(current_.pos,
+                    "nesting depth exceeds " +
+                        std::to_string(kMaxNestingDepth));
+  }
+  Status st;
+  {
+    DepthGuard g(&depth_);
+    st = DecodeFields(inner.get(), /*in_block=*/true);
+  }
   if (!st.ok()) return st;
   std::string packed;
   if (!inner->SerializeToString(&packed)) {
@@ -464,7 +509,16 @@ Status DirectDecoder::DecodeListInline(Message* msg,
                           "expected '{' for repeated message element");
         }
         Advance();
-        Status st = DecodeFields(sub, /*in_block=*/true);
+        if (depth_ >= kMaxNestingDepth) {
+          return PosError(current_.pos,
+                          "nesting depth exceeds " +
+                              std::to_string(kMaxNestingDepth));
+        }
+        Status st;
+        {
+          DepthGuard g(&depth_);
+          st = DecodeFields(sub, /*in_block=*/true);
+        }
         if (!st.ok()) return st;
       }
     } else if (fd->cpp_type() == FieldDescriptor::CPPTYPE_ENUM) {
@@ -532,8 +586,16 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd) {
         return PosError(current_.pos, "expected '{' for map message value");
       }
       Advance();
-      st = DecodeFields(entry->GetReflection()->MutableMessage(entry, val_fd),
-                        /*in_block=*/true);
+      if (depth_ >= kMaxNestingDepth) {
+        return PosError(current_.pos,
+                        "nesting depth exceeds " +
+                            std::to_string(kMaxNestingDepth));
+      }
+      {
+        DepthGuard g(&depth_);
+        st = DecodeFields(entry->GetReflection()->MutableMessage(entry, val_fd),
+                          /*in_block=*/true);
+      }
       if (!st.ok()) return st;
     } else if (val_fd->cpp_type() == FieldDescriptor::CPPTYPE_ENUM) {
       st = SetEnum(entry, val_fd, /*repeated=*/false);
@@ -557,6 +619,10 @@ Status DirectDecoder::SetMapKey(Message* entry, const FieldDescriptor* key_fd,
   const Reflection* r = entry->GetReflection();
   switch (key_fd->cpp_type()) {
     case FieldDescriptor::CPPTYPE_STRING:
+      if (key_fd->type() == FieldDescriptor::TYPE_STRING &&
+          !detail::IsValidUtf8(key)) {
+        return PosError(pos, "invalid UTF-8 in map key");
+      }
       r->SetString(entry, key_fd, std::string(key));
       return Status::OK();
     case FieldDescriptor::CPPTYPE_INT32: {
@@ -602,7 +668,12 @@ Status DirectDecoder::SetScalar(Message* msg, const FieldDescriptor* fd) {
   const Reflection* r = msg->GetReflection();
   switch (fd->cpp_type()) {
     case FieldDescriptor::CPPTYPE_STRING: {
+      const bool is_string_field = fd->type() == FieldDescriptor::TYPE_STRING;
       if (current_.kind == TokenKind::kString) {
+        if (is_string_field && !detail::IsValidUtf8(current_.value)) {
+          return PosError(pos, "invalid UTF-8 in proto3 string field \"" +
+                                   std::string(fd->name()) + "\"");
+        }
         r->SetString(msg, fd, std::string(current_.value));
         Advance();
         return Status::OK();
@@ -611,8 +682,12 @@ Status DirectDecoder::SetScalar(Message* msg, const FieldDescriptor* fd) {
         auto decoded = detail::Base64DecodeStd(current_.value);
         if (!decoded.has_value())
           return PosError(pos, "invalid base64 in bytes literal");
-        r->SetString(msg, fd,
-                     std::string(decoded->begin(), decoded->end()));
+        std::string out(decoded->begin(), decoded->end());
+        if (is_string_field && !detail::IsValidUtf8(out)) {
+          return PosError(pos, "invalid UTF-8 in proto3 string field \"" +
+                                   std::string(fd->name()) + "\"");
+        }
+        r->SetString(msg, fd, std::move(out));
         Advance();
         return Status::OK();
       }
@@ -696,7 +771,12 @@ Status DirectDecoder::AddRepeatedScalar(Message* msg,
   const Reflection* r = msg->GetReflection();
   switch (fd->cpp_type()) {
     case FieldDescriptor::CPPTYPE_STRING: {
+      const bool is_string_field = fd->type() == FieldDescriptor::TYPE_STRING;
       if (current_.kind == TokenKind::kString) {
+        if (is_string_field && !detail::IsValidUtf8(current_.value)) {
+          return PosError(pos, "invalid UTF-8 in proto3 string field \"" +
+                                   std::string(fd->name()) + "\"");
+        }
         r->AddString(msg, fd, std::string(current_.value));
         Advance();
         return Status::OK();
@@ -705,7 +785,12 @@ Status DirectDecoder::AddRepeatedScalar(Message* msg,
         auto decoded = detail::Base64DecodeStd(current_.value);
         if (!decoded.has_value())
           return PosError(pos, "invalid base64");
-        r->AddString(msg, fd, std::string(decoded->begin(), decoded->end()));
+        std::string out(decoded->begin(), decoded->end());
+        if (is_string_field && !detail::IsValidUtf8(out)) {
+          return PosError(pos, "invalid UTF-8 in proto3 string field \"" +
+                                   std::string(fd->name()) + "\"");
+        }
+        r->AddString(msg, fd, std::move(out));
         Advance();
         return Status::OK();
       }
@@ -1083,7 +1168,12 @@ Status ApplyDefault(Message* msg, const FieldDescriptor* fd,
 // nested messages that were present in the input. Mirrors postDecode in
 // protowire-go/encoding/pxf/decode_fast.go.
 Status PostDecode(Message* msg, const Result* result,
-                  const FieldDescriptor* null_mask_fd, std::string prefix) {
+                  const FieldDescriptor* null_mask_fd, std::string prefix,
+                  int depth) {
+  if (depth > kMaxNestingDepth) {
+    return Status::Error("post-decode nesting depth exceeds " +
+                         std::to_string(kMaxNestingDepth));
+  }
   const auto* desc = msg->GetDescriptor();
   for (int i = 0; i < desc->field_count(); ++i) {
     const auto* fd = desc->field(i);
@@ -1106,7 +1196,7 @@ Status PostDecode(Message* msg, const Result* result,
         msg->GetReflection()->HasField(*msg, fd)) {
       Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
       if (Status st = PostDecode(sub, result, /*null_mask_fd=*/nullptr,
-                                 path + ".");
+                                 path + ".", depth + 1);
           !st.ok()) {
         return st;
       }
@@ -1132,7 +1222,10 @@ StatusOr<Result> UnmarshalFull(std::string_view data, Message* msg,
   Status st = d.Run();
   if (!st.ok()) return st;
   const auto* null_mask_fd = FindNullMaskField(msg->GetDescriptor());
-  if (Status pst = PostDecode(msg, &r, null_mask_fd, ""); !pst.ok()) return pst;
+  if (Status pst = PostDecode(msg, &r, null_mask_fd, "", /*depth=*/0);
+      !pst.ok()) {
+    return pst;
+  }
   return r;
 }
 

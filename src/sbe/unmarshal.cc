@@ -36,8 +36,9 @@ uint64_t LoadScalar(const uint8_t* p, size_t size) {
   return 0;
 }
 
-void DecodeFields(std::span<const uint8_t> block,
-                  const std::vector<FieldTemplate>& fields, pb::Message* msg);
+Status DecodeFields(std::span<const uint8_t> block,
+                    const std::vector<FieldTemplate>& fields,
+                    pb::Message* msg);
 
 void DecodeScalarField(const uint8_t* p, const FieldTemplate& ft,
                        pb::Message* msg) {
@@ -88,17 +89,31 @@ void DecodeScalarField(const uint8_t* p, const FieldTemplate& ft,
   }
 }
 
-void DecodeFields(std::span<const uint8_t> block,
-                  const std::vector<FieldTemplate>& fields,
-                  pb::Message* msg) {
+// DecodeFields walks `fields` against `block`. Returns Status::Error on the
+// first composite whose declared offset+size exceeds the enclosing block —
+// HARDENING.md § SBE step 5. Scalar fields are bounds-validated by the
+// caller's wire_block_length ≥ template_block_length check (step 2).
+Status DecodeFields(std::span<const uint8_t> block,
+                    const std::vector<FieldTemplate>& fields,
+                    pb::Message* msg) {
   for (const FieldTemplate& ft : fields) {
     if (!ft.composite.empty()) {
+      if (size_t{ft.offset} + ft.size > block.size()) {
+        return Status::Error(
+            "sbe: composite field \"" + std::string(ft.fd->name()) +
+            "\" exceeds enclosing block");
+      }
       pb::Message* sub = msg->GetReflection()->MutableMessage(msg, ft.fd);
-      DecodeFields(block.subspan(ft.offset, ft.size), ft.composite, sub);
+      if (Status st = DecodeFields(block.subspan(ft.offset, ft.size),
+                                   ft.composite, sub);
+          !st.ok()) {
+        return st;
+      }
       continue;
     }
     DecodeScalarField(block.data() + ft.offset, ft, msg);
   }
+  return Status::OK();
 }
 
 }  // namespace
@@ -114,10 +129,22 @@ Status Codec::Unmarshal(std::span<const uint8_t> data,
   // header layout matches Marshal — fields are sanity-checked but otherwise
   // ignored during decode (the codec is identified by message type).
   uint16_t block_length = LoadU16(data.data());
+  // HARDENING.md § SBE step 2: a wire block strictly smaller than the
+  // schema's block length means at least one field's offset+size exceeds
+  // the wire block, so reading any field would over-read. A wire block
+  // larger than the template is permitted (forward-compat — newer schema
+  // with extra trailing fields).
+  if (block_length < tmpl->block_length) {
+    return Status::Error("sbe: wire block_length below template");
+  }
   if (data.size() < 8u + block_length) {
     return Status::Error("sbe: data too short for root block");
   }
-  DecodeFields(data.subspan(8, block_length), tmpl->fields, msg);
+  if (Status st = DecodeFields(data.subspan(8, block_length), tmpl->fields,
+                               msg);
+      !st.ok()) {
+    return st;
+  }
 
   size_t pos = 8 + block_length;
   for (const GroupTemplate& gt : tmpl->groups) {
@@ -127,13 +154,33 @@ Status Codec::Unmarshal(std::span<const uint8_t> data,
     uint16_t entry_block = LoadU16(data.data() + pos);
     uint16_t count = LoadU16(data.data() + pos + 2);
     pos += 4;
+    // HARDENING.md § SBE step 4: zero entry_block_length with non-zero
+    // count would otherwise consume zero further bytes while allocating
+    // `count` writer entries — an attacker amplification primitive.
+    if (entry_block == 0 && count > 0) {
+      return Status::Error(
+          "sbe: group \"" + std::string(gt.fd->name()) +
+          "\" has zero entry_block_length but non-zero count");
+    }
+    // HARDENING.md § SBE step 2: each group entry must be at least the
+    // declared template block_length (smaller would mean fields over-read
+    // the wire entry).
+    if (count > 0 && entry_block < gt.block_length) {
+      return Status::Error(
+          "sbe: group \"" + std::string(gt.fd->name()) +
+          "\" entry_block_length below template");
+    }
     if (data.size() < pos + size_t{entry_block} * count) {
       return Status::Error("sbe: truncated group body");
     }
     const pb::Reflection* r = msg->GetReflection();
     for (uint16_t i = 0; i < count; ++i) {
       pb::Message* entry = r->AddMessage(msg, gt.fd);
-      DecodeFields(data.subspan(pos, entry_block), gt.fields, entry);
+      if (Status st = DecodeFields(data.subspan(pos, entry_block), gt.fields,
+                                   entry);
+          !st.ok()) {
+        return st;
+      }
       pos += entry_block;
     }
   }

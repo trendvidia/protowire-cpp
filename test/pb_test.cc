@@ -221,4 +221,55 @@ TEST(Pb, ZigZagMacro) {
   EXPECT_EQ(orig, got);
 }
 
+// Self-recursive struct used to exercise HARDENING.md § Recursion: the
+// decoder must reject past kMaxNestingDepth (100) before SIGSEGV'ing on a
+// fixed thread stack. Encoded by hand to avoid Marshal needing a finite
+// build.
+struct DeepTree {
+  std::unique_ptr<DeepTree> child;
+  PROTOWIRE_FIELDS(DeepTree, PROTOWIRE_FIELD(1, child))
+};
+
+TEST(PbHardening, RejectsExcessivelyNestedSubmessages) {
+  // Each level wraps the prior payload in a length-prefixed field-1 record:
+  //   tag(1, kBytes) = 0x0A, then varint(len), then payload.
+  std::vector<uint8_t> wire;  // empty = innermost leaf
+  for (int i = 0; i < 200; ++i) {
+    std::vector<uint8_t> next;
+    next.push_back(0x0A);  // (field=1, wire=kBytes)
+    // varint length
+    uint64_t len = wire.size();
+    while (len >= 0x80) {
+      next.push_back(static_cast<uint8_t>(len) | 0x80);
+      len >>= 7;
+    }
+    next.push_back(static_cast<uint8_t>(len));
+    next.insert(next.end(), wire.begin(), wire.end());
+    wire = std::move(next);
+  }
+  DeepTree t;
+  auto st = Unmarshal(wire, t);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("nesting depth"), std::string::npos)
+      << st.message();
+}
+
+TEST(PbHardening, AcceptsBaselineNesting) {
+  std::vector<uint8_t> wire;
+  for (int i = 0; i < 50; ++i) {
+    std::vector<uint8_t> next;
+    next.push_back(0x0A);
+    uint64_t len = wire.size();
+    while (len >= 0x80) {
+      next.push_back(static_cast<uint8_t>(len) | 0x80);
+      len >>= 7;
+    }
+    next.push_back(static_cast<uint8_t>(len));
+    next.insert(next.end(), wire.begin(), wire.end());
+    wire = std::move(next);
+  }
+  DeepTree t;
+  EXPECT_TRUE(Unmarshal(wire, t).ok());
+}
+
 }  // namespace

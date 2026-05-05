@@ -132,4 +132,26 @@ TEST_F(SbeCodec, EncodingOverrideNarrowsField) {
   EXPECT_EQ(bytes->size(), 8u + 29u);
 }
 
+// HARDENING.md § SBE step 2: a wire block_length below the schema's
+// template block_length means at least one field's offset+size exceeds the
+// wire block. The decoder must reject before reading any field.
+TEST_F(SbeCodec, RejectsWireBlockLengthBelowTemplate) {
+  // Order template_block = 29; assert by marshaling a default message.
+  auto orig = NewOrder();
+  auto encoded = codec_->Marshal(*orig);
+  ASSERT_TRUE(encoded.ok());
+  // Patch the wire header to declare block_length = 4 (well below 29).
+  auto bytes = *encoded;
+  bytes[0] = 4;
+  bytes[1] = 0;
+  // Truncate to header + 4 so no fields exist past the asserted block end.
+  bytes.resize(8 + 4);
+  auto got = NewOrder();
+  auto st = codec_->Unmarshal(bytes, got.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("wire block_length below template"),
+            std::string::npos)
+      << st.message();
+}
+
 }  // namespace

@@ -11,6 +11,10 @@ namespace protowire::pxf {
 
 namespace {
 
+// HARDENING.md § Recursion: cap nesting on attacker-controlled input to
+// keep the recursive descent below the host thread's stack budget.
+constexpr int kMaxNestingDepth = 100;
+
 class Parser {
  public:
   explicit Parser(std::string_view input) : lex_(input) { Advance(); }
@@ -30,6 +34,7 @@ class Parser {
   Lexer lex_;
   Token current_;
   std::vector<Comment> comments_;
+  int depth_ = 0;
 };
 
 void Parser::Advance() {
@@ -128,7 +133,14 @@ StatusOr<EntryPtr> Parser::ParseEntry() {
     }
     case TokenKind::kLBrace: {
       Advance();
+      if (depth_ >= kMaxNestingDepth) {
+        return Status::Error(current_.pos.line, current_.pos.column,
+                             "nesting depth exceeds " +
+                                 std::to_string(kMaxNestingDepth));
+      }
+      ++depth_;
       auto entries = ParseBody();
+      --depth_;
       if (!entries.ok()) return entries.status();
       auto b = std::make_unique<Block>();
       b->pos = pos;
@@ -235,15 +247,25 @@ StatusOr<ValuePtr> Parser::ParseValue() {
 StatusOr<ValuePtr> Parser::ParseList() {
   Position pos = current_.pos;
   Advance();  // [
+  if (depth_ >= kMaxNestingDepth) {
+    return Status::Error(pos.line, pos.column,
+                         "nesting depth exceeds " +
+                             std::to_string(kMaxNestingDepth));
+  }
+  ++depth_;
   auto list = std::make_unique<ListVal>();
   list->pos = pos;
   while (current_.kind != TokenKind::kRBracket &&
          current_.kind != TokenKind::kEOF) {
     auto e = ParseValue();
-    if (!e.ok()) return e.status();
+    if (!e.ok()) {
+      --depth_;
+      return e.status();
+    }
     list->elements.push_back(std::move(e).consume());
     if (current_.kind == TokenKind::kComma) Advance();
   }
+  --depth_;
   if (current_.kind != TokenKind::kRBracket) {
     return Status::Error(current_.pos.line, current_.pos.column,
                          std::string("expected ']', got ") +
@@ -256,7 +278,14 @@ StatusOr<ValuePtr> Parser::ParseList() {
 StatusOr<ValuePtr> Parser::ParseBlockVal() {
   Position pos = current_.pos;
   Advance();  // {
+  if (depth_ >= kMaxNestingDepth) {
+    return Status::Error(pos.line, pos.column,
+                         "nesting depth exceeds " +
+                             std::to_string(kMaxNestingDepth));
+  }
+  ++depth_;
   auto entries = ParseBody();
+  --depth_;
   if (!entries.ok()) return entries.status();
   auto bv = std::make_unique<BlockVal>();
   bv->pos = pos;
