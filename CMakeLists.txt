@@ -179,6 +179,13 @@ if(TARGET protowire_sbe AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cmd/bench_sbe/mai
   add_subdirectory(cmd/bench_sbe)
 endif()
 
+# HARDENING.md conformance corpus harness. Aggregated by
+# `protowire/scripts/cross_security_check.sh`. See ROADMAP M8.
+if(TARGET protowire_pxf AND TARGET protowire_pb
+   AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cmd/check_decode/main.cc)
+  add_subdirectory(cmd/check_decode)
+endif()
+
 if(PROTOWIRE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(test)
