@@ -77,7 +77,16 @@ _pwx_existing_sources(_sbe_srcs
   src/sbe/xmlschema.cc src/sbe/xmltoproto.cc src/sbe/prototoxml.cc)
 
 if(_pxf_srcs OR _sbe_srcs)
-  find_package(Protobuf REQUIRED CONFIG)
+  # Prefer the CONFIG package (Homebrew, vcpkg, source builds ship
+  # protobuf-config.cmake and bring abseil deps along). Fall back to the
+  # FindProtobuf module shipped with CMake (Ubuntu's libprotobuf-dev does
+  # not always install protobuf-config.cmake). Both expose the imported
+  # target protobuf::libprotobuf and the protobuf_generate() command
+  # (FindProtobuf gained protobuf_generate in CMake 3.27).
+  find_package(Protobuf QUIET CONFIG)
+  if(NOT Protobuf_FOUND)
+    find_package(Protobuf REQUIRED)
+  endif()
 
   # Homebrew's protobuf CONFIG exports PROTOBUF_USE_DLLS as an interface
   # compile def, which breaks compilation against the static-built install.
