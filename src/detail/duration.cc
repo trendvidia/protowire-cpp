@@ -3,6 +3,12 @@
 #include <cstdio>
 #include <cstdlib>
 
+// __int128 is a GCC/Clang extension used below for overflow-safe duration
+// arithmetic. -Wpedantic flags every use; silence it for this TU instead of
+// dropping the warning project-wide.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+
 namespace protowire::detail {
 
 namespace {
@@ -191,3 +197,5 @@ std::string FormatDuration(int64_t seconds, int32_t nanos) {
 }
 
 }  // namespace protowire::detail
+
+#pragma GCC diagnostic pop
