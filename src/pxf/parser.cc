@@ -21,7 +21,7 @@ class Parser {
   void Advance();
   std::vector<Comment> FlushComments();
 
-  StatusOr<EntryPtr> ParseEntry();
+  StatusOr<EntryPtr> ParseEntry(bool allow_map_entry);
   StatusOr<ValuePtr> ParseValue();
   StatusOr<ValuePtr> ParseList();
   StatusOr<ValuePtr> ParseBlockVal();
@@ -64,14 +64,17 @@ StatusOr<Document> Parser::ParseDocument() {
     Advance();
   }
   while (current_.kind != TokenKind::kEOF) {
-    auto e = ParseEntry();
+    // Top-level: only field_entry is allowed. The document represents a
+    // proto message, never a map<K,V>; map_entry (`:` form) is reserved
+    // for the inside of a '{ ... }' block. See docs/grammar.ebnf -> document.
+    auto e = ParseEntry(/*allow_map_entry=*/false);
     if (!e.ok()) return e.status();
     doc.entries.push_back(std::move(e).consume());
   }
   return doc;
 }
 
-StatusOr<EntryPtr> Parser::ParseEntry() {
+StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry) {
   auto leading = FlushComments();
   Position pos = current_.pos;
   // Accept the @type directive inside a block as an Assignment whose key is
@@ -100,11 +103,21 @@ StatusOr<EntryPtr> Parser::ParseEntry() {
         std::string("expected identifier, string, or integer, got ") +
             TokenKindName(current_.kind));
   }
+  TokenKind key_kind = current_.kind;
   std::string key(current_.value);
   Advance();
 
   switch (current_.kind) {
     case TokenKind::kEquals: {
+      // `=` denotes a field assignment on a proto message; the key must
+      // be an identifier. Map-style keys (string / integer) are only
+      // valid with `:`.
+      if (key_kind != TokenKind::kIdent) {
+        return Status::Error(
+            pos.line, pos.column,
+            std::string("field assignment with '=' requires an identifier key, got ") +
+                TokenKindName(key_kind) + " (\"" + key + "\"); use ':' for map entries");
+      }
       Advance();
       auto v = ParseValue();
       if (!v.ok()) return v.status();
@@ -116,6 +129,14 @@ StatusOr<EntryPtr> Parser::ParseEntry() {
       return EntryPtr(std::move(a));
     }
     case TokenKind::kColon: {
+      // Map entry. Only allowed inside a '{ ... }' block, never at
+      // document top level.
+      if (!allow_map_entry) {
+        return Status::Error(
+            pos.line, pos.column,
+            "map entry (':' form) is only allowed inside a '{ … }' block; "
+            "use '=' for top-level field assignments");
+      }
       Advance();
       auto v = ParseValue();
       if (!v.ok()) return v.status();
@@ -127,6 +148,14 @@ StatusOr<EntryPtr> Parser::ParseEntry() {
       return EntryPtr(std::move(m));
     }
     case TokenKind::kLBrace: {
+      // `{ ... }` denotes a submessage field; same identifier-only rule
+      // as `=` applies.
+      if (key_kind != TokenKind::kIdent) {
+        return Status::Error(
+            pos.line, pos.column,
+            std::string("submessage block requires an identifier key, got ") +
+                TokenKindName(key_kind) + " (\"" + key + "\")");
+      }
       Advance();
       auto entries = ParseBody();
       if (!entries.ok()) return entries.status();
@@ -268,7 +297,9 @@ StatusOr<std::vector<EntryPtr>> Parser::ParseBody() {
   std::vector<EntryPtr> out;
   while (current_.kind != TokenKind::kRBrace &&
          current_.kind != TokenKind::kEOF) {
-    auto e = ParseEntry();
+    // Inside a '{ ... }' block both forms are accepted; the schema layer
+    // disambiguates submessage vs map<K,V>.
+    auto e = ParseEntry(/*allow_map_entry=*/true);
     if (!e.ok()) return e.status();
     out.push_back(std::move(e).consume());
   }
