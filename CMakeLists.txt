@@ -77,7 +77,16 @@ _pwx_existing_sources(_sbe_srcs
   src/sbe/xmlschema.cc src/sbe/xmltoproto.cc src/sbe/prototoxml.cc)
 
 if(_pxf_srcs OR _sbe_srcs)
-  find_package(Protobuf REQUIRED CONFIG)
+  # Try CONFIG mode first — Homebrew, vcpkg, Conan, and modern
+  # source-installed protobuf all ship a `protobuf-config.cmake`. Fall
+  # back to MODULE mode (CMake's bundled FindProtobuf.cmake) for
+  # distros that package libprotobuf-dev without a CMake config —
+  # Debian and Ubuntu still do this through 24.04. Both modes expose
+  # the `protobuf::libprotobuf` imported target.
+  find_package(Protobuf QUIET CONFIG)
+  if(NOT Protobuf_FOUND)
+    find_package(Protobuf REQUIRED)
+  endif()
 
   # Homebrew's protobuf CONFIG exports PROTOBUF_USE_DLLS as an interface
   # compile def, which breaks compilation against the static-built install.

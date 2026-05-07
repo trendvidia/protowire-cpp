@@ -58,22 +58,28 @@ namespace protowire::pb {
 
 // ---- Field descriptor ---------------------------------------------------
 
+// clang-format off
+// Pointer-to-member declarations: clang-format's PointerAlignment
+// settings (Left/Right) handle plain pointer types but produce
+// inconsistent results for `Member Class::* ptr` across versions.
+// Format these by hand and skip the formatter on this block.
 template <class Class, class Member>
 struct FieldDef {
   uint32_t number;
-  Member Class::* ptr;
+  Member Class::*ptr;
   bool zigzag = false;  // signed ints: zigzag (sint32/sint64) vs plain varint (int32/int64)
 };
 
 template <uint32_t N, class Class, class Member>
-constexpr FieldDef<Class, Member> MakeField(Member Class::* ptr) {
+constexpr FieldDef<Class, Member> MakeField(Member Class::*ptr) {
   return {N, ptr, false};
 }
 
 template <uint32_t N, class Class, class Member>
-constexpr FieldDef<Class, Member> MakeFieldZigzag(Member Class::* ptr) {
+constexpr FieldDef<Class, Member> MakeFieldZigzag(Member Class::*ptr) {
   return {N, ptr, true};
 }
+// clang-format on
 
 // ---- Type traits --------------------------------------------------------
 
