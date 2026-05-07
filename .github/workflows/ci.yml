@@ -45,9 +45,13 @@ jobs:
             cmake_args: ""
           - os: windows-latest
             compiler: msvc
-            cc: cl
-            cxx: cl
-            cmake_args: "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows"
+            # On Windows the Visual Studio generator self-locates cl.exe;
+            # don't set CC/CXX (they wouldn't be on PATH for Git Bash
+            # anyway). Toolchain file resolved on the PowerShell side
+            # using $env:VCPKG_INSTALLATION_ROOT — see the per-OS
+            # Configure step below.
+            cc: ""
+            cxx: ""
     steps:
       - uses: actions/checkout@v6
 
@@ -69,12 +73,24 @@ jobs:
           # vcpkg ships pre-installed on windows-latest; just install protobuf.
           vcpkg install protobuf:x64-windows
 
-      - name: Configure
+      - name: Configure (Linux / macOS)
+        if: runner.os != 'Windows'
         env:
           CC:  ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
-        shell: bash
-        run: cmake -S . -B build ${{ matrix.cmake_args }}
+        run: cmake -S . -B build
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # Visual Studio generator finds cl.exe automatically; the
+        # toolchain file routes find_package() through vcpkg's port
+        # database. x64-windows triplet matches the protobuf install
+        # above.
+        run: |
+          cmake -S . -B build `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            "-DVCPKG_TARGET_TRIPLET=x64-windows"
 
       - name: Build
         run: cmake --build build --config Release -j
