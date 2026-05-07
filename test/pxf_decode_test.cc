@@ -8,6 +8,7 @@
 #include "protowire/pxf.h"
 
 #include <gtest/gtest.h>
+#include "protoc_compat.h"
 
 #include <memory>
 #include <string>
@@ -22,10 +23,7 @@ namespace pb = google::protobuf;
 
 class SilentErrorCollector : public pb::compiler::MultiFileErrorCollector {
  public:
-  void RecordError(absl::string_view filename,
-                   int line,
-                   int column,
-                   absl::string_view msg) override {
+  PROTOWIRE_PROTOC_RECORD_ERROR(filename, line, column, msg) {
     last_ = std::string(filename) + ":" + std::to_string(line) + ":" + std::to_string(column) +
             ": " + std::string(msg);
   }
