@@ -249,10 +249,5 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: build-cov/coverage.lcov
-          # Soft-fail: upload errors (e.g. repo not yet registered on
-          # Codecov, transient 5xx) don't fail CI. The lcov artifact
-          # above is always available regardless. Flip this back to
-          # true once trendvidia/protowire-cpp is fully set up at
-          # https://app.codecov.io/gh/trendvidia/protowire-cpp.
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           verbose: true
