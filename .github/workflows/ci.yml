@@ -210,11 +210,19 @@ jobs:
 
       - name: Build + test
         env:
-          LLVM_PROFILE_FILE: "build-cov/coverage/%p.profraw"
+          # Absolute path: each test binary resolves LLVM_PROFILE_FILE
+          # against its own working directory (the build subdir CTest
+          # invokes it from), so a relative path lands in the wrong
+          # place. %m is the binary's name, %p its PID — together they
+          # disambiguate test binaries from each other.
+          LLVM_PROFILE_FILE: "${{ github.workspace }}/build-cov/coverage/%m_%p.profraw"
         run: |
           cmake --build build-cov -j
           mkdir -p build-cov/coverage
           ctest --test-dir build-cov --output-on-failure
+          echo "--- profraw files produced ---"
+          find build-cov/coverage -name '*.profraw' | head -10
+          echo "($(find build-cov/coverage -name '*.profraw' | wc -l) profraw files total)"
 
       - name: Generate lcov report
         run: |
