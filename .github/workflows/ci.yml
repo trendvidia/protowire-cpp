@@ -60,7 +60,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ${{ matrix.compiler }} protobuf-compiler libprotobuf-dev
+            ${{ matrix.compiler }} protobuf-compiler libprotobuf-dev libprotoc-dev
 
       - name: Install protobuf (macOS)
         if: runner.os == 'macOS'
@@ -114,7 +114,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang-18 llvm-18 protobuf-compiler libprotobuf-dev
+            clang-18 llvm-18 protobuf-compiler libprotobuf-dev libprotoc-dev
 
       - name: Configure
         env:
@@ -167,7 +167,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang-18 clang-tidy-18 protobuf-compiler libprotobuf-dev
+            clang-18 clang-tidy-18 protobuf-compiler libprotobuf-dev libprotoc-dev
 
       - name: Configure with compile_commands.json
         env:
@@ -198,7 +198,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang-18 llvm-18 lcov protobuf-compiler libprotobuf-dev
+            clang-18 llvm-18 lcov protobuf-compiler libprotobuf-dev libprotoc-dev
 
       - name: Configure
         env:
