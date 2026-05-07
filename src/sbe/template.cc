@@ -19,6 +19,12 @@ std::vector<const pb::FieldDescriptor*> SortedFields(const pb::Descriptor* md) {
   std::vector<const pb::FieldDescriptor*> out;
   out.reserve(md->field_count());
   for (int i = 0; i < md->field_count(); ++i) out.push_back(md->field(i));
+  // The comparator orders by the proto field's `number()` (a stable
+  // schema-defined integer), not by pointer address — clang-tidy's
+  // bugprone-nondeterministic-pointer-iteration-order flags any std::sort
+  // over a pointer container, but the resulting order is fully
+  // deterministic across runs.
+  // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
   std::sort(out.begin(), out.end(), [](auto* a, auto* b) { return a->number() < b->number(); });
   return out;
 }

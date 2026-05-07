@@ -91,7 +91,11 @@ std::optional<Timestamp> ParseRFC3339(std::string_view s) {
   }
 
   int64_t days = DaysFromCivil(year, static_cast<unsigned>(month), static_cast<unsigned>(day));
-  int64_t secs = days * 86400 + hour * 3600 + minute * 60 + second;
+  // Widen each int operand to int64 before multiplying so the products are
+  // computed in int64 arithmetic rather than int (clang-tidy:
+  // bugprone-implicit-widening-of-multiplication-result).
+  int64_t secs =
+      days * 86400 + static_cast<int64_t>(hour) * 3600 + static_cast<int64_t>(minute) * 60 + second;
   secs -= tz_offset_sec;
   return Timestamp{secs, nanos};
 }
