@@ -21,6 +21,18 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
 endif()
 
+if(MSVC)
+  # /utf-8           — treat source files (and narrow string literals)
+  #                    as UTF-8 so literal multi-byte characters
+  #                    (`café`, `日本語`, etc.) compile correctly.
+  # /Zc:__cplusplus  — report the actual __cplusplus value, not the
+  #                    legacy 199711L MSVC defaults to.
+  # /permissive-     — strict-mode parser (closer to GCC/Clang).
+  # /wd4267          — silence size_t→int narrowing warnings the
+  #                    protobuf descriptor APIs trigger.
+  add_compile_options(/utf-8 /Zc:__cplusplus /permissive- /wd4267)
+endif()
+
 # Some macOS systems still have an old protobuf at /usr/local/include that
 # clang adds to its default search path before any -isystem path. Force
 # /opt/homebrew/include to be searched first (only if it exists) so that
