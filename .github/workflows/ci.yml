@@ -237,10 +237,22 @@ jobs:
             --ignore-filename-regex='(third_party|build-cov|test/|_deps)' \
             > build-cov/coverage.lcov
 
+      - name: Upload lcov as a GitHub artifact (always available)
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-lcov
+          path: build-cov/coverage.lcov
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: build-cov/coverage.lcov
-          fail_ci_if_error: true
+          # Soft-fail: upload errors (e.g. repo not yet registered on
+          # Codecov, transient 5xx) don't fail CI. The lcov artifact
+          # above is always available regardless. Flip this back to
+          # true once trendvidia/protowire-cpp is fully set up at
+          # https://app.codecov.io/gh/trendvidia/protowire-cpp.
+          fail_ci_if_error: false
           verbose: true
