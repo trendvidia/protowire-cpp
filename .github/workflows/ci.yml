@@ -1,0 +1,222 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 TrendVidia, LLC.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Build + test matrix across Linux × {gcc-13, clang-18}, macOS,
+  # Windows × MSVC. Protobuf comes from the platform package manager on
+  # Linux/macOS and from vcpkg on Windows.
+  # ---------------------------------------------------------------------
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.compiler }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            compiler: gcc-13
+            cc: gcc-13
+            cxx: g++-13
+            cmake_args: ""
+          - os: ubuntu-latest
+            compiler: clang-18
+            cc: clang-18
+            cxx: clang++-18
+            cmake_args: ""
+          - os: macos-latest
+            compiler: appleclang
+            cc: clang
+            cxx: clang++
+            cmake_args: ""
+          - os: windows-latest
+            compiler: msvc
+            cc: cl
+            cxx: cl
+            cmake_args: "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install protobuf (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ${{ matrix.compiler }} protobuf-compiler libprotobuf-dev
+
+      - name: Install protobuf (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protobuf (Windows / vcpkg)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # vcpkg ships pre-installed on windows-latest; just install protobuf.
+          vcpkg install protobuf:x64-windows
+
+      - name: Configure
+        env:
+          CC:  ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        shell: bash
+        run: cmake -S . -B build ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Test
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+  # ---------------------------------------------------------------------
+  # AddressSanitizer + UndefinedBehaviorSanitizer build. Linux/clang
+  # because that combo has the most mature sanitizer runtimes; the run
+  # exercises the full test suite, which is dense fixture coverage of
+  # every parser/decoder path.
+  # ---------------------------------------------------------------------
+  sanitizers:
+    name: ASan + UBSan (Linux/clang)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-18 llvm-18 protobuf-compiler libprotobuf-dev
+
+      - name: Configure
+        env:
+          CC:  clang-18
+          CXX: clang++-18
+          CXXFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined
+          LDFLAGS:  -fsanitize=address,undefined
+        run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build + test under sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          cmake --build build-asan -j
+          ctest --test-dir build-asan --output-on-failure
+
+  # ---------------------------------------------------------------------
+  # clang-format check: every staged change must already be formatted.
+  # ---------------------------------------------------------------------
+  clang-format:
+    name: clang-format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install clang-format-18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format-18
+
+      - name: Run clang-format --dry-run -Werror
+        run: |
+          # Format-check our own source; skip third_party/ vendored copies.
+          mapfile -t files < <(find include src test cmd \
+            \( -name '*.cc' -o -name '*.h' -o -name '*.hpp' \))
+          clang-format-18 --dry-run -Werror --style=file "${files[@]}"
+
+  # ---------------------------------------------------------------------
+  # clang-tidy gating job. Runs against the build's compile_commands.json
+  # so it has the full TU set; only diagnoses files we actually compile.
+  # ---------------------------------------------------------------------
+  clang-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-18 clang-tidy-18 protobuf-compiler libprotobuf-dev
+
+      - name: Configure with compile_commands.json
+        env:
+          CC:  clang-18
+          CXX: clang++-18
+        run: cmake -S . -B build-tidy -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Generate proto-derived sources (clang-tidy needs them present)
+        run: cmake --build build-tidy --target protowire_proto -j 2>/dev/null || cmake --build build-tidy -j
+
+      - name: Run clang-tidy
+        run: |
+          mapfile -t files < <(find include src \
+            \( -name '*.cc' -o -name '*.h' -o -name '*.hpp' \) \
+            -not -path '*/third_party/*')
+          clang-tidy-18 -p build-tidy --warnings-as-errors='*' "${files[@]}"
+
+  # ---------------------------------------------------------------------
+  # Coverage build (Linux/clang) → llvm-cov → Codecov upload.
+  # ---------------------------------------------------------------------
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-18 llvm-18 lcov protobuf-compiler libprotobuf-dev
+
+      - name: Configure
+        env:
+          CC:  clang-18
+          CXX: clang++-18
+          CXXFLAGS: -fprofile-instr-generate -fcoverage-mapping
+          LDFLAGS:  -fprofile-instr-generate -fcoverage-mapping
+        run: cmake -S . -B build-cov -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build + test
+        env:
+          LLVM_PROFILE_FILE: "build-cov/coverage/%p.profraw"
+        run: |
+          cmake --build build-cov -j
+          mkdir -p build-cov/coverage
+          ctest --test-dir build-cov --output-on-failure
+
+      - name: Generate lcov report
+        run: |
+          # Merge per-process raw profiles, then export to lcov format
+          # so codecov-action picks it up the standard way.
+          llvm-profdata-18 merge -sparse build-cov/coverage/*.profraw \
+            -o build-cov/coverage.profdata
+          mapfile -t test_bins < <(find build-cov/test -maxdepth 2 -type f -executable)
+          llvm-cov-18 export -format=lcov \
+            -instr-profile=build-cov/coverage.profdata \
+            "${test_bins[@]}" \
+            --ignore-filename-regex='(third_party|build-cov|test/|_deps)' \
+            > build-cov/coverage.lcov
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: build-cov/coverage.lcov
+          fail_ci_if_error: true
+          verbose: true

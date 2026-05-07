@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 TrendVidia, LLC.
+
+# Google C++ style with a few project-specific overrides. See
+# https://clang.llvm.org/docs/ClangFormatStyleOptions.html for the
+# full option reference.
+BasedOnStyle: Google
+Language:     Cpp
+Standard:     c++20
+
+# 100 columns matches the Wall-Street-house-style we see most often;
+# 80 is too tight for protobuf descriptor type names.
+ColumnLimit:  100
+IndentWidth:  2
+TabWidth:     2
+UseTab:       Never
+
+# Headers come in #include groups already organised by purpose
+# (project-local, sibling-package, system); preserve author intent
+# rather than reshuffling.
+SortIncludes:           CaseSensitive
+IncludeBlocks:          Preserve
+
+# C++ specifics
+DerivePointerAlignment: false
+PointerAlignment:       Left            # `int* x;` not `int *x;`
+AllowShortFunctionsOnASingleLine: Inline
+AlwaysBreakTemplateDeclarations:  Yes
+
+# Prefer breaking before the comma in long argument lists for clean diffs.
+BinPackArguments:  false
+BinPackParameters: false

@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 TrendVidia, LLC.
+#
+# clang-tidy configuration for protowire-cpp.
+#
+# Enabled check categories (lightweight starting set; ratchet up):
+#   bugprone-*       — likely bugs (unintentional copies, narrowing, …)
+#   cert-*           — security-relevant patterns (filtered to the
+#                      C++ side; the C-only ones are noise here)
+#   cppcoreguidelines-*  — selected rules; the full set is too noisy
+#                      for a port that intentionally uses raw bytes /
+#                      pointer arithmetic in the SBE View API
+#   modernize-use-* — encourage range-for, nullptr, override, etc.
+#   performance-*    — avoid unnecessary copies, faster string ops
+#   readability-*    — selected; we don't enforce identifier-length
+#                      rules
+#
+# Suppressions are line-scoped via `// NOLINT(rule-name)` with a
+# one-line comment explaining why; whole-file or whole-function
+# suppressions need maintainer approval.
+
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  cert-*,
+  -cert-err58-cpp,
+  -cert-msc30-c,
+  -cert-msc50-cpp,
+  cppcoreguidelines-pro-type-static-cast-downcast,
+  cppcoreguidelines-slicing,
+  cppcoreguidelines-special-member-functions,
+  modernize-use-default-member-init,
+  modernize-use-equals-default,
+  modernize-use-equals-delete,
+  modernize-use-nullptr,
+  modernize-use-override,
+  modernize-use-trailing-return-type,
+  performance-*,
+  -performance-no-int-to-ptr,
+  readability-braces-around-statements,
+  readability-const-return-type,
+  readability-container-size-empty,
+  readability-inconsistent-declaration-parameter-name,
+  readability-redundant-*,
+  readability-string-compare,
+
+WarningsAsErrors: ''
+HeaderFilterRegex: '^(include|src)/protowire/.*'
+FormatStyle: file
+
+CheckOptions:
+  - key:   modernize-use-trailing-return-type.ApplyForLambdas
+    value: 'false'
+  - key:   readability-braces-around-statements.ShortStatementLines
+    value: '2'

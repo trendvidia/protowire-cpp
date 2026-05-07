@@ -1,0 +1,67 @@
+@type test.v1.AllTypes
+
+# Scalar fields
+string_field = "hello world"
+int32_field = 42
+int64_field = 1234567890
+uint32_field = 100
+uint64_field = 999999999
+float_field = 3.14
+double_field = 2.718281828
+bool_field = true
+bytes_field = b"SGVsbG8gV29ybGQ="
+
+# Enum
+enum_field = STATUS_ACTIVE
+
+# Nested message (block syntax)
+nested_field {
+  name = "inner"
+  value = 99
+}
+
+# Repeated scalars (commas optional)
+repeated_string = ["alpha", "beta", "gamma"]
+
+# Repeated messages (list of blocks)
+repeated_nested = [
+  {
+    name = "first"
+    value = 1
+  }
+  {
+    name = "second"
+    value = 2
+  }
+]
+
+# Maps use : for key-value pairs
+string_map = {
+  env: "production"
+  team: "platform"
+  "special key": "with spaces"
+}
+
+nested_map = {
+  primary: {
+    name = "primary node"
+    value = 10
+  }
+}
+
+int_map = {
+  404: "Not Found"
+  500: "Internal Error"
+}
+
+# Well-known type literals
+ts_field = 2024-01-15T10:30:00Z
+dur_field = 1h30m
+
+# Oneof — just set the field you want
+text_choice = "selected"
+
+# Wrapper type sugar
+nullable_string = "present"
+nullable_int = 42
+nullable_bool = true

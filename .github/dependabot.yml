@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 TrendVidia, LLC.
+#
+# Dependabot doesn't understand C++ package managers (no Conan / vcpkg
+# / CMake FetchContent ecosystem support yet), so we only auto-bump
+# GitHub Actions here. The third_party/ vendored libraries (CLI11) are
+# updated manually with explicit license review per CONTRIBUTING.md.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps(actions)"
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-and-patch:
+        update-types: ["minor", "patch"]

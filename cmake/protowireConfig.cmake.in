@@ -1,0 +1,16 @@
+@PACKAGE_INIT@
+
+# protowire-cpp consumer-facing CMake config. Used by:
+#   find_package(protowire CONFIG REQUIRED)
+#   target_link_libraries(my_app PRIVATE protowire::pxf protowire::sbe)
+#
+# Resolves the protobuf transitive dependency the same way the build
+# itself did (CONFIG-mode lookup). Consumers don't need to call
+# find_package(Protobuf) themselves.
+
+include(CMakeFindDependencyMacro)
+find_dependency(Protobuf CONFIG)
+
+include("${CMAKE_CURRENT_LIST_DIR}/protowireTargets.cmake")
+
+check_required_components(protowire)

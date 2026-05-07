@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 TrendVidia, LLC.
+#
+# Code ownership for protowire-cpp.
+
+*                              @trendvidia/maintainers
+
+# --- Wire-impacting source (cross-port equivalence promise applies) ------
+# Native-code memory-safety scrutiny applies to everything in here.
+/include/protowire/             @trendvidia/maintainers
+/src/pb/                        @trendvidia/maintainers
+/src/pxf/                       @trendvidia/maintainers
+/src/sbe/                       @trendvidia/maintainers
+/src/envelope/                  @trendvidia/maintainers
+
+# --- Vendored proto annotations (part of the upstream wire contract) -----
+/proto/                         @trendvidia/maintainers
+
+# --- Tests + CLI harness (open to broader reviewer pool) ----------------
+/test/                          @trendvidia/contributors @trendvidia/maintainers
+/cmd/                           @trendvidia/contributors @trendvidia/maintainers
+
+# --- Vendored third-party (license review on every bump) ----------------
+/third_party/                   @trendvidia/maintainers
+
+# --- Build, CI, repo plumbing -------------------------------------------
+/.github/                       @trendvidia/maintainers
+/CMakeLists.txt                 @trendvidia/maintainers
+/cmake/                         @trendvidia/maintainers
+/.clang-format                  @trendvidia/maintainers
+/.clang-tidy                    @trendvidia/maintainers
