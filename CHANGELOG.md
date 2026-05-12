@@ -13,6 +13,25 @@ format changes.
 
 ### Added
 
+- **`Result::Directives()` and `Result::Tables()` accessors.** The
+  fast-path direct decoder now populates the document-root directive
+  list and `@table` directive list on `Result` during
+  `UnmarshalFull`, so consumers can read them after a decode call.
+  - `Result::Directives()` returns the generic
+    `@<name> *(prefix) [{ ... }]` blocks in source order, with raw
+    body bytes preserved verbatim for downstream re-parsing
+    (chameleon's `@header T { ... }` reader, etc.). A single prefix
+    populates the back-compat `type` field; two or more leave it
+    empty and consumers read `prefixes[]` directly.
+  - `Result::Tables()` returns the `@table` directives with full
+    column metadata and parsed cell values per row, faithful to the
+    three-state cell grammar (absent / present-but-null /
+    present-with-value).
+  - `Unmarshal` (vs `UnmarshalFull`) still passes a null Result and
+    walks directives without allocating any AST nodes — the fast
+    path retains its zero-allocation contract on the hot path.
+
+
 - **PXF schema reserved-name validator (`SchemaValidator`, draft §3.13).**
   Rejects protobuf schemas that declare a message field, oneof, or
   enum value whose name is case-sensitively equal to a PXF value
