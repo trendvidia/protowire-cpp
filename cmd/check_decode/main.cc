@@ -29,6 +29,7 @@
 // descriptor-bound inputs, so we test the descriptor-driven path here
 // (which is what the spec's adversarial PB corpus exercises against).
 
+#include <sys/stat.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -38,7 +39,6 @@
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <sys/stat.h>
 
 #include <google/protobuf/compiler/importer.h>
 #include <google/protobuf/descriptor.h>
@@ -56,13 +56,11 @@ namespace pb = google::protobuf;
 // harness's protoc_compat.h, inlined here so check_decode doesn't drag
 // in the test/ include tree.
 #if defined(GOOGLE_PROTOBUF_VERSION) && GOOGLE_PROTOBUF_VERSION >= 4000000
-#define PROTOWIRE_RECORD_ERROR_SIGNATURE                                  \
-  void RecordError(absl::string_view filename, int line, int column,      \
-                   absl::string_view msg) override
+#define PROTOWIRE_RECORD_ERROR_SIGNATURE \
+  void RecordError(absl::string_view filename, int line, int column, absl::string_view msg) override
 #else
-#define PROTOWIRE_RECORD_ERROR_SIGNATURE                                  \
-  void AddError(const std::string& filename, int line, int column,        \
-                const std::string& msg) override
+#define PROTOWIRE_RECORD_ERROR_SIGNATURE \
+  void AddError(const std::string& filename, int line, int column, const std::string& msg) override
 #endif
 
 class CollectErrors : public pb::compiler::MultiFileErrorCollector {
@@ -96,7 +94,7 @@ std::string ReadFile(const std::string& path, std::string* err) {
 }
 
 bool DirExists(const std::string& path) {
-  struct stat st {};
+  struct stat st{};
   return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
@@ -135,8 +133,7 @@ const pb::Descriptor* LoadDescriptor(const std::string& proto_path,
     *err = "compile " + proto_path + ": " + errors->last;
     return nullptr;
   }
-  const pb::Descriptor* desc =
-      importer->pool()->FindMessageTypeByName(schema);
+  const pb::Descriptor* desc = importer->pool()->FindMessageTypeByName(schema);
   if (desc == nullptr) {
     *err = "schema \"" + schema + "\" not found in " + proto_path;
     return nullptr;
@@ -144,8 +141,10 @@ const pb::Descriptor* LoadDescriptor(const std::string& proto_path,
   return desc;
 }
 
-bool PxfDecode(std::string_view data, const std::string& schema,
-               const std::string& proto_path, std::string* err) {
+bool PxfDecode(std::string_view data,
+               const std::string& schema,
+               const std::string& proto_path,
+               std::string* err) {
   if (proto_path.empty()) {
     *err = "--proto is required for format=pxf";
     return false;
@@ -153,8 +152,7 @@ bool PxfDecode(std::string_view data, const std::string& schema,
   pb::compiler::DiskSourceTree tree;
   CollectErrors errors;
   pb::compiler::Importer importer(&tree, &errors);
-  const pb::Descriptor* desc =
-      LoadDescriptor(proto_path, schema, &importer, &tree, &errors, err);
+  const pb::Descriptor* desc = LoadDescriptor(proto_path, schema, &importer, &tree, &errors, err);
   if (desc == nullptr) return false;
 
   pb::DynamicMessageFactory factory(importer.pool());
@@ -167,8 +165,10 @@ bool PxfDecode(std::string_view data, const std::string& schema,
   return true;
 }
 
-bool PbDecode(std::string_view data, const std::string& schema,
-              const std::string& proto_path, std::string* err) {
+bool PbDecode(std::string_view data,
+              const std::string& schema,
+              const std::string& proto_path,
+              std::string* err) {
   if (proto_path.empty()) {
     *err = "--proto is required for format=pb";
     return false;
@@ -176,8 +176,7 @@ bool PbDecode(std::string_view data, const std::string& schema,
   pb::compiler::DiskSourceTree tree;
   CollectErrors errors;
   pb::compiler::Importer importer(&tree, &errors);
-  const pb::Descriptor* desc =
-      LoadDescriptor(proto_path, schema, &importer, &tree, &errors, err);
+  const pb::Descriptor* desc = LoadDescriptor(proto_path, schema, &importer, &tree, &errors, err);
   if (desc == nullptr) return false;
 
   pb::DynamicMessageFactory factory(importer.pool());
@@ -212,11 +211,16 @@ int main(int argc, char** argv) {
       if (i + 1 >= argc) Usage(2);
       *out = argv[++i];
     };
-    if (arg == "--format") take(&format);
-    else if (arg == "--schema") take(&schema);
-    else if (arg == "--proto") take(&proto_path);
-    else if (arg == "--input") take(&input);
-    else if (arg == "-h" || arg == "--help") Usage(0);
+    if (arg == "--format")
+      take(&format);
+    else if (arg == "--schema")
+      take(&schema);
+    else if (arg == "--proto")
+      take(&proto_path);
+    else if (arg == "--input")
+      take(&input);
+    else if (arg == "-h" || arg == "--help")
+      Usage(0);
     else {
       std::fprintf(stderr, "unknown argument: %s\n", argv[i]);
       Usage(2);
@@ -240,8 +244,8 @@ int main(int argc, char** argv) {
     // Not implemented in this port's check_decode tier; the cross-port
     // harness will simply not have a verdict for this row (manifest
     // entries can mark per-port skips).
-    std::fprintf(stderr, "reject: format=%s not yet implemented in C++ check_decode\n",
-                 format.c_str());
+    std::fprintf(
+        stderr, "reject: format=%s not yet implemented in C++ check_decode\n", format.c_str());
     return 2;
   } else {
     std::fprintf(stderr, "reject: unsupported format: %s\n", format.c_str());
