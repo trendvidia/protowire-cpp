@@ -11,17 +11,61 @@
 // accessors, TableReader, BindRow) arrives in later PRs of the
 // v0.72-v0.75 cpp catch-up sequence.
 
+#include "protowire/pxf.h"
 #include "protowire/pxf/parser.h"
 
 #include <gtest/gtest.h>
+#include "protoc_compat.h"
 
+#include <memory>
+#include <string>
 #include <string_view>
 
+#include <google/protobuf/compiler/importer.h>
+#include <google/protobuf/dynamic_message.h>
+
 namespace {
+
+namespace pb = google::protobuf;
 
 using protowire::pxf::Document;
 using protowire::pxf::Parse;
 using protowire::pxf::TableDirective;
+
+class SilentErrorCollector : public pb::compiler::MultiFileErrorCollector {
+ public:
+  PROTOWIRE_PROTOC_RECORD_ERROR(filename, line, column, msg) {
+    last_ = std::string(filename) + ":" + std::to_string(line) + ":" + std::to_string(column) +
+            ": " + std::string(msg);
+  }
+  std::string last_;
+};
+
+// Fixture for fast-path decode tests: runtime-compiles test.proto and
+// exposes a fresh test.v1.AllTypes message per test. Mirrors the
+// existing PxfFast / PxfDecode fixtures in this directory.
+class PxfDirectiveFast : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    source_tree_.MapPath("", TESTDATA_DIR);
+    source_tree_.MapPath("", WKT_PROTO_DIR);
+    importer_ = std::make_unique<pb::compiler::Importer>(&source_tree_, &errors_);
+    file_ = importer_->Import("test.proto");
+    ASSERT_NE(file_, nullptr) << errors_.last_;
+    factory_ = std::make_unique<pb::DynamicMessageFactory>(importer_->pool());
+    desc_ = importer_->pool()->FindMessageTypeByName("test.v1.AllTypes");
+    ASSERT_NE(desc_, nullptr);
+  }
+  std::unique_ptr<pb::Message> NewAllTypes() {
+    return std::unique_ptr<pb::Message>(factory_->GetPrototype(desc_)->New());
+  }
+  pb::compiler::DiskSourceTree source_tree_;
+  SilentErrorCollector errors_;
+  std::unique_ptr<pb::compiler::Importer> importer_;
+  const pb::FileDescriptor* file_ = nullptr;
+  const pb::Descriptor* desc_ = nullptr;
+  std::unique_ptr<pb::DynamicMessageFactory> factory_;
+};
 
 TEST(Directive, BareNameNoBodyNoPrefix) {
   std::string_view src = R"(@frob
@@ -259,6 +303,339 @@ TEST(Directive, AtSignAloneIsIllegal) {
   std::string_view src = "@\n";
   auto doc = Parse(src);
   EXPECT_FALSE(doc.ok());
+}
+
+// ---- AST-tier error paths --------------------------------------------------
+
+TEST(Directive, AtTypeWithoutIdentRejected) {
+  auto doc = Parse("@type =\n");
+  ASSERT_FALSE(doc.ok());
+  EXPECT_NE(doc.status().message().find("expected type name after @type"), std::string::npos);
+}
+
+TEST(Directive, AtTypeAfterTableRejected) {
+  // Reverse order of the "type before table" violation: @table first,
+  // then @type — exercises the symmetric branch in ParseDocument.
+  auto doc = Parse("@table x.Row ( a )\n@type other.Msg\n");
+  ASSERT_FALSE(doc.ok());
+  EXPECT_NE(doc.status().message().find("cannot coexist with @type"), std::string::npos);
+}
+
+TEST(Table, MissingTypeRejected) {
+  auto doc = Parse("@table ( a )\n");
+  ASSERT_FALSE(doc.ok());
+  EXPECT_NE(doc.status().message().find("expected row message type after @table"),
+            std::string::npos);
+}
+
+TEST(Table, MissingLParenAfterTypeRejected) {
+  auto doc = Parse("@table x.Row a, b\n");
+  ASSERT_FALSE(doc.ok());
+  EXPECT_NE(doc.status().message().find("expected '(' to start @table column list"),
+            std::string::npos);
+}
+
+TEST(Table, EmptyColumnListRejected) {
+  auto doc = Parse("@table x.Row ( )\n");
+  ASSERT_FALSE(doc.ok());
+  EXPECT_NE(doc.status().message().find("at least one field name"), std::string::npos);
+}
+
+TEST(Table, BadTokenInColumnListRejected) {
+  // Integer literal where a field name is expected.
+  auto doc = Parse("@table x.Row ( a, 123 )\n");
+  ASSERT_FALSE(doc.ok());
+  EXPECT_NE(doc.status().message().find("expected column field name"), std::string::npos);
+}
+
+TEST(Table, MissingCommaOrRParenInColumnListRejected) {
+  auto doc = Parse("@table x.Row ( a b )\n");
+  ASSERT_FALSE(doc.ok());
+  EXPECT_NE(doc.status().message().find("expected ',' or ')' in @table column list"),
+            std::string::npos);
+}
+
+TEST(Table, MissingCommaOrRParenInRowRejected) {
+  auto doc = Parse("@table x.Row ( a, b )\n( 1 2 )\n");
+  ASSERT_FALSE(doc.ok());
+  EXPECT_NE(doc.status().message().find("expected ',' or ')' in @table row"), std::string::npos);
+}
+
+TEST(Directive, TrailingCommentInBlockBody) {
+  // Exercise FindMatchingBrace's # line-comment skip.
+  auto doc = Parse("@hdr T { a = 1  # trailing comment with } in it\n  b = 2\n}\n");
+  ASSERT_TRUE(doc.ok()) << doc.status().message();
+  ASSERT_EQ(doc->directives.size(), 1u);
+  EXPECT_TRUE(doc->directives[0].has_body);
+}
+
+TEST(Directive, DoubleSlashCommentInBlockBody) {
+  auto doc = Parse("@hdr T { a = 1  // trailing } comment\n  b = 2\n}\n");
+  ASSERT_TRUE(doc.ok()) << doc.status().message();
+  ASSERT_EQ(doc->directives.size(), 1u);
+}
+
+TEST(Directive, BlockCommentInBlockBody) {
+  // Exercise FindMatchingBrace's /* ... */ skip — a `}` inside the
+  // block comment must not close the directive body.
+  auto doc = Parse("@hdr T { a = 1 /* not a } close */ b = 2 }\n");
+  ASSERT_TRUE(doc.ok()) << doc.status().message();
+  ASSERT_EQ(doc->directives.size(), 1u);
+  EXPECT_TRUE(doc->directives[0].has_body);
+}
+
+TEST(Directive, BytesLiteralInBlockBody) {
+  // Exercise FindMatchingBrace's `b"..."` skip. cpp's lexer enforces
+  // base64 in bytes literals so `}` can never appear inside one — but
+  // the skip path still walks the literal's characters when scanning
+  // for the closing brace of the directive body.
+  auto doc = Parse("@hdr T { blob = b\"YWJjZGVm\" }\n");
+  ASSERT_TRUE(doc.ok()) << doc.status().message();
+  ASSERT_EQ(doc->directives.size(), 1u);
+  EXPECT_TRUE(doc->directives[0].has_body);
+  EXPECT_NE(doc->directives[0].body.find("YWJjZGVm"), std::string::npos);
+}
+
+TEST(Table, ZeroOnePrefixZeroLegacyType) {
+  // Zero prefixes — `.type` stays empty (back-compat shape only kicks
+  // in with exactly one prefix).
+  auto doc = Parse("@bare\nx = 1\n");
+  ASSERT_TRUE(doc.ok()) << doc.status().message();
+  ASSERT_EQ(doc->directives.size(), 1u);
+  EXPECT_TRUE(doc->directives[0].type.empty());
+  EXPECT_TRUE(doc->directives[0].prefixes.empty());
+}
+
+// ---- Fast-path (Unmarshal) tests, exercising decode_fast.cc ---------------
+
+TEST_F(PxfDirectiveFast, BareDirectiveSkippedThenBodyDecodes) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@frob
+string_field = "hi"
+)",
+                                      msg.get());
+  ASSERT_TRUE(st.ok()) << st.message();
+  EXPECT_EQ(msg->GetReflection()->GetString(*msg, desc_->FindFieldByName("string_field")), "hi");
+}
+
+TEST_F(PxfDirectiveFast, SinglePrefixDirectiveSkipped) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@header pkg.Hdr
+string_field = "x"
+)",
+                                      msg.get());
+  ASSERT_TRUE(st.ok()) << st.message();
+}
+
+TEST_F(PxfDirectiveFast, MultiplePrefixesSkipped) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@frob alpha beta gamma
+string_field = "x"
+)",
+                                      msg.get());
+  ASSERT_TRUE(st.ok()) << st.message();
+}
+
+TEST_F(PxfDirectiveFast, BlockBodyDirectiveSkipped) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@header pkg.Hdr { id = "h1" version = 7 }
+string_field = "x"
+)",
+                                      msg.get());
+  ASSERT_TRUE(st.ok()) << st.message();
+}
+
+TEST_F(PxfDirectiveFast, NestedBlocksInDirectiveBodySkipped) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@h T { inner { a = 1 nested { b = "x" } } }
+string_field = "x"
+)",
+                                      msg.get());
+  ASSERT_TRUE(st.ok()) << st.message();
+}
+
+TEST_F(PxfDirectiveFast, MultipleDirectivesInterleavedWithType) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@type test.v1.AllTypes
+@header pkg.Hdr { id = "h" }
+@frob alpha
+string_field = "x"
+)",
+                                      msg.get());
+  ASSERT_TRUE(st.ok()) << st.message();
+}
+
+TEST_F(PxfDirectiveFast, AtTypeBadIdentRejected) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal("@type =\n", msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(std::string(st.message()).find("expected type name after @type"), std::string::npos);
+}
+
+TEST_F(PxfDirectiveFast, AtTypeAcceptsStringForm) {
+  // Spec allows `@type "..."` (string form), which the AST parser
+  // doesn't accept but the fast path does for back-compat with the
+  // Any-sugar convention.
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@type "test.v1.AllTypes"
+string_field = "x"
+)",
+                                      msg.get());
+  ASSERT_TRUE(st.ok()) << st.message();
+}
+
+TEST_F(PxfDirectiveFast, AtTypeAfterTableRejected) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@table x.Row ( a )
+@type other
+)",
+                                      msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(std::string(st.message()).find("cannot coexist with @type"), std::string::npos);
+}
+
+TEST_F(PxfDirectiveFast, TableAfterTypeRejected) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@type other
+@table x.Row ( a )
+)",
+                                      msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(std::string(st.message()).find("cannot coexist with @type"), std::string::npos);
+}
+
+TEST_F(PxfDirectiveFast, TableWithRowsAndStandalone) {
+  // Fast path drops the @table rows in PR 1; the call succeeds because
+  // the doc is well-formed (no @type, no body entries). PR 4 will
+  // make Result.tables() expose the rows.
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@table trades.v1.Trade ( px, qty )
+( 100, 5 )
+( 101, 7 )
+)",
+                                      msg.get());
+  ASSERT_TRUE(st.ok()) << st.message();
+}
+
+TEST_F(PxfDirectiveFast, TableWithEmptyAndNullCells) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@table x.Row ( a, b, c )
+( 1, , null )
+( null, , 9 )
+)",
+                                      msg.get());
+  ASSERT_TRUE(st.ok()) << st.message();
+}
+
+TEST_F(PxfDirectiveFast, TableZeroRows) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal("@table x.Row ( a, b )\n", msg.get());
+  ASSERT_TRUE(st.ok()) << st.message();
+}
+
+TEST_F(PxfDirectiveFast, TableArityMismatchRejected) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@table x.Row ( a, b )
+( 1, 2, 3 )
+)",
+                                      msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(std::string(st.message()).find("3 cells, expected 2"), std::string::npos);
+}
+
+TEST_F(PxfDirectiveFast, TableDottedColumnRejected) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal("@table x.Row ( a.b )\n", msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(std::string(st.message()).find("dotted path"), std::string::npos);
+}
+
+TEST_F(PxfDirectiveFast, TableListCellRejected) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@table x.Row ( a )
+( [1, 2] )
+)",
+                                      msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(std::string(st.message()).find("list/block"), std::string::npos);
+}
+
+TEST_F(PxfDirectiveFast, TableBlockCellRejected) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@table x.Row ( a )
+( { x = 1 } )
+)",
+                                      msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(std::string(st.message()).find("list/block"), std::string::npos);
+}
+
+TEST_F(PxfDirectiveFast, TableMissingTypeRejected) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal("@table ( a )\n", msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(std::string(st.message()).find("expected row message type after @table"),
+            std::string::npos);
+}
+
+TEST_F(PxfDirectiveFast, TableMissingLParenRejected) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal("@table x.Row a, b\n", msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(std::string(st.message()).find("expected '(' to start"), std::string::npos);
+}
+
+TEST_F(PxfDirectiveFast, TableEmptyColumnsRejected) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal("@table x.Row ( )\n", msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(std::string(st.message()).find("at least one field name"), std::string::npos);
+}
+
+TEST_F(PxfDirectiveFast, TableBadColumnTokenRejected) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal("@table x.Row ( a, 123 )\n", msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(std::string(st.message()).find("expected column field name"), std::string::npos);
+}
+
+TEST_F(PxfDirectiveFast, TableMissingCommaInColumnListRejected) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal("@table x.Row ( a b )\n", msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(std::string(st.message()).find("expected ',' or ')' in @table column list"),
+            std::string::npos);
+}
+
+TEST_F(PxfDirectiveFast, TableMissingCommaInRowRejected) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal("@table x.Row ( a, b )\n( 1 2 )\n", msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(std::string(st.message()).find("expected ',' or ')' in @table row"), std::string::npos);
+}
+
+TEST_F(PxfDirectiveFast, TableWithBodyEntriesRejected) {
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@table x.Row ( a )
+( 1 )
+string_field = "extra"
+)",
+                                      msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(std::string(st.message()).find("cannot coexist with top-level field entries"),
+            std::string::npos);
+}
+
+TEST_F(PxfDirectiveFast, PrefixLookaheadStopsAtBodyKey) {
+  // `@frob alpha\nstring_field = "x"` — alpha is a directive prefix
+  // (the next token is a newline, not `=`/`:`), but string_field is
+  // the first body entry (followed by `=`).
+  auto msg = NewAllTypes();
+  auto st = protowire::pxf::Unmarshal(R"(@frob alpha
+string_field = "x"
+)",
+                                      msg.get());
+  ASSERT_TRUE(st.ok()) << st.message();
 }
 
 }  // namespace
