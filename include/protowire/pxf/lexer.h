@@ -17,7 +17,11 @@ class Lexer {
 
   Token Next();
 
-  Position CurrentPos() const { return Position{line_, column_}; }
+  Position CurrentPos() const { return Position{line_, column_, static_cast<int>(pos_)}; }
+
+  // Raw input view — used by parseDirective to slice the body bytes
+  // between '{' and '}' once the matching brace has been located.
+  std::string_view Input() const { return input_; }
 
  private:
   uint8_t Peek(size_t offset = 0) const {
