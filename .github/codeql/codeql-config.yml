@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 TrendVidia, LLC.
+#
+# CodeQL configuration for protowire-cpp.
+#
+# The default config (security-and-quality, all paths) flags
+# `cpp/path-injection` on `cmd/check_decode/main.cc` because the
+# conformance binary reads a file path supplied on its CLI. That
+# binary is invoked by the cross-port harness
+# (`protowire/scripts/cross_security_check.sh`) with corpus paths
+# the harness controls; it is not a library API surface and accepts
+# arbitrary paths by design (the entire purpose of the tool is to
+# decode whatever file the harness names). We still canonicalize and
+# is_regular_file-check the input in code, but CodeQL's C++ taint
+# model doesn't recognize std::filesystem sanitizers, so we exclude
+# the directory from analysis here.
+#
+# Scope is narrow: only `cmd/check_decode/`. Library code under
+# `pxf/`, `pb/`, `sbe/`, etc. is still scanned.
+
+name: "protowire-cpp CodeQL config"
+
+paths-ignore:
+  - cmd/check_decode/**

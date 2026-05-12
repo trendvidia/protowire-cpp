@@ -11,6 +11,44 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`cmd/check_decode` HARDENING conformance binary.** The per-port
+  binary the spec repo's `scripts/cross_security_check.sh` expects
+  for every C++/Go/Java/etc. port. Runtime-compiles a `--proto` via
+  libprotoc's `Importer`, decodes a `--input` against a `--schema`
+  descriptor, and exits 0 on accept / 1 on clean reject / >1 on
+  crash. Mirrors the Go reference at
+  `protowire-go/scripts/check_decode/main.go`.
+
+  Supported formats:
+  - `pxf` — `protowire::pxf::Unmarshal` against a `DynamicMessage`
+    built from the runtime-compiled descriptor.
+  - `pb` — standard libprotobuf `Message::ParseFromArray` against a
+    `DynamicMessage`. The C++ port's `protowire::pb` codec is
+    struct-tag-driven and doesn't accept descriptor-bound inputs,
+    so the descriptor-driven hardening tier exercises libprotobuf's
+    parser primitives directly — which is what the adversarial
+    corpus's depth / length / overflow probes actually hit on any
+    libprotobuf-backed consumer.
+  - `sbe`, `envelope` — not yet implemented; returns exit 2
+    (configuration error) so the manifest can mark per-port skips.
+
+  Build is gated on `libprotoc` being available — Ubuntu ships it
+  as `libprotoc-dev`, separate from `libprotobuf-dev`. Consumers
+  without `libprotoc` get a CMake `STATUS` message and the target
+  is skipped; the rest of the build is unaffected.
+
+  Surfaces real port-level HARDENING gaps. Smoke-running against
+  the spec repo's adversarial corpus on `main` already shows:
+  - `deep-nesting-200.pxf` accepted (cpp has no MaxNestingDepth cap)
+  - `invalid-utf8-string.pxf` accepted (cpp has no proto3 UTF-8
+    enforcement)
+
+  Those are real HARDENING.md violations the cross-port harness now
+  catches automatically. Tracked as a follow-up; this PR only adds
+  the binary and wires the build.
+
 ## [0.70.0]
 
 Initial public release. The version number aligns this port with the rest

@@ -200,6 +200,21 @@ if(TARGET protowire_sbe AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cmd/bench_sbe/mai
   add_subdirectory(cmd/bench_sbe)
 endif()
 
+# Per-port HARDENING conformance binary. Driven by the spec repo's
+# `protowire/scripts/cross_security_check.sh` against the adversarial
+# corpus under `protowire/testdata/adversarial/`. Needs libprotoc for
+# runtime .proto compilation (Importer / DiskSourceTree), which some
+# Linux distros ship in a separate package (libprotoc-dev on Ubuntu).
+# Guarded so consumers without libprotoc still get a working build.
+if(TARGET protowire_pxf AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cmd/check_decode/main.cc)
+  find_library(PROTOWIRE_PROTOC_LIB protoc)
+  if(PROTOWIRE_PROTOC_LIB)
+    add_subdirectory(cmd/check_decode)
+  else()
+    message(STATUS "libprotoc not found — skipping cmd/check_decode (HARDENING corpus harness)")
+  endif()
+endif()
+
 if(PROTOWIRE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(test)
