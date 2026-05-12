@@ -3,22 +3,31 @@
 #
 # CodeQL configuration for protowire-cpp.
 #
-# The default config (security-and-quality, all paths) flags
-# `cpp/path-injection` on `cmd/check_decode/main.cc` because the
-# conformance binary reads a file path supplied on its CLI. That
-# binary is invoked by the cross-port harness
-# (`protowire/scripts/cross_security_check.sh`) with corpus paths
-# the harness controls; it is not a library API surface and accepts
-# arbitrary paths by design (the entire purpose of the tool is to
-# decode whatever file the harness names). We still canonicalize and
-# is_regular_file-check the input in code, but CodeQL's C++ taint
-# model doesn't recognize std::filesystem sanitizers, so we exclude
-# the directory from analysis here.
+# Excluded paths:
 #
-# Scope is narrow: only `cmd/check_decode/`. Library code under
-# `pxf/`, `pb/`, `sbe/`, etc. is still scanned.
+#   cmd/check_decode/  — the per-port HARDENING conformance binary
+#     accepts arbitrary file paths on its CLI by design (the harness
+#     names corpus files via `--input`). `cpp/path-injection` flags
+#     the user-controlled path flowing into std::ifstream, even
+#     though the in-code canonical + is_regular_file check sanitizes
+#     it; CodeQL's C++ taint model doesn't recognize std::filesystem
+#     sanitizers, so the analysis is excluded here instead.
+#
+#   test/  — test fixtures legitimately construct paths from
+#     ::testing::TempDir() (which reads TMPDIR / TEST_TMPDIR) and
+#     write .proto sources to disk for libprotoc to compile. These
+#     paths are env-controlled, which CodeQL treats as untrusted
+#     input — but test code is not a security boundary, and the
+#     constructed paths are joined with hard-coded basenames in the
+#     test source. Excluding the directory keeps SAST focused on
+#     library code that ships to consumers.
+#
+# Scope is narrow: library code under `pxf/`, `pb/`, `sbe/`,
+# `envelope/`, `detail/`, etc. remains under full
+# security-and-quality analysis.
 
 name: "protowire-cpp CodeQL config"
 
 paths-ignore:
   - cmd/check_decode/**
+  - test/**
