@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -127,8 +128,66 @@ struct BlockVal {
   std::vector<EntryPtr> entries;
 };
 
+// Directive is a top-of-document `@<name> *(<prefix-id>) [{ ... }]`
+// entry. The canonical use is side-channel metadata that sits alongside
+// the schema-typed body — e.g. chameleon's
+// `@header chameleon.v1.LayerHeader { id = "x" }` — but the grammar is
+// open-ended: any name except `type` / `table` is parsed as a generic
+// Directive. Prefix identifiers are positional and per-directive.
+//
+// Specific registrations:
+//   - One prefix (v0.72.0 conventional shape) — names the inner block's
+//     message type (dotted), e.g. `@header chameleon.v1.LayerHeader { ... }`.
+//   - `@entry` (draft §3.4.3) — zero, one, or two prefix identifiers
+//     (label, type); a single prefix is disambiguated by the presence
+//     of a `.` (dotted ⇒ type; bare ⇒ label).
+//
+// `body` holds the raw bytes between the opening `{` and matching `}`
+// (both exclusive) — empty when the directive has no inline block.
+struct Directive {
+  Position pos;
+  std::string name;                   // e.g. "header"; never "type" / "table"
+  std::vector<std::string> prefixes;  // identifiers between @<name> and the optional `{ ... }`
+  // Back-compat: when exactly one prefix identifier was supplied, `type`
+  // holds it (matching v0.72.0's single-Type shape). Empty otherwise.
+  std::string type;
+  std::string body;  // raw inner bytes of the block; empty if no `{ ... }`
+  bool has_body = false;
+  std::vector<Comment> leading_comments;
+};
+
+// TableRow is one parenthesized cell tuple in a `@table` directive.
+// `cells` is the same length as the containing TableDirective.columns.
+// A `std::nullopt` cell denotes an absent field (the "empty cell"
+// between two commas); a non-empty optional holding a `NullVal` denotes
+// a present-but-null field; any other Value denotes a present field.
+struct TableRow {
+  Position pos;
+  std::vector<std::optional<ValuePtr>> cells;
+};
+
+// TableDirective is a `@table <type> ( col1, col2, ... ) row*` entry at
+// document root (draft §3.4.4). It carries many instances of one
+// message type in a single document — the protowire-native CSV.
+//
+// Per draft §3.4.4, a document with any TableDirective MUST NOT have a
+// @type directive or any top-level field entries: the @table header IS
+// the document's type declaration. Decoders enforce this in Parse.
+struct TableDirective {
+  Position pos;
+  std::string type;                  // row message type, e.g. "trades.v1.Trade"
+  std::vector<std::string> columns;  // top-level field names on `type`; len >= 1
+  std::vector<TableRow> rows;        // zero or more rows
+  std::vector<Comment> leading_comments;
+};
+
 struct Document {
   std::string type_url;  // empty if no @type directive
+  std::vector<Directive>
+      directives;  // @<name> *(prefix) [{ ... }] entries in source order; excludes @type and @table
+  std::vector<TableDirective> tables;  // @table directives in source order
+  int body_offset =
+      0;  // byte offset where the schema-typed body begins (after all leading directives)
   std::vector<EntryPtr> entries;
   std::vector<Comment> leading_comments;
 };

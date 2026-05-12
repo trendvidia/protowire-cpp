@@ -157,8 +157,16 @@ const char* TokenKindName(TokenKind k) {
       return ":";
     case TokenKind::kComma:
       return ",";
+    case TokenKind::kLParen:
+      return "(";
+    case TokenKind::kRParen:
+      return ")";
     case TokenKind::kAtType:
       return "@type";
+    case TokenKind::kAtTable:
+      return "@table";
+    case TokenKind::kAtDirective:
+      return "@<directive>";
   }
   return "?";
 }
@@ -224,6 +232,12 @@ Token Lexer::Next() {
     case ']':
       Advance();
       return Token{TokenKind::kRBracket, "]", pos};
+    case '(':
+      Advance();
+      return Token{TokenKind::kLParen, "(", pos};
+    case ')':
+      Advance();
+      return Token{TokenKind::kRParen, ")", pos};
     case '=':
       Advance();
       return Token{TokenKind::kEquals, "=", pos};
@@ -475,8 +489,12 @@ Token Lexer::LexDirective(Position pos) {
     Advance();
   }
   std::string_view name = input_.substr(start, pos_ - start);
+  if (name.empty()) return Token{TokenKind::kIllegal, "@", pos};
   if (name == "type") return Token{TokenKind::kAtType, "@type", pos};
-  return Token{TokenKind::kIllegal, Store("@" + std::string(name)), pos};
+  if (name == "table") return Token{TokenKind::kAtTable, "@table", pos};
+  // kAtDirective's Token.value carries the bare name (no `@`); the
+  // parser uses this directly as Directive.name.
+  return Token{TokenKind::kAtDirective, name, pos};
 }
 
 Token Lexer::LexNumber(Position pos) {

@@ -28,11 +28,16 @@ enum class TokenKind : uint8_t {
   kRBrace,
   kLBracket,
   kRBracket,
+  kLParen,  // ( — used by @table column list and row tuples
+  kRParen,  // )
   kEquals,
   kColon,
   kComma,
 
   kAtType,
+  kAtDirective,  // @<ident> where ident is not "type" or "table"; Token.value carries the bare name
+                 // (no '@')
+  kAtTable,      // @table — bulk-row directive (draft §3.4.4)
 };
 
 const char* TokenKindName(TokenKind k);
@@ -40,6 +45,11 @@ const char* TokenKindName(TokenKind k);
 struct Position {
   int line = 1;
   int column = 1;
+  // Byte offset into the lexer's input. Used by directive Body
+  // extraction to slice the raw bytes between '{' and '}'; line/column
+  // remain the primary user-facing identifier. Zero is the start of
+  // input.
+  int offset = 0;
   std::string ToString() const { return std::to_string(line) + ":" + std::to_string(column); }
 };
 

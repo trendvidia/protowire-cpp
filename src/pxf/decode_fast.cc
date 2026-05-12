@@ -94,13 +94,7 @@ class DirectDecoder {
 
   Status Run() {
     Advance();
-    if (current_.kind == TokenKind::kAtType) {
-      Advance();  // consume @type
-      if (current_.kind != TokenKind::kIdent && current_.kind != TokenKind::kString) {
-        return PosError(current_.pos, "expected type name after @type");
-      }
-      Advance();
-    }
+    if (auto s = ConsumeDirectives(); !s.ok()) return s;
     return DecodeFields(root_, /*in_block=*/false);
   }
 
@@ -113,6 +107,165 @@ class DirectDecoder {
       }
       return;
     }
+  }
+
+  // PeekKind returns the kind of the next significant token without
+  // consuming it. Mirrors Parser::PeekKind in parser.cc — used by
+  // ConsumeDirectives to disambiguate "this IDENT is a directive
+  // prefix" from "this IDENT is a body field key".
+  TokenKind PeekKind() {
+    Lexer saved = lex_;
+    Token saved_current = current_;
+    Advance();
+    TokenKind k = current_.kind;
+    lex_ = saved;
+    current_ = saved_current;
+    return k;
+  }
+
+  // ConsumeDirectives drains any leading `@type` / `@<name>` / `@table`
+  // directives, leaving current_ at the first body token. PR 1 of the
+  // v0.72-v0.75 cpp port discards directive contents in the fast path
+  // (semantics — Result accessors, TableReader, BindRow — arrive in
+  // later PRs). Enforces the standalone constraint (draft §3.4.4):
+  // a document containing any @table directive MUST NOT also carry
+  // @type or top-level field entries.
+  Status ConsumeDirectives() {
+    bool saw_type = false;
+    bool has_table = false;
+    Position first_table_pos{};
+    for (;;) {
+      if (current_.kind == TokenKind::kAtType) {
+        if (has_table) {
+          return PosError(current_.pos,
+                          "@table directive cannot coexist with @type (draft §3.4.4)");
+        }
+        saw_type = true;
+        Advance();  // consume @type
+        if (current_.kind != TokenKind::kIdent && current_.kind != TokenKind::kString) {
+          return PosError(current_.pos, "expected type name after @type");
+        }
+        Advance();
+      } else if (current_.kind == TokenKind::kAtDirective) {
+        Advance();  // consume @<name>
+        // Zero-or-more prefix identifiers; lookahead disambiguates prefix
+        // from body field key (an IDENT followed by `=` or `:`).
+        while (current_.kind == TokenKind::kIdent) {
+          TokenKind next = PeekKind();
+          if (next == TokenKind::kEquals || next == TokenKind::kColon) break;
+          Advance();
+        }
+        // Optional inline block — drop its contents by walking brace
+        // depth at the token level. Strings / comments are handled by
+        // the lexer, so brace tokens here are always real braces.
+        if (current_.kind == TokenKind::kLBrace) {
+          int depth = 1;
+          Advance();
+          while (depth > 0 && current_.kind != TokenKind::kEOF) {
+            if (current_.kind == TokenKind::kLBrace) {
+              ++depth;
+            } else if (current_.kind == TokenKind::kRBrace) {
+              --depth;
+              if (depth == 0) {
+                Advance();
+                break;
+              }
+            }
+            Advance();
+          }
+          if (depth != 0) {
+            return PosError(current_.pos, "unmatched '{' in directive block");
+          }
+        }
+      } else if (current_.kind == TokenKind::kAtTable) {
+        if (saw_type) {
+          return PosError(current_.pos,
+                          "@table directive cannot coexist with @type (draft §3.4.4)");
+        }
+        if (!has_table) {
+          first_table_pos = current_.pos;
+          has_table = true;
+        }
+        Advance();  // consume @table
+        if (current_.kind != TokenKind::kIdent) {
+          return PosError(current_.pos, "expected row message type after @table");
+        }
+        Advance();
+        if (current_.kind != TokenKind::kLParen) {
+          return PosError(current_.pos, "expected '(' to start @table column list");
+        }
+        Advance();
+        if (current_.kind != TokenKind::kIdent) {
+          return PosError(current_.pos, "@table column list must contain at least one field name");
+        }
+        int n_cols = 0;
+        for (;;) {
+          if (current_.kind != TokenKind::kIdent) {
+            return PosError(current_.pos, "expected column field name");
+          }
+          ++n_cols;
+          // v1: dotted column paths are reserved for a future revision.
+          for (char c : current_.value) {
+            if (c == '.') {
+              return PosError(current_.pos,
+                              "@table column has dotted path; not supported in v1 (draft §3.4.4)");
+            }
+          }
+          Advance();
+          if (current_.kind == TokenKind::kComma) {
+            Advance();
+            continue;
+          }
+          if (current_.kind == TokenKind::kRParen) break;
+          return PosError(current_.pos, "expected ',' or ')' in @table column list");
+        }
+        Advance();  // consume )
+        // Zero or more rows; each cell is a single token (or empty).
+        while (current_.kind == TokenKind::kLParen) {
+          Position row_pos = current_.pos;
+          Advance();  // (
+          int cells = 0;
+          // First cell.
+          if (current_.kind != TokenKind::kComma && current_.kind != TokenKind::kRParen) {
+            if (current_.kind == TokenKind::kLBracket || current_.kind == TokenKind::kLBrace) {
+              return PosError(current_.pos,
+                              "@table cells cannot contain list/block values in v1 (draft §3.4.4)");
+            }
+            Advance();  // consume scalar/ident/null token
+          }
+          ++cells;
+          while (current_.kind == TokenKind::kComma) {
+            Advance();
+            if (current_.kind != TokenKind::kComma && current_.kind != TokenKind::kRParen) {
+              if (current_.kind == TokenKind::kLBracket || current_.kind == TokenKind::kLBrace) {
+                return PosError(
+                    current_.pos,
+                    "@table cells cannot contain list/block values in v1 (draft §3.4.4)");
+              }
+              Advance();
+            }
+            ++cells;
+          }
+          if (current_.kind != TokenKind::kRParen) {
+            return PosError(current_.pos, "expected ',' or ')' in @table row");
+          }
+          if (cells != n_cols) {
+            return PosError(row_pos,
+                            std::string("@table row has ") + std::to_string(cells) +
+                                " cells, expected " + std::to_string(n_cols) + " (column count)");
+          }
+          Advance();  // consume )
+        }
+      } else {
+        break;
+      }
+    }
+    if (has_table && current_.kind != TokenKind::kEOF) {
+      return PosError(first_table_pos,
+                      "@table directive cannot coexist with top-level field entries "
+                      "(draft §3.4.4)");
+    }
+    return Status::OK();
   }
 
   // ----- Field-level dispatch ------------------------------------------
