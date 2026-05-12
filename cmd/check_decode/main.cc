@@ -78,6 +78,29 @@ class CollectErrors : public pb::compiler::MultiFileErrorCollector {
   std::string last;
 };
 
+// SanitizeUserPath canonicalizes a user-supplied path (resolving `..`
+// segments and symlinks) and confirms it points to a regular file.
+// The conformance CLI accepts any path the harness names by design,
+// so this is a shape check — not an access-control check — but it
+// turns "open a directory and fail with a confusing errno" into a
+// clean reject, and it routes the user-controlled path through a
+// canonicalization step that SAST can recognize as a sanitizer.
+bool SanitizeUserPath(const std::string& path, std::string* sanitized, std::string* err) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::path canonical = fs::canonical(fs::path(path), ec);
+  if (ec) {
+    *err = "resolve path: " + ec.message() + ": " + path;
+    return false;
+  }
+  if (!fs::is_regular_file(canonical, ec)) {
+    *err = "not a regular file: " + path;
+    return false;
+  }
+  *sanitized = canonical.string();
+  return true;
+}
+
 std::string ReadFile(const std::string& path, std::string* err) {
   std::ifstream in(path, std::ios::binary);
   if (!in) {
@@ -229,7 +252,12 @@ int main(int argc, char** argv) {
   if (format.empty() || schema.empty() || input.empty()) Usage(2);
 
   std::string err;
-  std::string data = ReadFile(input, &err);
+  std::string safe_input;
+  if (!SanitizeUserPath(input, &safe_input, &err)) {
+    std::fprintf(stderr, "reject: %s\n", err.c_str());
+    return 1;
+  }
+  std::string data = ReadFile(safe_input, &err);
   if (!err.empty()) {
     std::fprintf(stderr, "reject: %s\n", err.c_str());
     return 1;
