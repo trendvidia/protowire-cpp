@@ -35,7 +35,8 @@ if(TARGET protowire_pxf)
   foreach(f pxf_lexer_test pxf_parser_test pxf_decode_test pxf_encode_test
             pxf_null_test pxf_bignum_test pxf_features_test pxf_any_test
             pxf_fast_test pxf_full_roundtrip_test pxf_escapes_test
-            pxf_annotations_test pxf_format_test pxf_directive_test)
+            pxf_annotations_test pxf_format_test pxf_directive_test
+            pxf_schema_test)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${f}.cc)
       list(APPEND _pxf_test_srcs ${f}.cc)
     endif()

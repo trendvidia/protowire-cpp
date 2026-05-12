@@ -25,6 +25,11 @@ struct UnmarshalOptions {
   // When true, unknown fields are silently ignored instead of returning an
   // error.
   bool discard_unknown = false;
+  // When true, skip the per-call schema reserved-name check (draft §3.13).
+  // Callers that have already validated their descriptors (typically via
+  // ValidateDescriptor in a one-time codegen or registry-load pass) can
+  // set this to bypass the per-call recheck.
+  bool skip_validate = false;
 };
 
 struct MarshalOptions {
