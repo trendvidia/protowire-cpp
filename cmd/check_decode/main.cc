@@ -81,10 +81,9 @@ class CollectErrors : public pb::compiler::MultiFileErrorCollector {
 // SanitizeUserPath canonicalizes a user-supplied path (resolving `..`
 // segments and symlinks) and confirms it points to a regular file.
 // The conformance CLI accepts any path the harness names by design,
-// so this is a shape check — not an access-control check — but it
-// turns "open a directory and fail with a confusing errno" into a
-// clean reject, and it routes the user-controlled path through a
-// canonicalization step that SAST can recognize as a sanitizer.
+// so this is a shape check — not an access-control check. It turns
+// "open a directory and fail with a confusing errno" into a clean
+// reject the harness can parse.
 bool SanitizeUserPath(const std::string& path, std::string* sanitized, std::string* err) {
   namespace fs = std::filesystem;
   std::error_code ec;
