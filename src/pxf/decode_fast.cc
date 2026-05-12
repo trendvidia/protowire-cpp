@@ -123,13 +123,104 @@ class DirectDecoder {
     return k;
   }
 
+  // ParseScalarCellValue consumes one scalar token at current_ and
+  // builds the corresponding ValuePtr. Mirrors the scalar branches of
+  // the AST parser's ParseValue. Used by @table row parsing in
+  // ConsumeDirectives — list / block / unparseable cell tokens are
+  // already rejected by the caller, so this only handles scalar shapes.
+  StatusOr<ValuePtr> ParseScalarCellValue() {
+    Position pos = current_.pos;
+    switch (current_.kind) {
+      case TokenKind::kString: {
+        auto v = std::make_unique<StringVal>();
+        v->pos = pos;
+        v->value = std::string(current_.value);
+        Advance();
+        return ValuePtr(std::move(v));
+      }
+      case TokenKind::kInt: {
+        auto v = std::make_unique<IntVal>();
+        v->pos = pos;
+        v->raw = std::string(current_.value);
+        Advance();
+        return ValuePtr(std::move(v));
+      }
+      case TokenKind::kFloat: {
+        auto v = std::make_unique<FloatVal>();
+        v->pos = pos;
+        v->raw = std::string(current_.value);
+        Advance();
+        return ValuePtr(std::move(v));
+      }
+      case TokenKind::kBool: {
+        auto v = std::make_unique<BoolVal>();
+        v->pos = pos;
+        v->value = (current_.value == "true");
+        Advance();
+        return ValuePtr(std::move(v));
+      }
+      case TokenKind::kBytes: {
+        auto v = std::make_unique<BytesVal>();
+        v->pos = pos;
+        auto decoded = detail::Base64DecodeStd(current_.value);
+        if (decoded.has_value()) v->value = std::move(*decoded);
+        Advance();
+        return ValuePtr(std::move(v));
+      }
+      case TokenKind::kTimestamp: {
+        auto v = std::make_unique<TimestampVal>();
+        v->pos = pos;
+        v->raw = std::string(current_.value);
+        if (auto t = detail::ParseRFC3339(current_.value); t.has_value()) {
+          v->seconds = t->seconds;
+          v->nanos = t->nanos;
+        }
+        Advance();
+        return ValuePtr(std::move(v));
+      }
+      case TokenKind::kDuration: {
+        auto v = std::make_unique<DurationVal>();
+        v->pos = pos;
+        v->raw = std::string(current_.value);
+        if (auto d = detail::ParseDuration(current_.value); d.has_value()) {
+          v->seconds = d->seconds;
+          v->nanos = d->nanos;
+        }
+        Advance();
+        return ValuePtr(std::move(v));
+      }
+      case TokenKind::kNull: {
+        auto v = std::make_unique<NullVal>();
+        v->pos = pos;
+        Advance();
+        return ValuePtr(std::move(v));
+      }
+      case TokenKind::kIdent: {
+        auto v = std::make_unique<IdentVal>();
+        v->pos = pos;
+        v->name = std::string(current_.value);
+        Advance();
+        return ValuePtr(std::move(v));
+      }
+      default:
+        return Status::Error(
+            pos.line,
+            pos.column,
+            std::string("unsupported @table cell value: ") + TokenKindName(current_.kind));
+    }
+  }
+
   // ConsumeDirectives drains any leading `@type` / `@<name>` / `@table`
-  // directives, leaving current_ at the first body token. PR 1 of the
-  // v0.72-v0.75 cpp port discards directive contents in the fast path
-  // (semantics — Result accessors, TableReader, BindRow — arrive in
-  // later PRs). Enforces the standalone constraint (draft §3.4.4):
-  // a document containing any @table directive MUST NOT also carry
-  // @type or top-level field entries.
+  // directives, leaving current_ at the first body token. When
+  // result_ != nullptr (UnmarshalFull path), populates
+  // Result::Directives() and Result::Tables() with parsed Directive /
+  // TableDirective entries; when result_ == nullptr (Unmarshal path),
+  // performs the same syntactic walk for validation but discards the
+  // contents — no AST allocation occurs.
+  //
+  // Enforces the standalone constraint (draft §3.4.4): a document
+  // containing any @table directive MUST NOT also carry @type or
+  // top-level field entries.
   Status ConsumeDirectives() {
     bool saw_type = false;
     bool has_table = false;
@@ -147,18 +238,27 @@ class DirectDecoder {
         }
         Advance();
       } else if (current_.kind == TokenKind::kAtDirective) {
+        Directive dir;
+        dir.pos = current_.pos;
+        dir.name = std::string(current_.value);
         Advance();  // consume @<name>
         // Zero-or-more prefix identifiers; lookahead disambiguates prefix
         // from body field key (an IDENT followed by `=` or `:`).
         while (current_.kind == TokenKind::kIdent) {
           TokenKind next = PeekKind();
           if (next == TokenKind::kEquals || next == TokenKind::kColon) break;
+          dir.prefixes.emplace_back(current_.value);
           Advance();
         }
-        // Optional inline block — drop its contents by walking brace
-        // depth at the token level. Strings / comments are handled by
-        // the lexer, so brace tokens here are always real braces.
+        // Back-compat: a single prefix populates the legacy `type`
+        // field, mirroring v0.72.0's single-Type shape.
+        if (dir.prefixes.size() == 1) dir.type = dir.prefixes[0];
+        // Optional inline block — slice its raw bytes between `{` and
+        // `}` by walking brace depth at the token level. Strings /
+        // comments are handled by the lexer, so brace tokens here are
+        // always real braces.
         if (current_.kind == TokenKind::kLBrace) {
+          int open = current_.pos.offset;
           int depth = 1;
           Advance();
           while (depth > 0 && current_.kind != TokenKind::kEOF) {
@@ -167,6 +267,10 @@ class DirectDecoder {
             } else if (current_.kind == TokenKind::kRBrace) {
               --depth;
               if (depth == 0) {
+                int close = current_.pos.offset;
+                dir.body = std::string(
+                    lex_.Input().substr(open + 1, static_cast<size_t>(close - (open + 1))));
+                dir.has_body = true;
                 Advance();
                 break;
               }
@@ -177,11 +281,14 @@ class DirectDecoder {
             return PosError(current_.pos, "unmatched '{' in directive block");
           }
         }
+        if (result_ != nullptr) result_->AddDirective(std::move(dir));
       } else if (current_.kind == TokenKind::kAtTable) {
         if (saw_type) {
           return PosError(current_.pos,
                           "@table directive cannot coexist with @type (draft §3.4.4)");
         }
+        TableDirective tbl;
+        tbl.pos = current_.pos;
         if (!has_table) {
           first_table_pos = current_.pos;
           has_table = true;
@@ -190,6 +297,7 @@ class DirectDecoder {
         if (current_.kind != TokenKind::kIdent) {
           return PosError(current_.pos, "expected row message type after @table");
         }
+        tbl.type = std::string(current_.value);
         Advance();
         if (current_.kind != TokenKind::kLParen) {
           return PosError(current_.pos, "expected '(' to start @table column list");
@@ -198,12 +306,10 @@ class DirectDecoder {
         if (current_.kind != TokenKind::kIdent) {
           return PosError(current_.pos, "@table column list must contain at least one field name");
         }
-        int n_cols = 0;
         for (;;) {
           if (current_.kind != TokenKind::kIdent) {
             return PosError(current_.pos, "expected column field name");
           }
-          ++n_cols;
           // v1: dotted column paths are reserved for a future revision.
           for (char c : current_.value) {
             if (c == '.') {
@@ -211,6 +317,7 @@ class DirectDecoder {
                               "@table column has dotted path; not supported in v1 (draft §3.4.4)");
             }
           }
+          tbl.columns.emplace_back(current_.value);
           Advance();
           if (current_.kind == TokenKind::kComma) {
             Advance();
@@ -220,42 +327,51 @@ class DirectDecoder {
           return PosError(current_.pos, "expected ',' or ')' in @table column list");
         }
         Advance();  // consume )
-        // Zero or more rows; each cell is a single token (or empty).
+        const int n_cols = static_cast<int>(tbl.columns.size());
+        // Zero or more rows; each cell is a single scalar token (or empty).
         while (current_.kind == TokenKind::kLParen) {
-          Position row_pos = current_.pos;
+          TableRow row;
+          row.pos = current_.pos;
+          row.cells.reserve(n_cols);
           Advance();  // (
-          int cells = 0;
           // First cell.
-          if (current_.kind != TokenKind::kComma && current_.kind != TokenKind::kRParen) {
-            if (current_.kind == TokenKind::kLBracket || current_.kind == TokenKind::kLBrace) {
-              return PosError(current_.pos,
-                              "@table cells cannot contain list/block values in v1 (draft §3.4.4)");
-            }
-            Advance();  // consume scalar/ident/null token
+          if (current_.kind == TokenKind::kComma || current_.kind == TokenKind::kRParen) {
+            row.cells.emplace_back(std::nullopt);  // absent
+          } else if (current_.kind == TokenKind::kLBracket || current_.kind == TokenKind::kLBrace) {
+            return PosError(current_.pos,
+                            "@table cells cannot contain list/block values in v1 (draft §3.4.4)");
+          } else {
+            auto v = ParseScalarCellValue();
+            if (!v.ok()) return v.status();
+            row.cells.emplace_back(std::move(v).consume());
           }
-          ++cells;
           while (current_.kind == TokenKind::kComma) {
             Advance();
-            if (current_.kind != TokenKind::kComma && current_.kind != TokenKind::kRParen) {
-              if (current_.kind == TokenKind::kLBracket || current_.kind == TokenKind::kLBrace) {
-                return PosError(
-                    current_.pos,
-                    "@table cells cannot contain list/block values in v1 (draft §3.4.4)");
-              }
-              Advance();
+            if (current_.kind == TokenKind::kComma || current_.kind == TokenKind::kRParen) {
+              row.cells.emplace_back(std::nullopt);  // absent
+            } else if (current_.kind == TokenKind::kLBracket ||
+                       current_.kind == TokenKind::kLBrace) {
+              return PosError(current_.pos,
+                              "@table cells cannot contain list/block values in v1 (draft §3.4.4)");
+            } else {
+              auto v = ParseScalarCellValue();
+              if (!v.ok()) return v.status();
+              row.cells.emplace_back(std::move(v).consume());
             }
-            ++cells;
           }
           if (current_.kind != TokenKind::kRParen) {
             return PosError(current_.pos, "expected ',' or ')' in @table row");
           }
-          if (cells != n_cols) {
-            return PosError(row_pos,
-                            std::string("@table row has ") + std::to_string(cells) +
+          const int n_cells = static_cast<int>(row.cells.size());
+          if (n_cells != n_cols) {
+            return PosError(row.pos,
+                            std::string("@table row has ") + std::to_string(n_cells) +
                                 " cells, expected " + std::to_string(n_cols) + " (column count)");
           }
           Advance();  // consume )
+          tbl.rows.push_back(std::move(row));
         }
+        if (result_ != nullptr) result_->AddTable(std::move(tbl));
       } else {
         break;
       }
