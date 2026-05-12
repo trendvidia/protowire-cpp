@@ -26,7 +26,8 @@
 #include "protowire/pxf/options.h"
 #include "protowire/pxf/parser.h"  // Document, Parse
 #include "protowire/pxf/result.h"
-#include "protowire/pxf/schema.h"  // ValidateDescriptor, Violation
+#include "protowire/pxf/schema.h"        // ValidateDescriptor, Violation
+#include "protowire/pxf/table_reader.h"  // TableReader, BindRow
 
 namespace protowire::pxf {
 
