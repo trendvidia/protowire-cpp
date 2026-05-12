@@ -13,6 +13,21 @@ format changes.
 
 ### Added
 
+- **PXF schema reserved-name validator (`SchemaValidator`, draft §3.13).**
+  Rejects protobuf schemas that declare a message field, oneof, or
+  enum value whose name is case-sensitively equal to a PXF value
+  keyword (`null` / `true` / `false`) — such a name lexes as the
+  keyword and the declared element is unreachable from PXF surface
+  syntax. New `<protowire/pxf/schema.h>` exposes `ValidateDescriptor`,
+  `ValidateFile`, and the `Violation` struct (with `file`, `element`,
+  `name`, `kind`); results are sorted by element FQN for stable
+  output. `UnmarshalOptions` gains `skip_validate` for consumers that
+  validate once at registry-load time and don't want the per-call
+  recheck cost. `Unmarshal` and `UnmarshalFull` invoke the validator
+  on the message's descriptor before decode runs; violations come
+  back as a joined-string error message with one line per offender.
+
+
 - **PXF parser-side `@<name>` / `@entry` / `@table` directive grammar**
   (draft §3.4.2 – §3.4.4). The AST `Document` now carries
   `directives` (generic `@<name> *(prefix) [{ ... }]` entries) and

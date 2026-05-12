@@ -1228,12 +1228,34 @@ Status PostDecode(Message* msg,
 
 // --- Public API ------------------------------------------------------------
 
+namespace {
+
+// CheckSchema runs the PXF schema reserved-name check (draft §3.13) on
+// the descriptor of `msg`. Returns a Status with the joined violation
+// list on conflict, OK otherwise. Skipped when opts.skip_validate is
+// true.
+Status CheckSchema(const Message* msg, const UnmarshalOptions& opts) {
+  if (opts.skip_validate) return Status::OK();
+  auto vs = ValidateDescriptor(msg->GetDescriptor());
+  if (vs.empty()) return Status::OK();
+  std::string msg_str = "PXF schema reserved-name violations:\n  ";
+  for (size_t i = 0; i < vs.size(); ++i) {
+    if (i != 0) msg_str.append("\n  ");
+    msg_str.append(vs[i].ToString());
+  }
+  return Status::Error(0, 0, msg_str);
+}
+
+}  // namespace
+
 Status Unmarshal(std::string_view data, Message* msg, UnmarshalOptions opts) {
+  if (Status s = CheckSchema(msg, opts); !s.ok()) return s;
   DirectDecoder d(data, msg, /*result=*/nullptr, opts.type_resolver, opts.discard_unknown);
   return d.Run();
 }
 
 StatusOr<Result> UnmarshalFull(std::string_view data, Message* msg, UnmarshalOptions opts) {
+  if (Status s = CheckSchema(msg, opts); !s.ok()) return s;
   Result r;
   DirectDecoder d(data, msg, &r, opts.type_resolver, opts.discard_unknown);
   Status st = d.Run();
