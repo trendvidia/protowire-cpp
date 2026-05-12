@@ -82,7 +82,8 @@ endif()
 _pwx_existing_sources(_pxf_srcs
   src/pxf/lexer.cc src/pxf/ast.cc src/pxf/parser.cc src/pxf/decode_fast.cc
   src/pxf/decode.cc src/pxf/encode.cc src/pxf/format.cc src/pxf/wellknown.cc
-  src/pxf/annotations.cc src/pxf/result.cc src/pxf/options.cc src/pxf/schema.cc)
+  src/pxf/annotations.cc src/pxf/result.cc src/pxf/options.cc src/pxf/schema.cc
+  src/pxf/table_reader.cc)
 _pwx_existing_sources(_sbe_srcs
   src/sbe/annotations.cc src/sbe/template.cc src/sbe/codec.cc
   src/sbe/marshal.cc src/sbe/unmarshal.cc src/sbe/view.cc

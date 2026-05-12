@@ -13,6 +13,39 @@ format changes.
 
 ### Added
 
+- **`TableReader` streaming `@table` consumption + `Scan` / `BindRow`
+  per-row binding** (draft §3.4.4). `UnmarshalFull` materializes
+  every row of an `@table` directive into `Result::Tables()`; that
+  works for small datasets and breaks for the CSV-replacement
+  workload `@table` was designed for. New
+  `<protowire/pxf/table_reader.h>` exposes:
+  - `TableReader::Create(std::istream*)` — consumes any leading
+    directives and the `@table TYPE ( cols )` header, returns a
+    reader positioned at the first row. Header is capped at 64 KiB
+    (`kDefaultHeaderMaxBytes`) to fail-fast when a non-`@table`
+    document is handed in by mistake.
+  - `Type()` / `Columns()` / `Directives()` accessors.
+  - `Next(TableRow*)` pulls one row at a time from the underlying
+    stream; working-set memory is bounded by the largest single row,
+    not the full table. Per-row arity and v1 cell-grammar checks
+    happen at consume time (not deferred to EOF), matching the
+    spec's streaming-consumer requirements.
+  - `Scan(Message*)` — convenience: `Next` + `BindRow`.
+  - `Tail()` — returns the unconsumed buffer plus the remaining
+    underlying source as a fresh `std::istream`, so callers can chain
+    a second `Create()` for documents with multiple `@table`
+    directives.
+  - `BindRow(Message*, columns, row)` — exported helper for callers
+    iterating `Result::Tables()[i].rows` from the materializing
+    path. Strategy is format-and-reparse: render the row as a
+    synthetic PXF body (`<col> = <val>` per non-`std::nullopt` cell)
+    and run it through `Unmarshal`. This reuses every branch of the
+    existing decoder — WKT timestamps / durations, wrapper
+    nullability, enum-by-name resolution, `pxf.required` /
+    `pxf.default`, oneof handling — instead of growing a parallel
+    Value→FieldDescriptor switch. `SkipValidate` avoids re-running
+    the reserved-name check per row.
+
 - **`Result::Directives()` and `Result::Tables()` accessors.** The
   fast-path direct decoder now populates the document-root directive
   list and `@table` directive list on `Result` during
