@@ -29,7 +29,6 @@
 // descriptor-bound inputs, so we test the descriptor-driven path here
 // (which is what the spec's adversarial PB corpus exercises against).
 
-#include <sys/stat.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -39,6 +38,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 #include <google/protobuf/compiler/importer.h>
 #include <google/protobuf/descriptor.h>
@@ -116,8 +116,8 @@ std::string ReadFile(const std::string& path, std::string* err) {
 }
 
 bool DirExists(const std::string& path) {
-  struct stat st {};
-  return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+  std::error_code ec;
+  return std::filesystem::is_directory(path, ec);
 }
 
 // LoadDescriptor mirrors the Go reference: compile --proto via
