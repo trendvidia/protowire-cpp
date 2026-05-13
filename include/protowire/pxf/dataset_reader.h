@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 TrendVidia, LLC.
 //
-// Streaming consumption for the `@table` directive (draft §3.4.4).
+// Streaming consumption for the `@dataset` directive (draft §3.4.4).
 //
-// `UnmarshalFull` materializes an entire `@table` directive — every row
-// — into `Result::Tables()`. That works for small datasets and breaks
-// for the CSV-replacement workload `@table` was designed to serve.
-// `TableReader` provides the streaming alternative: it pulls bytes from
-// a `std::istream` on demand and yields one `TableRow` per `Next()`
+// `UnmarshalFull` materializes an entire `@dataset` directive — every row
+// — into `Result::Datasets()`. That works for small datasets and breaks
+// for the CSV-replacement workload `@dataset` was designed to serve.
+// `DatasetReader` provides the streaming alternative: it pulls bytes from
+// a `std::istream` on demand and yields one `DatasetRow` per `Next()`
 // call, with working-set memory bounded by the size of the largest
 // single row.
 //
@@ -20,7 +20,7 @@
 //
 // Convenience: `Scan(msg)` reads the next row and binds its cells to
 // `msg`'s fields by column name; `BindRow` is exported for callers that
-// iterate the materializing path's `Result::Tables()[i].rows`.
+// iterate the materializing path's `Result::Datasets()[i].rows`.
 
 #pragma once
 
@@ -32,46 +32,46 @@
 #include <google/protobuf/message.h>
 
 #include "protowire/detail/status.h"
-#include "protowire/pxf/ast.h"  // Directive, TableRow
+#include "protowire/pxf/ast.h"  // Directive, DatasetRow
 
 namespace protowire::pxf {
 
-// Default cap on the @table header (leading directives plus the
-// `@table TYPE ( cols )` declaration). Real headers are tiny — a few
+// Default cap on the @dataset header (leading directives plus the
+// `@dataset TYPE ( cols )` declaration). Real headers are tiny — a few
 // hundred bytes at most. The cap exists to fail-fast on misuse: a
-// TableReader pointed at a multi-gigabyte document with no `@table`
+// DatasetReader pointed at a multi-gigabyte document with no `@dataset`
 // directive shouldn't OOM trying to find one.
 constexpr int kDefaultHeaderMaxBytes = 64 * 1024;
 
-// Streaming row reader for a single `@table` directive.
+// Streaming row reader for a single `@dataset` directive.
 //
-// A TableReader is positioned at the first row after `Create()`
+// A DatasetReader is positioned at the first row after `Create()`
 // returns. Call `Next(&row)` in a loop until `Done()` returns true;
 // the table's row sequence is exhausted at that point. Any parse or
 // I/O error makes the reader sticky: subsequent `Next` / `Scan` calls
 // return the same Status.
 //
-// For documents containing multiple `@table` directives, call
+// For documents containing multiple `@dataset` directives, call
 // `Create()` again on `tr->Tail()` to read the next table.
 //
-// A TableReader is NOT safe for concurrent use.
-class TableReader {
+// A DatasetReader is NOT safe for concurrent use.
+class DatasetReader {
  public:
-  // Construct a TableReader and consume the leading directives and the
-  // `@table TYPE ( cols )` header. `src` must outlive the reader.
-  // Returns a non-OK Status if the input ends before any `@table`
-  // directive is seen (the message contains "no @table directive in
+  // Construct a DatasetReader and consume the leading directives and the
+  // `@dataset TYPE ( cols )` header. `src` must outlive the reader.
+  // Returns a non-OK Status if the input ends before any `@dataset`
+  // directive is seen (the message contains "no @dataset directive in
   // stream") or on a parse / I/O error.
-  static StatusOr<std::unique_ptr<TableReader>> Create(std::istream* src);
+  static StatusOr<std::unique_ptr<DatasetReader>> Create(std::istream* src);
 
-  // Row message type declared by the @table header (e.g. "trades.v1.Trade").
+  // Row message type declared by the @dataset header (e.g. "trades.v1.Trade").
   const std::string& Type() const { return type_; }
 
-  // Column field names declared by the @table header, in source order.
+  // Column field names declared by the @dataset header, in source order.
   const std::vector<std::string>& Columns() const { return columns_; }
 
   // Side-channel directives (`@<name>` / `@entry` / etc., NOT `@type`
-  // or `@table`) that appeared before the `@table` header. Stable for
+  // or `@dataset`) that appeared before the `@dataset` header. Stable for
   // the lifetime of the reader.
   const std::vector<Directive>& Directives() const { return directives_; }
 
@@ -82,7 +82,7 @@ class TableReader {
   //
   // After EOF or error, all subsequent calls return the same sticky
   // result.
-  Status Next(TableRow* out);
+  Status Next(DatasetRow* out);
 
   // Reads the next row and binds its cells to fields of `msg` by column
   // name. Equivalent to `Next` + `BindRow`. At EOF, returns OK and sets
@@ -98,7 +98,7 @@ class TableReader {
   // Returns a fresh istream-derived source that yields the bytes the
   // reader buffered but didn't consume, followed by the remaining
   // bytes from the underlying source. Use to chain a second
-  // `Create()` for documents with multiple `@table` directives.
+  // `Create()` for documents with multiple `@dataset` directives.
   //
   // MUST only be called after `Next` has reported `Done()`. Calling
   // earlier returns bytes the current reader still intends to consume,
@@ -106,7 +106,7 @@ class TableReader {
   std::unique_ptr<std::istream> Tail();
 
  private:
-  TableReader() = default;
+  DatasetReader() = default;
 
   Status ReadHeader();
   Status Pull(size_t n);
@@ -133,10 +133,10 @@ class TableReader {
 //     wrapper / oneof; rejects on non-nullable scalars).
 //   - any other Value — field set to that value.
 //
-// Exported so callers iterating `Result::Tables()[i].rows` can reuse
+// Exported so callers iterating `Result::Datasets()[i].rows` can reuse
 // the same logic.
 Status BindRow(google::protobuf::Message* msg,
                const std::vector<std::string>& columns,
-               const TableRow& row);
+               const DatasetRow& row);
 
 }  // namespace protowire::pxf

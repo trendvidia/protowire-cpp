@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 TrendVidia, LLC.
-#include "protowire/pxf/table_reader.h"
+#include "protowire/pxf/dataset_reader.h"
 
 #include <cstring>
 #include <sstream>
@@ -126,7 +126,7 @@ int FindAtTable(std::string_view input, bool* found, Status* err) {
   *found = false;
   int i = 0;
   int n = static_cast<int>(input.size());
-  static constexpr std::string_view kAtTable = "@table";
+  static constexpr std::string_view kAtDataset = "@dataset";
   while (i < n) {
     int j = SkipStringOrComment(input, i, err);
     if (!err->ok()) return 0;
@@ -135,10 +135,10 @@ int FindAtTable(std::string_view input, bool* found, Status* err) {
       i = j;
       continue;
     }
-    if (input[i] == '@' && i + static_cast<int>(kAtTable.size()) <= n &&
-        input.substr(i, kAtTable.size()) == kAtTable) {
-      int after = i + static_cast<int>(kAtTable.size());
-      if (after == n) return 0;  // could be `@table` + more bytes — conservative
+    if (input[i] == '@' && i + static_cast<int>(kAtDataset.size()) <= n &&
+        input.substr(i, kAtDataset.size()) == kAtDataset) {
+      int after = i + static_cast<int>(kAtDataset.size());
+      if (after == n) return 0;  // could be `@dataset` + more bytes — conservative
       if (!IsIdentPart(input[after])) {
         *found = true;
         return i;
@@ -205,7 +205,7 @@ int FindMatchingParenSafe(std::string_view input, int open_idx, bool* found, Sta
   return 0;
 }
 
-// Locates the closing `)` of the first complete `@table TYPE ( cols )`
+// Locates the closing `)` of the first complete `@dataset TYPE ( cols )`
 // header in `input`. Returns the index of that `)`; `*found` is false
 // when more bytes are needed.
 int ScanHeaderEnd(std::string_view input, bool* found, Status* err) {
@@ -216,7 +216,7 @@ int ScanHeaderEnd(std::string_view input, bool* found, Status* err) {
   if (!ok) return 0;
   bool lp_ok = false;
   int lparen = FindNextChar(
-      input, at_idx + static_cast<int>(std::string_view("@table").size()), '(', &lp_ok, err);
+      input, at_idx + static_cast<int>(std::string_view("@dataset").size()), '(', &lp_ok, err);
   if (!err->ok()) return 0;
   if (!lp_ok) return 0;
   bool rp_ok = false;
@@ -319,7 +319,7 @@ Status AppendCellValue(std::string& out, const ValuePtr& cell) {
           return Status::OK();
         } else {
           return Status::Error(
-              "pxf: BindRow: unexpected cell value type (v1 @table cells are scalar-shaped)");
+              "pxf: BindRow: unexpected cell value type (v1 @dataset cells are scalar-shaped)");
         }
       },
       cell);
@@ -327,17 +327,17 @@ Status AppendCellValue(std::string& out, const ValuePtr& cell) {
 
 }  // namespace
 
-// ---- TableReader public API -----------------------------------------------
+// ---- DatasetReader public API -----------------------------------------------
 
-StatusOr<std::unique_ptr<TableReader>> TableReader::Create(std::istream* src) {
-  if (src == nullptr) return Status::Error("pxf: TableReader: null istream");
-  auto tr = std::unique_ptr<TableReader>(new TableReader());
+StatusOr<std::unique_ptr<DatasetReader>> DatasetReader::Create(std::istream* src) {
+  if (src == nullptr) return Status::Error("pxf: DatasetReader: null istream");
+  auto tr = std::unique_ptr<DatasetReader>(new DatasetReader());
   tr->src_ = src;
   if (Status s = tr->ReadHeader(); !s.ok()) return s;
   return tr;
 }
 
-Status TableReader::Next(TableRow* out) {
+Status DatasetReader::Next(DatasetRow* out) {
   if (!err_.ok()) return err_;
   if (finished_) return Status::OK();
   for (;;) {
@@ -354,11 +354,11 @@ Status TableReader::Next(TableRow* out) {
     if (found) {
       std::string_view row_bytes(pending_.data() + start, end - start + 1);
       // Parse the row via the AST parser. We wrap it in a synthetic
-      // `@table T (col0,col1,...) <row>` so the existing parser
+      // `@dataset T (col0,col1,...) <row>` so the existing parser
       // accepts it and arity-checks against our column count.
       std::string synthetic;
       synthetic.reserve(row_bytes.size() + 32 + columns_.size() * 8);
-      synthetic.append("@table _.Row (");
+      synthetic.append("@dataset _.Row (");
       for (size_t i = 0; i < columns_.size(); ++i) {
         if (i != 0) synthetic.push_back(',');
         synthetic.append(columns_[i]);
@@ -373,11 +373,11 @@ Status TableReader::Next(TableRow* out) {
         err_ = doc.status();
         return err_;
       }
-      if (doc->tables.empty() || doc->tables[0].rows.empty()) {
-        err_ = Status::Error("pxf: TableReader: synthetic row parse produced no row");
+      if (doc->datasets.empty() || doc->datasets[0].rows.empty()) {
+        err_ = Status::Error("pxf: DatasetReader: synthetic row parse produced no row");
         return err_;
       }
-      *out = std::move(doc->tables[0].rows[0]);
+      *out = std::move(doc->datasets[0].rows[0]);
       return Status::OK();
     }
     if (done) {
@@ -395,23 +395,23 @@ Status TableReader::Next(TableRow* out) {
   }
 }
 
-Status TableReader::Scan(google::protobuf::Message* msg) {
-  TableRow row;
+Status DatasetReader::Scan(google::protobuf::Message* msg) {
+  DatasetRow row;
   if (Status s = Next(&row); !s.ok()) return s;
   if (finished_) return Status::OK();
   return BindRow(msg, columns_, row);
 }
 
-std::unique_ptr<std::istream> TableReader::Tail() {
+std::unique_ptr<std::istream> DatasetReader::Tail() {
   std::ostringstream buf;
   if (!pending_.empty()) buf.write(pending_.data(), static_cast<std::streamsize>(pending_.size()));
   if (src_ != nullptr && !src_eof_) buf << src_->rdbuf();
   return std::make_unique<std::istringstream>(buf.str());
 }
 
-// ---- TableReader internals ------------------------------------------------
+// ---- DatasetReader internals ------------------------------------------------
 
-Status TableReader::Pull(size_t n) {
+Status DatasetReader::Pull(size_t n) {
   if (src_eof_) return Status::OK();
   std::string buf(n, '\0');
   src_->read(buf.data(), static_cast<std::streamsize>(n));
@@ -421,13 +421,13 @@ Status TableReader::Pull(size_t n) {
     src_eof_ = true;
     return Status::OK();
   }
-  if (src_->bad()) return Status::Error("pxf: TableReader: istream read error");
+  if (src_->bad()) return Status::Error("pxf: DatasetReader: istream read error");
   // `fail` without `eof` is unusual; treat as a read error.
-  if (src_->fail() && got == 0) return Status::Error("pxf: TableReader: istream read failed");
+  if (src_->fail() && got == 0) return Status::Error("pxf: DatasetReader: istream read failed");
   return Status::OK();
 }
 
-Status TableReader::ReadHeader() {
+Status DatasetReader::ReadHeader() {
   for (;;) {
     bool found = false;
     Status scan_err;
@@ -437,22 +437,22 @@ Status TableReader::ReadHeader() {
       std::string_view header(pending_.data(), static_cast<size_t>(header_end) + 1);
       auto doc = Parse(header);
       if (!doc.ok()) return doc.status();
-      if (doc->tables.empty()) {
-        return Status::Error("pxf: no @table directive in stream");
+      if (doc->datasets.empty()) {
+        return Status::Error("pxf: no @dataset directive in stream");
       }
-      type_ = std::move(doc->tables[0].type);
-      columns_ = std::move(doc->tables[0].columns);
+      type_ = std::move(doc->datasets[0].type);
+      columns_ = std::move(doc->datasets[0].columns);
       directives_ = std::move(doc->directives);
       pending_.erase(0, static_cast<size_t>(header_end) + 1);
       return Status::OK();
     }
     if (src_eof_) {
-      return Status::Error("pxf: no @table directive in stream");
+      return Status::Error("pxf: no @dataset directive in stream");
     }
     if (static_cast<int>(pending_.size()) >= kDefaultHeaderMaxBytes) {
       return Status::Error(
-          "pxf: @table header exceeds 65536 bytes; raise the budget or check that the input "
-          "begins with `@table TYPE (cols)`");
+          "pxf: @dataset header exceeds 65536 bytes; raise the budget or check that the input "
+          "begins with `@dataset TYPE (cols)`");
     }
     if (Status s = Pull(kStreamPullSize); !s.ok()) return s;
   }
@@ -462,7 +462,7 @@ Status TableReader::ReadHeader() {
 
 Status BindRow(google::protobuf::Message* msg,
                const std::vector<std::string>& columns,
-               const TableRow& row) {
+               const DatasetRow& row) {
   if (columns.size() != row.cells.size()) {
     return Status::Error(std::string("pxf: BindRow: ") + std::to_string(columns.size()) +
                          " columns vs " + std::to_string(row.cells.size()) + " cells");
@@ -480,7 +480,7 @@ Status BindRow(google::protobuf::Message* msg,
     body.push_back('\n');
   }
   // SkipValidate avoids re-running the reserved-name check per row —
-  // TableReader::Create / the materializing UnmarshalFull already
+  // DatasetReader::Create / the materializing UnmarshalFull already
   // validated the descriptor once at bind time.
   UnmarshalOptions opts;
   opts.skip_validate = true;

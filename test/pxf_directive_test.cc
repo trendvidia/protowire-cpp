@@ -4,11 +4,11 @@
 // Parser-tier tests for the v0.72-v0.75 directive grammar:
 //   - @<name> *(<prefix>) [{ ... }]   (draft §3.4.2)
 //   - @entry  *(<prefix>) [{ ... }]   (draft §3.4.3)
-//   - @table  <type> ( cols ) row*    (draft §3.4.4)
+//   - @dataset  <type> ( cols ) row*    (draft §3.4.4)
 //
 // These exercise Parse(...) directly and assert on AST shape — they do
 // NOT decode against a proto descriptor. Decode-tier wiring (Result
-// accessors, TableReader, BindRow) arrives in later PRs of the
+// accessors, DatasetReader, BindRow) arrives in later PRs of the
 // v0.72-v0.75 cpp catch-up sequence.
 
 #include "protowire/pxf.h"
@@ -28,9 +28,9 @@ namespace {
 
 namespace pb = google::protobuf;
 
+using protowire::pxf::DatasetDirective;
 using protowire::pxf::Document;
 using protowire::pxf::Parse;
-using protowire::pxf::TableDirective;
 
 class SilentErrorCollector : public pb::compiler::MultiFileErrorCollector {
  public:
@@ -187,14 +187,14 @@ TEST(Directive, BracesInsideStringNotCounted) {
 }
 
 TEST(Table, BasicTwoColumnsTwoRows) {
-  std::string_view src = R"(@table trades.v1.Trade ( px, qty )
+  std::string_view src = R"(@dataset trades.v1.Trade ( px, qty )
 ( 100, 5 )
 ( 101, 7 )
 )";
   auto doc = Parse(src);
   ASSERT_TRUE(doc.ok()) << doc.status().message();
-  ASSERT_EQ(doc->tables.size(), 1u);
-  const TableDirective& t = doc->tables[0];
+  ASSERT_EQ(doc->datasets.size(), 1u);
+  const DatasetDirective& t = doc->datasets[0];
   EXPECT_EQ(t.type, "trades.v1.Trade");
   ASSERT_EQ(t.columns.size(), 2u);
   EXPECT_EQ(t.columns[0], "px");
@@ -209,13 +209,13 @@ TEST(Table, BasicTwoColumnsTwoRows) {
 TEST(Table, EmptyCellMeansAbsentField) {
   // The middle cell is empty (no value between two commas) — distinct
   // from `null` (present-but-null) per the three-state cell grammar.
-  std::string_view src = R"(@table x.Row ( a, b, c )
+  std::string_view src = R"(@dataset x.Row ( a, b, c )
 ( 1, , 3 )
 )";
   auto doc = Parse(src);
   ASSERT_TRUE(doc.ok()) << doc.status().message();
-  ASSERT_EQ(doc->tables.size(), 1u);
-  const auto& row = doc->tables[0].rows[0];
+  ASSERT_EQ(doc->datasets.size(), 1u);
+  const auto& row = doc->datasets[0].rows[0];
   ASSERT_EQ(row.cells.size(), 3u);
   EXPECT_TRUE(row.cells[0].has_value());
   EXPECT_FALSE(row.cells[1].has_value());  // absent
@@ -223,27 +223,27 @@ TEST(Table, EmptyCellMeansAbsentField) {
 }
 
 TEST(Table, NullCellMeansPresentNull) {
-  std::string_view src = R"(@table x.Row ( a, b )
+  std::string_view src = R"(@dataset x.Row ( a, b )
 ( 1, null )
 )";
   auto doc = Parse(src);
   ASSERT_TRUE(doc.ok()) << doc.status().message();
-  ASSERT_EQ(doc->tables.size(), 1u);
-  const auto& row = doc->tables[0].rows[0];
+  ASSERT_EQ(doc->datasets.size(), 1u);
+  const auto& row = doc->datasets[0].rows[0];
   ASSERT_EQ(row.cells.size(), 2u);
   EXPECT_TRUE(row.cells[1].has_value());  // present-but-null is not nullopt
 }
 
 TEST(Table, ZeroRowsOk) {
-  std::string_view src = "@table x.Row ( a, b )\n";
+  std::string_view src = "@dataset x.Row ( a, b )\n";
   auto doc = Parse(src);
   ASSERT_TRUE(doc.ok()) << doc.status().message();
-  ASSERT_EQ(doc->tables.size(), 1u);
-  EXPECT_EQ(doc->tables[0].rows.size(), 0u);
+  ASSERT_EQ(doc->datasets.size(), 1u);
+  EXPECT_EQ(doc->datasets[0].rows.size(), 0u);
 }
 
 TEST(Table, ArityMismatchRejected) {
-  std::string_view src = R"(@table x.Row ( a, b )
+  std::string_view src = R"(@dataset x.Row ( a, b )
 ( 1, 2, 3 )
 )";
   auto doc = Parse(src);
@@ -252,14 +252,14 @@ TEST(Table, ArityMismatchRejected) {
 }
 
 TEST(Table, DottedColumnRejected) {
-  std::string_view src = "@table x.Row ( a.b )\n";
+  std::string_view src = "@dataset x.Row ( a.b )\n";
   auto doc = Parse(src);
   ASSERT_FALSE(doc.ok());
   EXPECT_NE(doc.status().message().find("dotted column"), std::string::npos);
 }
 
 TEST(Table, ListCellRejected) {
-  std::string_view src = R"(@table x.Row ( a )
+  std::string_view src = R"(@dataset x.Row ( a )
 ( [1, 2] )
 )";
   auto doc = Parse(src);
@@ -268,7 +268,7 @@ TEST(Table, ListCellRejected) {
 }
 
 TEST(Table, BlockCellRejected) {
-  std::string_view src = R"(@table x.Row ( a )
+  std::string_view src = R"(@dataset x.Row ( a )
 ( { x = 1 } )
 )";
   auto doc = Parse(src);
@@ -278,7 +278,7 @@ TEST(Table, BlockCellRejected) {
 
 TEST(Table, StandaloneRejectsCoexistingAtType) {
   std::string_view src = R"(@type some.Other
-@table x.Row ( a )
+@dataset x.Row ( a )
 ( 1 )
 )";
   auto doc = Parse(src);
@@ -287,7 +287,7 @@ TEST(Table, StandaloneRejectsCoexistingAtType) {
 }
 
 TEST(Table, StandaloneRejectsCoexistingBodyEntries) {
-  std::string_view src = R"(@table x.Row ( a )
+  std::string_view src = R"(@dataset x.Row ( a )
 ( 1 )
 extra = 5
 )";
@@ -314,51 +314,54 @@ TEST(Directive, AtTypeWithoutIdentRejected) {
 }
 
 TEST(Directive, AtTypeAfterTableRejected) {
-  // Reverse order of the "type before table" violation: @table first,
+  // Reverse order of the "type before table" violation: @dataset first,
   // then @type — exercises the symmetric branch in ParseDocument.
-  auto doc = Parse("@table x.Row ( a )\n@type other.Msg\n");
+  auto doc = Parse("@dataset x.Row ( a )\n@type other.Msg\n");
   ASSERT_FALSE(doc.ok());
   EXPECT_NE(doc.status().message().find("cannot coexist with @type"), std::string::npos);
 }
 
-TEST(Table, MissingTypeRejected) {
-  auto doc = Parse("@table ( a )\n");
-  ASSERT_FALSE(doc.ok());
-  EXPECT_NE(doc.status().message().find("expected row message type after @table"),
-            std::string::npos);
+TEST(Table, MissingTypeIsPermissive) {
+  // Type is optional in the AST under v1 (binds to a preceding anonymous
+  // @proto per draft §3.4.4 Anonymous binding). Binding-time validation
+  // handles the no-preceding-@proto case.
+  auto doc = Parse("@dataset ( a )\n");
+  ASSERT_TRUE(doc.ok());
+  ASSERT_EQ(doc->datasets.size(), 1u);
+  EXPECT_TRUE(doc->datasets[0].type.empty());
 }
 
 TEST(Table, MissingLParenAfterTypeRejected) {
-  auto doc = Parse("@table x.Row a, b\n");
+  auto doc = Parse("@dataset x.Row a, b\n");
   ASSERT_FALSE(doc.ok());
-  EXPECT_NE(doc.status().message().find("expected '(' to start @table column list"),
+  EXPECT_NE(doc.status().message().find("expected '(' to start @dataset column list"),
             std::string::npos);
 }
 
 TEST(Table, EmptyColumnListRejected) {
-  auto doc = Parse("@table x.Row ( )\n");
+  auto doc = Parse("@dataset x.Row ( )\n");
   ASSERT_FALSE(doc.ok());
   EXPECT_NE(doc.status().message().find("at least one field name"), std::string::npos);
 }
 
 TEST(Table, BadTokenInColumnListRejected) {
   // Integer literal where a field name is expected.
-  auto doc = Parse("@table x.Row ( a, 123 )\n");
+  auto doc = Parse("@dataset x.Row ( a, 123 )\n");
   ASSERT_FALSE(doc.ok());
   EXPECT_NE(doc.status().message().find("expected column field name"), std::string::npos);
 }
 
 TEST(Table, MissingCommaOrRParenInColumnListRejected) {
-  auto doc = Parse("@table x.Row ( a b )\n");
+  auto doc = Parse("@dataset x.Row ( a b )\n");
   ASSERT_FALSE(doc.ok());
-  EXPECT_NE(doc.status().message().find("expected ',' or ')' in @table column list"),
+  EXPECT_NE(doc.status().message().find("expected ',' or ')' in @dataset column list"),
             std::string::npos);
 }
 
 TEST(Table, MissingCommaOrRParenInRowRejected) {
-  auto doc = Parse("@table x.Row ( a, b )\n( 1 2 )\n");
+  auto doc = Parse("@dataset x.Row ( a, b )\n( 1 2 )\n");
   ASSERT_FALSE(doc.ok());
-  EXPECT_NE(doc.status().message().find("expected ',' or ')' in @table row"), std::string::npos);
+  EXPECT_NE(doc.status().message().find("expected ',' or ')' in @dataset row"), std::string::npos);
 }
 
 TEST(Directive, TrailingCommentInBlockBody) {
@@ -486,7 +489,7 @@ string_field = "x"
 
 TEST_F(PxfDirectiveFast, AtTypeAfterTableRejected) {
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal(R"(@table x.Row ( a )
+  auto st = protowire::pxf::Unmarshal(R"(@dataset x.Row ( a )
 @type other
 )",
                                       msg.get());
@@ -497,7 +500,7 @@ TEST_F(PxfDirectiveFast, AtTypeAfterTableRejected) {
 TEST_F(PxfDirectiveFast, TableAfterTypeRejected) {
   auto msg = NewAllTypes();
   auto st = protowire::pxf::Unmarshal(R"(@type other
-@table x.Row ( a )
+@dataset x.Row ( a )
 )",
                                       msg.get());
   ASSERT_FALSE(st.ok());
@@ -505,11 +508,11 @@ TEST_F(PxfDirectiveFast, TableAfterTypeRejected) {
 }
 
 TEST_F(PxfDirectiveFast, TableWithRowsAndStandalone) {
-  // Fast path drops the @table rows in PR 1; the call succeeds because
+  // Fast path drops the @dataset rows in PR 1; the call succeeds because
   // the doc is well-formed (no @type, no body entries). PR 4 will
   // make Result.tables() expose the rows.
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal(R"(@table trades.v1.Trade ( px, qty )
+  auto st = protowire::pxf::Unmarshal(R"(@dataset trades.v1.Trade ( px, qty )
 ( 100, 5 )
 ( 101, 7 )
 )",
@@ -519,7 +522,7 @@ TEST_F(PxfDirectiveFast, TableWithRowsAndStandalone) {
 
 TEST_F(PxfDirectiveFast, TableWithEmptyAndNullCells) {
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal(R"(@table x.Row ( a, b, c )
+  auto st = protowire::pxf::Unmarshal(R"(@dataset x.Row ( a, b, c )
 ( 1, , null )
 ( null, , 9 )
 )",
@@ -529,13 +532,13 @@ TEST_F(PxfDirectiveFast, TableWithEmptyAndNullCells) {
 
 TEST_F(PxfDirectiveFast, TableZeroRows) {
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal("@table x.Row ( a, b )\n", msg.get());
+  auto st = protowire::pxf::Unmarshal("@dataset x.Row ( a, b )\n", msg.get());
   ASSERT_TRUE(st.ok()) << st.message();
 }
 
 TEST_F(PxfDirectiveFast, TableArityMismatchRejected) {
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal(R"(@table x.Row ( a, b )
+  auto st = protowire::pxf::Unmarshal(R"(@dataset x.Row ( a, b )
 ( 1, 2, 3 )
 )",
                                       msg.get());
@@ -545,14 +548,14 @@ TEST_F(PxfDirectiveFast, TableArityMismatchRejected) {
 
 TEST_F(PxfDirectiveFast, TableDottedColumnRejected) {
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal("@table x.Row ( a.b )\n", msg.get());
+  auto st = protowire::pxf::Unmarshal("@dataset x.Row ( a.b )\n", msg.get());
   ASSERT_FALSE(st.ok());
   EXPECT_NE(std::string(st.message()).find("dotted path"), std::string::npos);
 }
 
 TEST_F(PxfDirectiveFast, TableListCellRejected) {
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal(R"(@table x.Row ( a )
+  auto st = protowire::pxf::Unmarshal(R"(@dataset x.Row ( a )
 ( [1, 2] )
 )",
                                       msg.get());
@@ -562,7 +565,7 @@ TEST_F(PxfDirectiveFast, TableListCellRejected) {
 
 TEST_F(PxfDirectiveFast, TableBlockCellRejected) {
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal(R"(@table x.Row ( a )
+  auto st = protowire::pxf::Unmarshal(R"(@dataset x.Row ( a )
 ( { x = 1 } )
 )",
                                       msg.get());
@@ -570,53 +573,55 @@ TEST_F(PxfDirectiveFast, TableBlockCellRejected) {
   EXPECT_NE(std::string(st.message()).find("list/block"), std::string::npos);
 }
 
-TEST_F(PxfDirectiveFast, TableMissingTypeRejected) {
+TEST_F(PxfDirectiveFast, TableMissingTypeIsPermissive) {
+  // Type is optional in v1 (binds to a preceding anonymous @proto per
+  // draft §3.4.4 Anonymous binding). The fast decoder accepts and binds
+  // the empty header; standalone-with-body-entries checking remains.
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal("@table ( a )\n", msg.get());
-  ASSERT_FALSE(st.ok());
-  EXPECT_NE(std::string(st.message()).find("expected row message type after @table"),
-            std::string::npos);
+  auto st = protowire::pxf::Unmarshal("@dataset ( a )\n", msg.get());
+  EXPECT_TRUE(st.ok()) << st.message();
 }
 
 TEST_F(PxfDirectiveFast, TableMissingLParenRejected) {
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal("@table x.Row a, b\n", msg.get());
+  auto st = protowire::pxf::Unmarshal("@dataset x.Row a, b\n", msg.get());
   ASSERT_FALSE(st.ok());
   EXPECT_NE(std::string(st.message()).find("expected '(' to start"), std::string::npos);
 }
 
 TEST_F(PxfDirectiveFast, TableEmptyColumnsRejected) {
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal("@table x.Row ( )\n", msg.get());
+  auto st = protowire::pxf::Unmarshal("@dataset x.Row ( )\n", msg.get());
   ASSERT_FALSE(st.ok());
   EXPECT_NE(std::string(st.message()).find("at least one field name"), std::string::npos);
 }
 
 TEST_F(PxfDirectiveFast, TableBadColumnTokenRejected) {
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal("@table x.Row ( a, 123 )\n", msg.get());
+  auto st = protowire::pxf::Unmarshal("@dataset x.Row ( a, 123 )\n", msg.get());
   ASSERT_FALSE(st.ok());
   EXPECT_NE(std::string(st.message()).find("expected column field name"), std::string::npos);
 }
 
 TEST_F(PxfDirectiveFast, TableMissingCommaInColumnListRejected) {
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal("@table x.Row ( a b )\n", msg.get());
+  auto st = protowire::pxf::Unmarshal("@dataset x.Row ( a b )\n", msg.get());
   ASSERT_FALSE(st.ok());
-  EXPECT_NE(std::string(st.message()).find("expected ',' or ')' in @table column list"),
+  EXPECT_NE(std::string(st.message()).find("expected ',' or ')' in @dataset column list"),
             std::string::npos);
 }
 
 TEST_F(PxfDirectiveFast, TableMissingCommaInRowRejected) {
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal("@table x.Row ( a, b )\n( 1 2 )\n", msg.get());
+  auto st = protowire::pxf::Unmarshal("@dataset x.Row ( a, b )\n( 1 2 )\n", msg.get());
   ASSERT_FALSE(st.ok());
-  EXPECT_NE(std::string(st.message()).find("expected ',' or ')' in @table row"), std::string::npos);
+  EXPECT_NE(std::string(st.message()).find("expected ',' or ')' in @dataset row"),
+            std::string::npos);
 }
 
 TEST_F(PxfDirectiveFast, TableWithBodyEntriesRejected) {
   auto msg = NewAllTypes();
-  auto st = protowire::pxf::Unmarshal(R"(@table x.Row ( a )
+  auto st = protowire::pxf::Unmarshal(R"(@dataset x.Row ( a )
 ( 1 )
 string_field = "extra"
 )",

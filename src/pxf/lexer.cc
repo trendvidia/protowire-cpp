@@ -163,8 +163,10 @@ const char* TokenKindName(TokenKind k) {
       return ")";
     case TokenKind::kAtType:
       return "@type";
-    case TokenKind::kAtTable:
-      return "@table";
+    case TokenKind::kAtDataset:
+      return "@dataset";
+    case TokenKind::kAtProto:
+      return "@proto";
     case TokenKind::kAtDirective:
       return "@<directive>";
   }
@@ -491,7 +493,8 @@ Token Lexer::LexDirective(Position pos) {
   std::string_view name = input_.substr(start, pos_ - start);
   if (name.empty()) return Token{TokenKind::kIllegal, "@", pos};
   if (name == "type") return Token{TokenKind::kAtType, "@type", pos};
-  if (name == "table") return Token{TokenKind::kAtTable, "@table", pos};
+  if (name == "dataset") return Token{TokenKind::kAtDataset, "@dataset", pos};
+  if (name == "proto") return Token{TokenKind::kAtProto, "@proto", pos};
   // kAtDirective's Token.value carries the bare name (no `@`); the
   // parser uses this directly as Directive.name.
   return Token{TokenKind::kAtDirective, name, pos};

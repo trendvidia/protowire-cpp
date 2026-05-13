@@ -28,16 +28,16 @@ enum class TokenKind : uint8_t {
   kRBrace,
   kLBracket,
   kRBracket,
-  kLParen,  // ( — used by @table column list and row tuples
+  kLParen,  // ( — used by @dataset column list and row tuples
   kRParen,  // )
   kEquals,
   kColon,
   kComma,
 
   kAtType,
-  kAtDirective,  // @<ident> where ident is not "type" or "table"; Token.value carries the bare name
-                 // (no '@')
-  kAtTable,      // @table — bulk-row directive (draft §3.4.4)
+  kAtDirective,  // @<ident> for any non-reserved name; Token.value carries the bare name (no '@')
+  kAtDataset,    // @dataset — row-oriented bulk-data directive (draft §3.4.4)
+  kAtProto,      // @proto — embedded protobuf schema directive (draft §3.4.5)
 };
 
 const char* TokenKindName(TokenKind k);

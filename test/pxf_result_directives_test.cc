@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 TrendVidia, LLC.
 //
-// Tests for Result::Directives() / Result::Tables() — PR 3 of the
+// Tests for Result::Directives() / Result::Datasets() — PR 3 of the
 // v0.72-v0.75 cpp catch-up. The fast-path decoder now populates the
 // directive vectors on Result during UnmarshalFull, so consumers
 // (chameleon's @header reader, table binders, etc.) can read the
@@ -59,7 +59,7 @@ TEST_F(PxfResultDirectives, EmptyDocumentHasEmptyAccessors) {
   auto r = protowire::pxf::UnmarshalFull("string_field = \"x\"\n", msg.get());
   ASSERT_TRUE(r.ok()) << r.status().message();
   EXPECT_TRUE(r->Directives().empty());
-  EXPECT_TRUE(r->Tables().empty());
+  EXPECT_TRUE(r->Datasets().empty());
 }
 
 TEST_F(PxfResultDirectives, BareDirectiveRecorded) {
@@ -155,18 +155,18 @@ string_field = "x"
   EXPECT_EQ(r->Directives()[0].name, "frob");
 }
 
-// ---- @table ---------------------------------------------------------------
+// ---- @dataset ---------------------------------------------------------------
 
 TEST_F(PxfResultDirectives, TableRecordedWithColumnsAndRows) {
   auto msg = NewAllTypes();
-  auto r = protowire::pxf::UnmarshalFull(R"(@table trades.v1.Trade ( px, qty )
+  auto r = protowire::pxf::UnmarshalFull(R"(@dataset trades.v1.Trade ( px, qty )
 ( 100, 5 )
 ( 101, 7 )
 )",
                                          msg.get());
   ASSERT_TRUE(r.ok()) << r.status().message();
-  ASSERT_EQ(r->Tables().size(), 1u);
-  const auto& t = r->Tables()[0];
+  ASSERT_EQ(r->Datasets().size(), 1u);
+  const auto& t = r->Datasets()[0];
   EXPECT_EQ(t.type, "trades.v1.Trade");
   ASSERT_EQ(t.columns.size(), 2u);
   EXPECT_EQ(t.columns[0], "px");
@@ -179,13 +179,13 @@ TEST_F(PxfResultDirectives, TableRecordedWithColumnsAndRows) {
 
 TEST_F(PxfResultDirectives, TableCellsCarryActualValues) {
   auto msg = NewAllTypes();
-  auto r = protowire::pxf::UnmarshalFull(R"(@table x.Row ( a, b, c )
+  auto r = protowire::pxf::UnmarshalFull(R"(@dataset x.Row ( a, b, c )
 ( 42, "hello", true )
 )",
                                          msg.get());
   ASSERT_TRUE(r.ok()) << r.status().message();
-  ASSERT_EQ(r->Tables().size(), 1u);
-  const auto& row = r->Tables()[0].rows[0];
+  ASSERT_EQ(r->Datasets().size(), 1u);
+  const auto& row = r->Datasets()[0].rows[0];
   ASSERT_EQ(row.cells.size(), 3u);
   // Cell 0: IntVal with raw "42".
   ASSERT_TRUE(row.cells[0].has_value());
@@ -205,13 +205,13 @@ TEST_F(PxfResultDirectives, TableThreeStateCells) {
   // Empty cell = nullopt (absent); `null` literal = present-but-null
   // (cell holds a NullVal); value = present-with-value.
   auto msg = NewAllTypes();
-  auto r = protowire::pxf::UnmarshalFull(R"(@table x.Row ( a, b, c )
+  auto r = protowire::pxf::UnmarshalFull(R"(@dataset x.Row ( a, b, c )
 ( 1, , null )
 )",
                                          msg.get());
   ASSERT_TRUE(r.ok()) << r.status().message();
-  ASSERT_EQ(r->Tables().size(), 1u);
-  const auto& row = r->Tables()[0].rows[0];
+  ASSERT_EQ(r->Datasets().size(), 1u);
+  const auto& row = r->Datasets()[0].rows[0];
   ASSERT_EQ(row.cells.size(), 3u);
   EXPECT_TRUE(row.cells[0].has_value());   // present
   EXPECT_FALSE(row.cells[1].has_value());  // absent
@@ -221,41 +221,41 @@ TEST_F(PxfResultDirectives, TableThreeStateCells) {
 
 TEST_F(PxfResultDirectives, MultipleTablesInOrder) {
   auto msg = NewAllTypes();
-  auto r = protowire::pxf::UnmarshalFull(R"(@table a.Row ( x )
+  auto r = protowire::pxf::UnmarshalFull(R"(@dataset a.Row ( x )
 ( 1 )
-@table b.Row ( y, z )
+@dataset b.Row ( y, z )
 ( "p", "q" )
 )",
                                          msg.get());
   ASSERT_TRUE(r.ok()) << r.status().message();
-  ASSERT_EQ(r->Tables().size(), 2u);
-  EXPECT_EQ(r->Tables()[0].type, "a.Row");
-  EXPECT_EQ(r->Tables()[1].type, "b.Row");
+  ASSERT_EQ(r->Datasets().size(), 2u);
+  EXPECT_EQ(r->Datasets()[0].type, "a.Row");
+  EXPECT_EQ(r->Datasets()[1].type, "b.Row");
 }
 
 TEST_F(PxfResultDirectives, TableLeavesDirectivesEmpty) {
-  // Cross-check that @table populates only Tables(), not Directives().
+  // Cross-check that @dataset populates only Datasets(), not Directives().
   auto msg = NewAllTypes();
-  auto r = protowire::pxf::UnmarshalFull("@table x.Row ( a )\n( 1 )\n", msg.get());
+  auto r = protowire::pxf::UnmarshalFull("@dataset x.Row ( a )\n( 1 )\n", msg.get());
   ASSERT_TRUE(r.ok()) << r.status().message();
-  EXPECT_EQ(r->Tables().size(), 1u);
+  EXPECT_EQ(r->Datasets().size(), 1u);
   EXPECT_TRUE(r->Directives().empty());
 }
 
 TEST_F(PxfResultDirectives, DirectivesAndTablesCanCoexist) {
-  // Note: a doc with @table can NOT have @type or body entries, but it
-  // CAN carry generic @<directive>s before the @table.
+  // Note: a doc with @dataset can NOT have @type or body entries, but it
+  // CAN carry generic @<directive>s before the @dataset.
   auto msg = NewAllTypes();
   auto r = protowire::pxf::UnmarshalFull(R"(@header pkg.Hdr { id = "h" }
-@table x.Row ( a )
+@dataset x.Row ( a )
 ( 1 )
 )",
                                          msg.get());
   ASSERT_TRUE(r.ok()) << r.status().message();
   ASSERT_EQ(r->Directives().size(), 1u);
-  ASSERT_EQ(r->Tables().size(), 1u);
+  ASSERT_EQ(r->Datasets().size(), 1u);
   EXPECT_EQ(r->Directives()[0].name, "header");
-  EXPECT_EQ(r->Tables()[0].type, "x.Row");
+  EXPECT_EQ(r->Datasets()[0].type, "x.Row");
 }
 
 // ---- Discard path: Unmarshal (no Result) -------------------------------

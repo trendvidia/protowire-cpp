@@ -8,6 +8,7 @@
 #include "protowire/detail/duration.h"
 #include "protowire/detail/rfc3339.h"
 #include "protowire/pxf/lexer.h"
+#include "protowire/pxf/schema.h"
 
 namespace protowire::pxf {
 
@@ -29,8 +30,9 @@ class Parser {
   StatusOr<ValuePtr> ParseBlockVal();
   StatusOr<std::vector<EntryPtr>> ParseBody();
   StatusOr<Directive> ParseDirective(int* end_offset);
-  StatusOr<TableDirective> ParseTableDirective(int* end_offset);
-  StatusOr<TableRow> ParseTableRow(int expected, int* end_offset);
+  StatusOr<DatasetDirective> ParseTableDirective(int* end_offset);
+  StatusOr<DatasetRow> ParseTableRow(int expected, int* end_offset);
+  StatusOr<ProtoDirective> ParseProtoDirective(int* end_offset);
   StatusOr<std::optional<ValuePtr>> ParseRowCell();
   TokenKind PeekKind();
 
@@ -68,9 +70,9 @@ StatusOr<Document> Parser::ParseDocument() {
   Document doc;
   doc.leading_comments = FlushComments();
 
-  // Top-of-document directives. @type, @<name>, and @table may interleave
+  // Top-of-document directives. @type, @<name>, and @dataset may interleave
   // in any order; @type populates type_url, @<name> appends to directives,
-  // @table appends to tables. body_offset tracks the byte immediately
+  // @dataset appends to tables. body_offset tracks the byte immediately
   // after the last directive's last token so consumers (e.g. chameleon)
   // can hash from there; it stays 0 when no directives are present.
   bool saw_type = false;
@@ -81,7 +83,7 @@ StatusOr<Document> Parser::ParseDocument() {
       if (has_table) {
         return Status::Error(current_.pos.line,
                              current_.pos.column,
-                             "@table directive cannot coexist with @type; the @table header "
+                             "@dataset directive cannot coexist with @type; the @dataset header "
                              "declares the document's type (draft §3.4.4)");
       }
       saw_type = true;
@@ -99,11 +101,11 @@ StatusOr<Document> Parser::ParseDocument() {
       if (!d.ok()) return d.status();
       doc.directives.push_back(std::move(d).consume());
       doc.body_offset = end;
-    } else if (current_.kind == TokenKind::kAtTable) {
+    } else if (current_.kind == TokenKind::kAtDataset) {
       if (saw_type) {
         return Status::Error(current_.pos.line,
                              current_.pos.column,
-                             "@table directive cannot coexist with @type; the @table header "
+                             "@dataset directive cannot coexist with @type; the @dataset header "
                              "declares the document's type (draft §3.4.4)");
       }
       int end = 0;
@@ -113,7 +115,13 @@ StatusOr<Document> Parser::ParseDocument() {
         first_table_pos = tbl->pos;
         has_table = true;
       }
-      doc.tables.push_back(std::move(tbl).consume());
+      doc.datasets.push_back(std::move(tbl).consume());
+      doc.body_offset = end;
+    } else if (current_.kind == TokenKind::kAtProto) {
+      int end = 0;
+      auto pd = ParseProtoDirective(&end);
+      if (!pd.ok()) return pd.status();
+      doc.protos.push_back(std::move(pd).consume());
       doc.body_offset = end;
     } else {
       break;
@@ -121,14 +129,14 @@ StatusOr<Document> Parser::ParseDocument() {
   }
 
   // Standalone constraint (draft §3.4.4): a document containing any
-  // @table directive MUST NOT also carry top-level field entries; the
-  // @table header IS the document's type declaration.
+  // @dataset directive MUST NOT also carry top-level field entries; the
+  // @dataset header IS the document's type declaration.
   if (has_table && current_.kind != TokenKind::kEOF) {
     return Status::Error(
         first_table_pos.line,
         first_table_pos.column,
-        "@table directive cannot coexist with top-level field entries; the document's "
-        "payload is the @table rows (draft §3.4.4)");
+        "@dataset directive cannot coexist with top-level field entries; the document's "
+        "payload is the @dataset rows (draft §3.4.4)");
   }
 
   while (current_.kind != TokenKind::kEOF) {
@@ -407,6 +415,13 @@ StatusOr<Directive> Parser::ParseDirective(int* end_offset) {
   auto leading = FlushComments();
   Position at_pos = current_.pos;
   std::string name(current_.value);
+  if (IsFutureReservedDirective(name)) {
+    return Status::Error(
+        at_pos.line,
+        at_pos.column,
+        std::string("@") + name +
+            " is a spec-reserved directive name with no v1 semantics (draft §3.4.6)");
+  }
   Directive d;
   d.pos = at_pos;
   d.name = name;
@@ -457,31 +472,28 @@ StatusOr<Directive> Parser::ParseDirective(int* end_offset) {
   return d;
 }
 
-// ParseTableDirective reads `@table <type> ( col1, col2, ... ) row*`.
-// kAtTable is current on entry. Writes the byte offset immediately
+// ParseTableDirective reads `@dataset <type> ( col1, col2, ... ) row*`.
+// kAtDataset is current on entry. Writes the byte offset immediately
 // past the directive's last token to *end_offset. See draft §3.4.4.
-StatusOr<TableDirective> Parser::ParseTableDirective(int* end_offset) {
+StatusOr<DatasetDirective> Parser::ParseTableDirective(int* end_offset) {
   auto leading = FlushComments();
-  TableDirective tbl;
+  DatasetDirective tbl;
   tbl.pos = current_.pos;
   tbl.leading_comments = std::move(leading);
-  Advance();  // consume @table
+  Advance();  // consume @dataset
 
-  // Required: row message type (dotted identifier).
-  if (current_.kind != TokenKind::kIdent) {
-    return Status::Error(
-        current_.pos.line,
-        current_.pos.column,
-        std::string("expected row message type after @table, got ") + TokenKindName(current_.kind));
+  // Optional row message type. MAY be omitted when an anonymous @proto
+  // directive precedes the dataset (draft §3.4.4 Anonymous binding).
+  if (current_.kind == TokenKind::kIdent) {
+    tbl.type = std::string(current_.value);
+    Advance();
   }
-  tbl.type = std::string(current_.value);
-  Advance();
 
   // Required: column list in `( ... )`. At least one column.
   if (current_.kind != TokenKind::kLParen) {
     return Status::Error(current_.pos.line,
                          current_.pos.column,
-                         std::string("expected '(' to start @table column list, got ") +
+                         std::string("expected '(' to start @dataset column list, got ") +
                              TokenKindName(current_.kind));
   }
   Advance();  // consume (
@@ -489,7 +501,7 @@ StatusOr<TableDirective> Parser::ParseTableDirective(int* end_offset) {
   if (current_.kind != TokenKind::kIdent) {
     return Status::Error(current_.pos.line,
                          current_.pos.column,
-                         std::string("@table column list must contain at least one field name, "
+                         std::string("@dataset column list must contain at least one field name, "
                                      "got ") +
                              TokenKindName(current_.kind));
   }
@@ -506,7 +518,7 @@ StatusOr<TableDirective> Parser::ParseTableDirective(int* end_offset) {
     if (ContainsDot(col_name)) {
       return Status::Error(current_.pos.line,
                            current_.pos.column,
-                           std::string("@table column \"") + col_name +
+                           std::string("@dataset column \"") + col_name +
                                "\": dotted column paths are not supported in v1 (draft §3.4.4)");
     }
     tbl.columns.push_back(std::move(col_name));
@@ -518,7 +530,7 @@ StatusOr<TableDirective> Parser::ParseTableDirective(int* end_offset) {
     if (current_.kind == TokenKind::kRParen) break;
     return Status::Error(current_.pos.line,
                          current_.pos.column,
-                         std::string("expected ',' or ')' in @table column list, got ") +
+                         std::string("expected ',' or ')' in @dataset column list, got ") +
                              TokenKindName(current_.kind));
   }
   int eo = current_.pos.offset + 1;  // past `)`
@@ -539,11 +551,11 @@ StatusOr<TableDirective> Parser::ParseTableDirective(int* end_offset) {
 // ParseTableRow reads `( cell ( ',' cell )* )` with an arity check
 // against `expected`. kLParen is current on entry. Writes the byte
 // offset immediately past the closing `)` to *end_offset.
-StatusOr<TableRow> Parser::ParseTableRow(int expected, int* end_offset) {
+StatusOr<DatasetRow> Parser::ParseTableRow(int expected, int* end_offset) {
   Position pos = current_.pos;
   Advance();  // consume (
 
-  TableRow row;
+  DatasetRow row;
   row.pos = pos;
   row.cells.reserve(expected);
 
@@ -562,7 +574,7 @@ StatusOr<TableRow> Parser::ParseTableRow(int expected, int* end_offset) {
     return Status::Error(
         current_.pos.line,
         current_.pos.column,
-        std::string("expected ',' or ')' in @table row, got ") + TokenKindName(current_.kind));
+        std::string("expected ',' or ')' in @dataset row, got ") + TokenKindName(current_.kind));
   }
   int eo = current_.pos.offset + 1;
   Advance();  // consume )
@@ -570,14 +582,102 @@ StatusOr<TableRow> Parser::ParseTableRow(int expected, int* end_offset) {
   if (static_cast<int>(row.cells.size()) != expected) {
     return Status::Error(pos.line,
                          pos.column,
-                         std::string("@table row has ") + std::to_string(row.cells.size()) +
+                         std::string("@dataset row has ") + std::to_string(row.cells.size()) +
                              " cells, expected " + std::to_string(expected) + " (column count)");
   }
   *end_offset = eo;
   return row;
 }
 
-// ParseRowCell consumes one cell of a @table row. Returns nullopt for
+// ParseProtoDirective reads `@proto <body>` (draft §3.4.5). kAtProto
+// is current on entry. Four body shapes are lexically distinguished:
+//
+//   - anonymous:  `@proto { <message-body> }`
+//   - named:      `@proto <dotted-name> { <message-body> }`
+//   - source:     `@proto """<proto-source>"""`
+//   - descriptor: `@proto b"<base64-FileDescriptorSet>"`
+//
+// For brace-bounded shapes the body is sliced as raw bytes between
+// `{` and the matching `}` (both exclusive); the contents are
+// protobuf source and are NOT decoded as PXF entries.
+StatusOr<ProtoDirective> Parser::ParseProtoDirective(int* end_offset) {
+  auto leading = FlushComments();
+  Position at_pos = current_.pos;
+  ProtoDirective pd;
+  pd.pos = at_pos;
+  pd.leading_comments = std::move(leading);
+  Advance();  // consume @proto
+
+  auto capture_brace_body = [this, at_pos](
+                                const std::string& label, std::string* body, int* eo) -> Status {
+    int open = current_.pos.offset;
+    int close = FindMatchingBrace(lex_.Input(), open);
+    if (close < 0) {
+      return Status::Error(at_pos.line, at_pos.column, label + ": unmatched '{'");
+    }
+    *body = std::string(lex_.Input().substr(open + 1, close - (open + 1)));
+    // Reposition the lexer past the closing `}` and prime the parser.
+    lex_.RepositionTo(close + 1);
+    Advance();
+    *eo = close + 1;
+    return Status::OK();
+  };
+
+  switch (current_.kind) {
+    case TokenKind::kLBrace: {
+      pd.shape = ProtoShape::kAnonymous;
+      int eo = 0;
+      auto st = capture_brace_body("@proto (anonymous form)", &pd.body, &eo);
+      if (!st.ok()) return st;
+      *end_offset = eo;
+      return pd;
+    }
+    case TokenKind::kIdent: {
+      pd.shape = ProtoShape::kNamed;
+      pd.type_name = std::string(current_.value);
+      Advance();
+      if (current_.kind != TokenKind::kLBrace) {
+        return Status::Error(current_.pos.line,
+                             current_.pos.column,
+                             std::string("expected '{' after @proto ") + pd.type_name + ", got " +
+                                 TokenKindName(current_.kind));
+      }
+      int eo = 0;
+      auto st = capture_brace_body(std::string("@proto ") + pd.type_name, &pd.body, &eo);
+      if (!st.ok()) return st;
+      *end_offset = eo;
+      return pd;
+    }
+    case TokenKind::kString: {
+      pd.shape = ProtoShape::kSource;
+      pd.body = std::string(current_.value);
+      *end_offset = current_.pos.offset + static_cast<int>(current_.value.size());
+      Advance();
+      return pd;
+    }
+    case TokenKind::kBytes: {
+      pd.shape = ProtoShape::kDescriptor;
+      auto decoded = detail::Base64DecodeStd(current_.value);
+      if (!decoded.has_value()) {
+        return Status::Error(
+            current_.pos.line, current_.pos.column, "@proto descriptor body: invalid base64");
+      }
+      pd.body = std::string(decoded->begin(), decoded->end());
+      *end_offset = current_.pos.offset + static_cast<int>(current_.value.size()) + 3;  // b" … "
+      Advance();
+      return pd;
+    }
+    default:
+      return Status::Error(
+          current_.pos.line,
+          current_.pos.column,
+          std::string("expected '{', dotted identifier, triple-quoted string, or b\"...\" after "
+                      "@proto, got ") +
+              TokenKindName(current_.kind));
+  }
+}
+
+// ParseRowCell consumes one cell of a @dataset row. Returns nullopt for
 // an empty cell (no value between two commas, or at row start/end);
 // rejects list / block values per v1 cell-grammar (draft §3.4.4).
 StatusOr<std::optional<ValuePtr>> Parser::ParseRowCell() {
@@ -588,11 +688,11 @@ StatusOr<std::optional<ValuePtr>> Parser::ParseRowCell() {
     case TokenKind::kLBracket:
       return Status::Error(current_.pos.line,
                            current_.pos.column,
-                           "@table cells cannot contain list values in v1 (draft §3.4.4)");
+                           "@dataset cells cannot contain list values in v1 (draft §3.4.4)");
     case TokenKind::kLBrace:
       return Status::Error(current_.pos.line,
                            current_.pos.column,
-                           "@table cells cannot contain block values in v1 (draft §3.4.4)");
+                           "@dataset cells cannot contain block values in v1 (draft §3.4.4)");
     default:
       break;
   }

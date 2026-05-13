@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <google/protobuf/descriptor.h>
@@ -60,5 +61,15 @@ std::vector<Violation> ValidateDescriptor(const google::protobuf::Descriptor* de
 // ValidateFile walks `fd` and returns every reserved-name collision in
 // the file. See ValidateDescriptor for the rule and semantics.
 std::vector<Violation> ValidateFile(const google::protobuf::FileDescriptor* fd);
+
+// IsFutureReservedDirective returns true when `name` is one of the
+// directive names the spec reserves for future allocation (draft
+// §3.4.6): "table", "datasource", "view", "procedure", "function",
+// "permissions". v1 decoders MUST reject these as unknown reserved
+// directives. The names with their own production (`type`, `dataset`,
+// `proto`) and the spec-registered `entry` aren't covered here —
+// they're already handled either by the lexer or the named_directive
+// shape.
+bool IsFutureReservedDirective(std::string_view name);
 
 }  // namespace protowire::pxf

@@ -132,8 +132,9 @@ struct BlockVal {
 // entry. The canonical use is side-channel metadata that sits alongside
 // the schema-typed body — e.g. chameleon's
 // `@header chameleon.v1.LayerHeader { id = "x" }` — but the grammar is
-// open-ended: any name except `type` / `table` is parsed as a generic
-// Directive. Prefix identifiers are positional and per-directive.
+// open-ended: any name not in the spec-reserved set (draft §3.4.6) is
+// parsed as a generic Directive. Prefix identifiers are positional
+// and per-directive.
 //
 // Specific registrations:
 //   - One prefix (v0.72.0 conventional shape) — names the inner block's
@@ -146,7 +147,7 @@ struct BlockVal {
 // (both exclusive) — empty when the directive has no inline block.
 struct Directive {
   Position pos;
-  std::string name;                   // e.g. "header"; never "type" / "table"
+  std::string name;                   // e.g. "header"; never a spec-reserved name (§3.4.6)
   std::vector<std::string> prefixes;  // identifiers between @<name> and the optional `{ ... }`
   // Back-compat: when exactly one prefix identifier was supplied, `type`
   // holds it (matching v0.72.0's single-Type shape). Empty otherwise.
@@ -156,36 +157,81 @@ struct Directive {
   std::vector<Comment> leading_comments;
 };
 
-// TableRow is one parenthesized cell tuple in a `@table` directive.
-// `cells` is the same length as the containing TableDirective.columns.
+// DatasetRow is one parenthesized cell tuple in a `@dataset` directive.
+// `cells` is the same length as the containing DatasetDirective.columns.
 // A `std::nullopt` cell denotes an absent field (the "empty cell"
 // between two commas); a non-empty optional holding a `NullVal` denotes
 // a present-but-null field; any other Value denotes a present field.
-struct TableRow {
+struct DatasetRow {
   Position pos;
   std::vector<std::optional<ValuePtr>> cells;
 };
 
-// TableDirective is a `@table <type> ( col1, col2, ... ) row*` entry at
-// document root (draft §3.4.4). It carries many instances of one
-// message type in a single document — the protowire-native CSV.
+// DatasetDirective is a `@dataset <type> ( col1, col2, ... ) row*` entry
+// at document root (draft §3.4.4). It carries many instances of one
+// message type in a single document — the protowire-native CSV
+// replacement.
 //
-// Per draft §3.4.4, a document with any TableDirective MUST NOT have a
-// @type directive or any top-level field entries: the @table header IS
-// the document's type declaration. Decoders enforce this in Parse.
-struct TableDirective {
+// Per draft §3.4.4, a document with any DatasetDirective MUST NOT have
+// a @type directive or any top-level field entries: the @dataset header
+// IS the document's type declaration. Decoders enforce this in Parse.
+//
+// `type` MAY be empty when an anonymous `@proto` directive (§3.4.5)
+// precedes the dataset in document order; the anonymous schema is
+// consumed as the row message type.
+struct DatasetDirective {
   Position pos;
   std::string type;                  // row message type, e.g. "trades.v1.Trade"
   std::vector<std::string> columns;  // top-level field names on `type`; len >= 1
-  std::vector<TableRow> rows;        // zero or more rows
+  std::vector<DatasetRow> rows;      // zero or more rows
+  std::vector<Comment> leading_comments;
+};
+
+// ProtoShape distinguishes the four body shapes of a @proto directive
+// (draft §3.4.5).
+enum class ProtoShape : uint8_t {
+  // `@proto { <message-body> }` — defines an unnamed message used by
+  // the next typed directive in document order.
+  kAnonymous = 0,
+  // `@proto <dotted-name> { <message-body> }` — sugar for a single named
+  // message; `type_name` carries the dotted name.
+  kNamed,
+  // `@proto """<proto-source>"""` — complete .proto source file.
+  kSource,
+  // `@proto b"<base64-FileDescriptorSet>"` — base64-encoded
+  // google.protobuf.FileDescriptorSet bytes.
+  kDescriptor,
+};
+
+const char* ProtoShapeName(ProtoShape s);
+
+// ProtoDirective is a `@proto <body>` entry at document root
+// (draft §3.4.5). It carries an embedded protobuf schema, making the
+// PXF document self-describing.
+//
+// `body` carries raw bytes per shape:
+//   - kAnonymous, kNamed: bytes between the opening `{` and matching
+//     `}` (both exclusive). The bytes are protobuf message-body source.
+//   - kSource: contents of the triple-quoted string (with leading-LF
+//     stripping and common-prefix dedent applied). The bytes are a
+//     complete .proto source file.
+//   - kDescriptor: base64-decoded bytes of the bytes literal. The
+//     bytes are a serialised google.protobuf.FileDescriptorSet.
+//
+// `type_name` is non-empty only when `shape == kNamed`.
+struct ProtoDirective {
+  Position pos;
+  ProtoShape shape = ProtoShape::kAnonymous;
+  std::string type_name;
+  std::string body;
   std::vector<Comment> leading_comments;
 };
 
 struct Document {
-  std::string type_url;  // empty if no @type directive
-  std::vector<Directive>
-      directives;  // @<name> *(prefix) [{ ... }] entries in source order; excludes @type and @table
-  std::vector<TableDirective> tables;  // @table directives in source order
+  std::string type_url;               // empty if no @type directive
+  std::vector<Directive> directives;  // @<name> directives in source order; excludes spec-defined
+  std::vector<DatasetDirective> datasets;  // @dataset directives in source order (draft §3.4.4)
+  std::vector<ProtoDirective> protos;      // @proto directives in source order (draft §3.4.5)
   int body_offset =
       0;  // byte offset where the schema-typed body begins (after all leading directives)
   std::vector<EntryPtr> entries;

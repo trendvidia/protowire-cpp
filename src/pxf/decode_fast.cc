@@ -125,7 +125,7 @@ class DirectDecoder {
 
   // ParseScalarCellValue consumes one scalar token at current_ and
   // builds the corresponding ValuePtr. Mirrors the scalar branches of
-  // the AST parser's ParseValue. Used by @table row parsing in
+  // the AST parser's ParseValue. Used by @dataset row parsing in
   // ConsumeDirectives — list / block / unparseable cell tokens are
   // already rejected by the caller, so this only handles scalar shapes.
   StatusOr<ValuePtr> ParseScalarCellValue() {
@@ -206,20 +206,20 @@ class DirectDecoder {
         return Status::Error(
             pos.line,
             pos.column,
-            std::string("unsupported @table cell value: ") + TokenKindName(current_.kind));
+            std::string("unsupported @dataset cell value: ") + TokenKindName(current_.kind));
     }
   }
 
-  // ConsumeDirectives drains any leading `@type` / `@<name>` / `@table`
+  // ConsumeDirectives drains any leading `@type` / `@<name>` / `@dataset`
   // directives, leaving current_ at the first body token. When
   // result_ != nullptr (UnmarshalFull path), populates
-  // Result::Directives() and Result::Tables() with parsed Directive /
-  // TableDirective entries; when result_ == nullptr (Unmarshal path),
+  // Result::Directives() and Result::Datasets() with parsed Directive /
+  // DatasetDirective entries; when result_ == nullptr (Unmarshal path),
   // performs the same syntactic walk for validation but discards the
   // contents — no AST allocation occurs.
   //
   // Enforces the standalone constraint (draft §3.4.4): a document
-  // containing any @table directive MUST NOT also carry @type or
+  // containing any @dataset directive MUST NOT also carry @type or
   // top-level field entries.
   Status ConsumeDirectives() {
     bool saw_type = false;
@@ -229,7 +229,7 @@ class DirectDecoder {
       if (current_.kind == TokenKind::kAtType) {
         if (has_table) {
           return PosError(current_.pos,
-                          "@table directive cannot coexist with @type (draft §3.4.4)");
+                          "@dataset directive cannot coexist with @type (draft §3.4.4)");
         }
         saw_type = true;
         Advance();  // consume @type
@@ -238,6 +238,12 @@ class DirectDecoder {
         }
         Advance();
       } else if (current_.kind == TokenKind::kAtDirective) {
+        if (IsFutureReservedDirective(current_.value)) {
+          return PosError(
+              current_.pos,
+              std::string("@") + std::string(current_.value) +
+                  " is a spec-reserved directive name with no v1 semantics (draft §3.4.6)");
+        }
         Directive dir;
         dir.pos = current_.pos;
         dir.name = std::string(current_.value);
@@ -282,29 +288,31 @@ class DirectDecoder {
           }
         }
         if (result_ != nullptr) result_->AddDirective(std::move(dir));
-      } else if (current_.kind == TokenKind::kAtTable) {
+      } else if (current_.kind == TokenKind::kAtDataset) {
         if (saw_type) {
           return PosError(current_.pos,
-                          "@table directive cannot coexist with @type (draft §3.4.4)");
+                          "@dataset directive cannot coexist with @type (draft §3.4.4)");
         }
-        TableDirective tbl;
+        DatasetDirective tbl;
         tbl.pos = current_.pos;
         if (!has_table) {
           first_table_pos = current_.pos;
           has_table = true;
         }
-        Advance();  // consume @table
-        if (current_.kind != TokenKind::kIdent) {
-          return PosError(current_.pos, "expected row message type after @table");
+        Advance();  // consume @dataset
+        // Optional row message type; MAY be omitted when an anonymous
+        // @proto precedes (draft §3.4.4 Anonymous binding).
+        if (current_.kind == TokenKind::kIdent) {
+          tbl.type = std::string(current_.value);
+          Advance();
         }
-        tbl.type = std::string(current_.value);
-        Advance();
         if (current_.kind != TokenKind::kLParen) {
-          return PosError(current_.pos, "expected '(' to start @table column list");
+          return PosError(current_.pos, "expected '(' to start @dataset column list");
         }
         Advance();
         if (current_.kind != TokenKind::kIdent) {
-          return PosError(current_.pos, "@table column list must contain at least one field name");
+          return PosError(current_.pos,
+                          "@dataset column list must contain at least one field name");
         }
         for (;;) {
           if (current_.kind != TokenKind::kIdent) {
@@ -313,8 +321,9 @@ class DirectDecoder {
           // v1: dotted column paths are reserved for a future revision.
           for (char c : current_.value) {
             if (c == '.') {
-              return PosError(current_.pos,
-                              "@table column has dotted path; not supported in v1 (draft §3.4.4)");
+              return PosError(
+                  current_.pos,
+                  "@dataset column has dotted path; not supported in v1 (draft §3.4.4)");
             }
           }
           tbl.columns.emplace_back(current_.value);
@@ -324,13 +333,13 @@ class DirectDecoder {
             continue;
           }
           if (current_.kind == TokenKind::kRParen) break;
-          return PosError(current_.pos, "expected ',' or ')' in @table column list");
+          return PosError(current_.pos, "expected ',' or ')' in @dataset column list");
         }
         Advance();  // consume )
         const int n_cols = static_cast<int>(tbl.columns.size());
         // Zero or more rows; each cell is a single scalar token (or empty).
         while (current_.kind == TokenKind::kLParen) {
-          TableRow row;
+          DatasetRow row;
           row.pos = current_.pos;
           row.cells.reserve(n_cols);
           Advance();  // (
@@ -339,7 +348,7 @@ class DirectDecoder {
             row.cells.emplace_back(std::nullopt);  // absent
           } else if (current_.kind == TokenKind::kLBracket || current_.kind == TokenKind::kLBrace) {
             return PosError(current_.pos,
-                            "@table cells cannot contain list/block values in v1 (draft §3.4.4)");
+                            "@dataset cells cannot contain list/block values in v1 (draft §3.4.4)");
           } else {
             auto v = ParseScalarCellValue();
             if (!v.ok()) return v.status();
@@ -351,8 +360,9 @@ class DirectDecoder {
               row.cells.emplace_back(std::nullopt);  // absent
             } else if (current_.kind == TokenKind::kLBracket ||
                        current_.kind == TokenKind::kLBrace) {
-              return PosError(current_.pos,
-                              "@table cells cannot contain list/block values in v1 (draft §3.4.4)");
+              return PosError(
+                  current_.pos,
+                  "@dataset cells cannot contain list/block values in v1 (draft §3.4.4)");
             } else {
               auto v = ParseScalarCellValue();
               if (!v.ok()) return v.status();
@@ -360,25 +370,95 @@ class DirectDecoder {
             }
           }
           if (current_.kind != TokenKind::kRParen) {
-            return PosError(current_.pos, "expected ',' or ')' in @table row");
+            return PosError(current_.pos, "expected ',' or ')' in @dataset row");
           }
           const int n_cells = static_cast<int>(row.cells.size());
           if (n_cells != n_cols) {
             return PosError(row.pos,
-                            std::string("@table row has ") + std::to_string(n_cells) +
+                            std::string("@dataset row has ") + std::to_string(n_cells) +
                                 " cells, expected " + std::to_string(n_cols) + " (column count)");
           }
           Advance();  // consume )
           tbl.rows.push_back(std::move(row));
         }
         if (result_ != nullptr) result_->AddTable(std::move(tbl));
+      } else if (current_.kind == TokenKind::kAtProto) {
+        ProtoDirective pd;
+        pd.pos = current_.pos;
+        Position at_pos = current_.pos;
+        Advance();  // consume @proto
+
+        auto capture_brace_body = [this, at_pos](const std::string& label,
+                                                 std::string* body) -> Status {
+          int open = current_.pos.offset;
+          int depth = 1;
+          Advance();
+          while (depth > 0 && current_.kind != TokenKind::kEOF) {
+            if (current_.kind == TokenKind::kLBrace) {
+              ++depth;
+            } else if (current_.kind == TokenKind::kRBrace) {
+              --depth;
+              if (depth == 0) {
+                int close = current_.pos.offset;
+                *body = std::string(
+                    lex_.Input().substr(open + 1, static_cast<size_t>(close - (open + 1))));
+                Advance();
+                return Status::OK();
+              }
+            }
+            Advance();
+          }
+          return PosError(at_pos, label + ": unmatched '{'");
+        };
+
+        switch (current_.kind) {
+          case TokenKind::kLBrace: {
+            pd.shape = ProtoShape::kAnonymous;
+            auto s = capture_brace_body("@proto (anonymous form)", &pd.body);
+            if (!s.ok()) return s;
+            break;
+          }
+          case TokenKind::kIdent: {
+            pd.shape = ProtoShape::kNamed;
+            pd.type_name = std::string(current_.value);
+            Advance();
+            if (current_.kind != TokenKind::kLBrace) {
+              return PosError(current_.pos,
+                              std::string("expected '{' after @proto ") + pd.type_name);
+            }
+            auto s = capture_brace_body(std::string("@proto ") + pd.type_name, &pd.body);
+            if (!s.ok()) return s;
+            break;
+          }
+          case TokenKind::kString: {
+            pd.shape = ProtoShape::kSource;
+            pd.body = std::string(current_.value);
+            Advance();
+            break;
+          }
+          case TokenKind::kBytes: {
+            pd.shape = ProtoShape::kDescriptor;
+            auto decoded = detail::Base64DecodeStd(current_.value);
+            if (!decoded.has_value()) {
+              return PosError(current_.pos, "@proto descriptor body: invalid base64");
+            }
+            pd.body = std::string(decoded->begin(), decoded->end());
+            Advance();
+            break;
+          }
+          default:
+            return PosError(
+                current_.pos,
+                "expected '{', dotted identifier, triple-quoted string, or b\"...\" after @proto");
+        }
+        if (result_ != nullptr) result_->AddProto(std::move(pd));
       } else {
         break;
       }
     }
     if (has_table && current_.kind != TokenKind::kEOF) {
       return PosError(first_table_pos,
-                      "@table directive cannot coexist with top-level field entries "
+                      "@dataset directive cannot coexist with top-level field entries "
                       "(draft §3.4.4)");
     }
     return Status::OK();

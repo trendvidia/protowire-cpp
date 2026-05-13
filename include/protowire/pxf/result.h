@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "protowire/pxf/ast.h"  // Directive, TableDirective
+#include "protowire/pxf/ast.h"  // Directive, DatasetDirective, ProtoDirective
 
 namespace protowire::pxf {
 
@@ -17,13 +17,13 @@ namespace protowire::pxf {
 //
 // Result also surfaces the document-root directives the decoder saw:
 //   - Directives()  → generic `@<name> *(prefix) [{ ... }]` blocks, in
-//     source order, excluding @type / @table (which have their own
+//     source order, excluding @type / @dataset (which have their own
 //     handling).
-//   - Tables()      → `@table <type> ( cols ) row*` directives, in
-//     source order. A document with any @table has no body entries,
+//   - Datasets()      → `@dataset <type> ( cols ) row*` directives, in
+//     source order. A document with any @dataset has no body entries,
 //     so the rows are the document's payload — consumers walk
-//     TableDirective::rows and bind each row's cells to a fresh
-//     instance of TableDirective::type via their own schema.
+//     DatasetDirective::rows and bind each row's cells to a fresh
+//     instance of DatasetDirective::type via their own schema.
 class Result {
  public:
   bool IsSet(const std::string& path) const {
@@ -53,16 +53,19 @@ class Result {
 
   // Directive accessors (PXF v0.72+).
   const std::vector<Directive>& Directives() const { return directives_; }
-  const std::vector<TableDirective>& Tables() const { return tables_; }
+  const std::vector<DatasetDirective>& Datasets() const { return datasets_; }
+  const std::vector<ProtoDirective>& Protos() const { return protos_; }
 
   void AddDirective(Directive d) { directives_.push_back(std::move(d)); }
-  void AddTable(TableDirective t) { tables_.push_back(std::move(t)); }
+  void AddTable(DatasetDirective t) { datasets_.push_back(std::move(t)); }
+  void AddProto(ProtoDirective p) { protos_.push_back(std::move(p)); }
 
  private:
   std::unordered_set<std::string> present_;
   std::unordered_set<std::string> null_;
   std::vector<Directive> directives_;
-  std::vector<TableDirective> tables_;
+  std::vector<DatasetDirective> datasets_;
+  std::vector<ProtoDirective> protos_;
 };
 
 }  // namespace protowire::pxf
