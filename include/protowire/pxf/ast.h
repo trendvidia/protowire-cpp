@@ -228,7 +228,7 @@ struct ProtoDirective {
 };
 
 struct Document {
-  std::string type_url;  // empty if no @type directive
+  std::string type_url;               // empty if no @type directive
   std::vector<Directive> directives;  // @<name> directives in source order; excludes spec-defined
   std::vector<DatasetDirective> datasets;  // @dataset directives in source order (draft §3.4.4)
   std::vector<ProtoDirective> protos;      // @proto directives in source order (draft §3.4.5)

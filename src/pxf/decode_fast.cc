@@ -311,7 +311,8 @@ class DirectDecoder {
         }
         Advance();
         if (current_.kind != TokenKind::kIdent) {
-          return PosError(current_.pos, "@dataset column list must contain at least one field name");
+          return PosError(current_.pos,
+                          "@dataset column list must contain at least one field name");
         }
         for (;;) {
           if (current_.kind != TokenKind::kIdent) {
@@ -320,8 +321,9 @@ class DirectDecoder {
           // v1: dotted column paths are reserved for a future revision.
           for (char c : current_.value) {
             if (c == '.') {
-              return PosError(current_.pos,
-                              "@dataset column has dotted path; not supported in v1 (draft §3.4.4)");
+              return PosError(
+                  current_.pos,
+                  "@dataset column has dotted path; not supported in v1 (draft §3.4.4)");
             }
           }
           tbl.columns.emplace_back(current_.value);
@@ -358,8 +360,9 @@ class DirectDecoder {
               row.cells.emplace_back(std::nullopt);  // absent
             } else if (current_.kind == TokenKind::kLBracket ||
                        current_.kind == TokenKind::kLBrace) {
-              return PosError(current_.pos,
-                              "@dataset cells cannot contain list/block values in v1 (draft §3.4.4)");
+              return PosError(
+                  current_.pos,
+                  "@dataset cells cannot contain list/block values in v1 (draft §3.4.4)");
             } else {
               auto v = ParseScalarCellValue();
               if (!v.ok()) return v.status();
@@ -386,7 +389,7 @@ class DirectDecoder {
         Advance();  // consume @proto
 
         auto capture_brace_body = [this, at_pos](const std::string& label,
-                                                  std::string* body) -> Status {
+                                                 std::string* body) -> Status {
           int open = current_.pos.offset;
           int depth = 1;
           Advance();

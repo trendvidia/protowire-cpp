@@ -123,8 +123,8 @@ bool IsFutureReservedDirective(std::string_view name) {
   // Names with their own production (`type`, `dataset`, `proto`) and
   // the spec-registered `entry` aren't included here — they're handled
   // by the lexer or the named_directive shape.
-  return name == "table" || name == "datasource" || name == "view" ||
-         name == "procedure" || name == "function" || name == "permissions";
+  return name == "table" || name == "datasource" || name == "view" || name == "procedure" ||
+         name == "function" || name == "permissions";
 }
 
 }  // namespace protowire::pxf

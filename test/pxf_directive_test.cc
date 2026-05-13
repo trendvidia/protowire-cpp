@@ -28,9 +28,9 @@ namespace {
 
 namespace pb = google::protobuf;
 
+using protowire::pxf::DatasetDirective;
 using protowire::pxf::Document;
 using protowire::pxf::Parse;
-using protowire::pxf::DatasetDirective;
 
 class SilentErrorCollector : public pb::compiler::MultiFileErrorCollector {
  public:
@@ -615,7 +615,8 @@ TEST_F(PxfDirectiveFast, TableMissingCommaInRowRejected) {
   auto msg = NewAllTypes();
   auto st = protowire::pxf::Unmarshal("@dataset x.Row ( a, b )\n( 1 2 )\n", msg.get());
   ASSERT_FALSE(st.ok());
-  EXPECT_NE(std::string(st.message()).find("expected ',' or ')' in @dataset row"), std::string::npos);
+  EXPECT_NE(std::string(st.message()).find("expected ',' or ')' in @dataset row"),
+            std::string::npos);
 }
 
 TEST_F(PxfDirectiveFast, TableWithBodyEntriesRejected) {

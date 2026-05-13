@@ -154,8 +154,7 @@ TEST(ReservedDirectives, FutureReservedNamesRejected) {
     std::string input = std::string("@") + name + " { x = 1 }";
     auto doc = pp::Parse(input);
     ASSERT_FALSE(doc.ok()) << "@" << name << " should be rejected";
-    EXPECT_NE(doc.status().message().find("spec-reserved"), std::string::npos)
-        << "for @" << name;
+    EXPECT_NE(doc.status().message().find("spec-reserved"), std::string::npos) << "for @" << name;
   }
 }
 

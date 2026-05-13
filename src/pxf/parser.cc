@@ -608,9 +608,8 @@ StatusOr<ProtoDirective> Parser::ParseProtoDirective(int* end_offset) {
   pd.leading_comments = std::move(leading);
   Advance();  // consume @proto
 
-  auto capture_brace_body = [this, at_pos](const std::string& label,
-                                            std::string* body,
-                                            int* eo) -> Status {
+  auto capture_brace_body = [this, at_pos](
+                                const std::string& label, std::string* body, int* eo) -> Status {
     int open = current_.pos.offset;
     int close = FindMatchingBrace(lex_.Input(), open);
     if (close < 0) {
@@ -638,11 +637,10 @@ StatusOr<ProtoDirective> Parser::ParseProtoDirective(int* end_offset) {
       pd.type_name = std::string(current_.value);
       Advance();
       if (current_.kind != TokenKind::kLBrace) {
-        return Status::Error(
-            current_.pos.line,
-            current_.pos.column,
-            std::string("expected '{' after @proto ") + pd.type_name + ", got " +
-                TokenKindName(current_.kind));
+        return Status::Error(current_.pos.line,
+                             current_.pos.column,
+                             std::string("expected '{' after @proto ") + pd.type_name + ", got " +
+                                 TokenKindName(current_.kind));
       }
       int eo = 0;
       auto st = capture_brace_body(std::string("@proto ") + pd.type_name, &pd.body, &eo);
@@ -661,9 +659,8 @@ StatusOr<ProtoDirective> Parser::ParseProtoDirective(int* end_offset) {
       pd.shape = ProtoShape::kDescriptor;
       auto decoded = detail::Base64DecodeStd(current_.value);
       if (!decoded.has_value()) {
-        return Status::Error(current_.pos.line,
-                             current_.pos.column,
-                             "@proto descriptor body: invalid base64");
+        return Status::Error(
+            current_.pos.line, current_.pos.column, "@proto descriptor body: invalid base64");
       }
       pd.body = std::string(decoded->begin(), decoded->end());
       *end_offset = current_.pos.offset + static_cast<int>(current_.value.size()) + 3;  // b" … "
