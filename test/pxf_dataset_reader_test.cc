@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 TrendVidia, LLC.
 //
-// Tests for TableReader (streaming @table consumption) and BindRow
+// Tests for DatasetReader (streaming @dataset consumption) and BindRow
 // (per-row proto binding). PR 4 of the v0.72-v0.75 cpp catch-up.
 
 #include "protowire/pxf.h"
-#include "protowire/pxf/table_reader.h"
+#include "protowire/pxf/dataset_reader.h"
 
 #include <gtest/gtest.h>
 #include "protoc_compat.h"
@@ -22,8 +22,8 @@ namespace {
 namespace pb = google::protobuf;
 
 using protowire::pxf::BindRow;
-using protowire::pxf::TableReader;
-using protowire::pxf::TableRow;
+using protowire::pxf::DatasetReader;
+using protowire::pxf::DatasetRow;
 
 class SilentErrorCollector : public pb::compiler::MultiFileErrorCollector {
  public:
@@ -57,11 +57,11 @@ class PxfTableReader : public ::testing::Test {
   std::unique_ptr<pb::DynamicMessageFactory> factory_;
 };
 
-// ---- TableReader::Create header parsing -----------------------------------
+// ---- DatasetReader::Create header parsing -----------------------------------
 
 TEST_F(PxfTableReader, ReadsHeaderAndExposesTypeAndColumns) {
-  std::istringstream in("@table trades.v1.Trade ( px, qty )\n( 100, 5 )\n( 101, 7 )\n");
-  auto tr = TableReader::Create(&in);
+  std::istringstream in("@dataset trades.v1.Trade ( px, qty )\n( 100, 5 )\n( 101, 7 )\n");
+  auto tr = DatasetReader::Create(&in);
   ASSERT_TRUE(tr.ok()) << tr.status().message();
   EXPECT_EQ((*tr)->Type(), "trades.v1.Trade");
   ASSERT_EQ((*tr)->Columns().size(), 2u);
@@ -72,29 +72,29 @@ TEST_F(PxfTableReader, ReadsHeaderAndExposesTypeAndColumns) {
 
 TEST_F(PxfTableReader, NoTableReturnsError) {
   std::istringstream in("@type foo.Msg\nname = \"x\"\n");
-  auto tr = TableReader::Create(&in);
+  auto tr = DatasetReader::Create(&in);
   ASSERT_FALSE(tr.ok());
-  EXPECT_NE(std::string(tr.status().message()).find("no @table directive"), std::string::npos);
+  EXPECT_NE(std::string(tr.status().message()).find("no @dataset directive"), std::string::npos);
 }
 
 TEST_F(PxfTableReader, EmptyInputReturnsError) {
   std::istringstream in("");
-  auto tr = TableReader::Create(&in);
+  auto tr = DatasetReader::Create(&in);
   ASSERT_FALSE(tr.ok());
 }
 
 TEST_F(PxfTableReader, NullStreamRejected) {
-  auto tr = TableReader::Create(nullptr);
+  auto tr = DatasetReader::Create(nullptr);
   ASSERT_FALSE(tr.ok());
 }
 
 TEST_F(PxfTableReader, LeadingDirectivesPreserved) {
   std::istringstream in(R"(@header pkg.Hdr { id = "h" }
 @frob alpha
-@table trades.v1.Trade ( px, qty )
+@dataset trades.v1.Trade ( px, qty )
 ( 1, 2 )
 )");
-  auto tr = TableReader::Create(&in);
+  auto tr = DatasetReader::Create(&in);
   ASSERT_TRUE(tr.ok()) << tr.status().message();
   ASSERT_EQ((*tr)->Directives().size(), 2u);
   EXPECT_EQ((*tr)->Directives()[0].name, "header");
@@ -102,28 +102,28 @@ TEST_F(PxfTableReader, LeadingDirectivesPreserved) {
 }
 
 TEST_F(PxfTableReader, HeaderOversizeRejected) {
-  // Generate >64 KiB of leading directive bytes before any @table —
+  // Generate >64 KiB of leading directive bytes before any @dataset —
   // should fail-fast with the budget message.
   std::string big;
   big.reserve(70 * 1024);
   big.append("@frob ");
   while (big.size() < 70 * 1024) big.append("x ");
-  big.append("\n@table x.Row ( a )\n");
+  big.append("\n@dataset x.Row ( a )\n");
   std::istringstream in(big);
-  auto tr = TableReader::Create(&in);
+  auto tr = DatasetReader::Create(&in);
   ASSERT_FALSE(tr.ok());
   EXPECT_NE(std::string(tr.status().message()).find("header exceeds"), std::string::npos);
 }
 
-// ---- TableReader::Next row iteration --------------------------------------
+// ---- DatasetReader::Next row iteration --------------------------------------
 
 TEST_F(PxfTableReader, IteratesAllRowsInOrder) {
-  std::istringstream in("@table x.Row ( a, b )\n( 1, 2 )\n( 3, 4 )\n( 5, 6 )\n");
-  auto tr = TableReader::Create(&in);
+  std::istringstream in("@dataset x.Row ( a, b )\n( 1, 2 )\n( 3, 4 )\n( 5, 6 )\n");
+  auto tr = DatasetReader::Create(&in);
   ASSERT_TRUE(tr.ok());
   int count = 0;
   for (;;) {
-    TableRow row;
+    DatasetRow row;
     auto s = (*tr)->Next(&row);
     ASSERT_TRUE(s.ok()) << s.message();
     if ((*tr)->Done()) break;
@@ -134,22 +134,22 @@ TEST_F(PxfTableReader, IteratesAllRowsInOrder) {
 }
 
 TEST_F(PxfTableReader, ZeroRowsReportsDoneImmediately) {
-  std::istringstream in("@table x.Row ( a )\n");
-  auto tr = TableReader::Create(&in);
+  std::istringstream in("@dataset x.Row ( a )\n");
+  auto tr = DatasetReader::Create(&in);
   ASSERT_TRUE(tr.ok());
-  TableRow row;
+  DatasetRow row;
   auto s = (*tr)->Next(&row);
   ASSERT_TRUE(s.ok());
   EXPECT_TRUE((*tr)->Done());
 }
 
 TEST_F(PxfTableReader, RowCellsParsedAsExpectedShapes) {
-  std::istringstream in(R"(@table x.Row ( a, b, c, d )
+  std::istringstream in(R"(@dataset x.Row ( a, b, c, d )
 ( 42, "hello", true, null )
 )");
-  auto tr = TableReader::Create(&in);
+  auto tr = DatasetReader::Create(&in);
   ASSERT_TRUE(tr.ok());
-  TableRow row;
+  DatasetRow row;
   ASSERT_TRUE((*tr)->Next(&row).ok());
   ASSERT_FALSE((*tr)->Done());
   ASSERT_EQ(row.cells.size(), 4u);
@@ -169,10 +169,10 @@ TEST_F(PxfTableReader, RowCellsParsedAsExpectedShapes) {
 }
 
 TEST_F(PxfTableReader, ThreeStateCellsAbsentNullSet) {
-  std::istringstream in("@table x.Row ( a, b, c )\n( 1, , null )\n");
-  auto tr = TableReader::Create(&in);
+  std::istringstream in("@dataset x.Row ( a, b, c )\n( 1, , null )\n");
+  auto tr = DatasetReader::Create(&in);
   ASSERT_TRUE(tr.ok());
-  TableRow row;
+  DatasetRow row;
   ASSERT_TRUE((*tr)->Next(&row).ok());
   ASSERT_EQ(row.cells.size(), 3u);
   EXPECT_TRUE(row.cells[0].has_value());   // present
@@ -182,10 +182,10 @@ TEST_F(PxfTableReader, ThreeStateCellsAbsentNullSet) {
 }
 
 TEST_F(PxfTableReader, ArityMismatchSurfacesAndBecomesSticky) {
-  std::istringstream in("@table x.Row ( a, b )\n( 1, 2, 3 )\n( 4, 5 )\n");
-  auto tr = TableReader::Create(&in);
+  std::istringstream in("@dataset x.Row ( a, b )\n( 1, 2, 3 )\n( 4, 5 )\n");
+  auto tr = DatasetReader::Create(&in);
   ASSERT_TRUE(tr.ok());
-  TableRow row;
+  DatasetRow row;
   auto s = (*tr)->Next(&row);
   ASSERT_FALSE(s.ok());
   EXPECT_NE(std::string(s.message()).find("3 cells, expected 2"), std::string::npos);
@@ -197,7 +197,7 @@ TEST_F(PxfTableReader, ArityMismatchSurfacesAndBecomesSticky) {
 TEST_F(PxfTableReader, MultiByteRowsAcrossPullBoundaries) {
   // Force the row scanner to pull bytes across many chunk boundaries
   // by using a row body that's much larger than the 4 KiB pull size.
-  std::string body = "@table x.Row ( a )\n";
+  std::string body = "@dataset x.Row ( a )\n";
   const int row_count = 50;
   for (int i = 0; i < row_count; ++i) {
     body.append("(");
@@ -205,11 +205,11 @@ TEST_F(PxfTableReader, MultiByteRowsAcrossPullBoundaries) {
     body.append("\")\n");
   }
   std::istringstream in(body);
-  auto tr = TableReader::Create(&in);
+  auto tr = DatasetReader::Create(&in);
   ASSERT_TRUE(tr.ok()) << tr.status().message();
   int seen = 0;
   for (;;) {
-    TableRow row;
+    DatasetRow row;
     auto s = (*tr)->Next(&row);
     ASSERT_TRUE(s.ok()) << s.message();
     if ((*tr)->Done()) break;
@@ -219,10 +219,10 @@ TEST_F(PxfTableReader, MultiByteRowsAcrossPullBoundaries) {
 }
 
 TEST_F(PxfTableReader, ParenthesesInsideStringNotMistakenForRowBoundary) {
-  std::istringstream in("@table x.Row ( a )\n( \"hi ) there\" )\n( \"next\" )\n");
-  auto tr = TableReader::Create(&in);
+  std::istringstream in("@dataset x.Row ( a )\n( \"hi ) there\" )\n( \"next\" )\n");
+  auto tr = DatasetReader::Create(&in);
   ASSERT_TRUE(tr.ok());
-  TableRow row;
+  DatasetRow row;
   ASSERT_TRUE((*tr)->Next(&row).ok());
   ASSERT_FALSE((*tr)->Done());
   EXPECT_EQ(std::get<std::unique_ptr<protowire::pxf::StringVal>>(*row.cells[0])->value,
@@ -235,7 +235,7 @@ TEST_F(PxfTableReader, ParenthesesInsideStringNotMistakenForRowBoundary) {
 }
 
 TEST_F(PxfTableReader, CommentsBetweenRowsIgnored) {
-  std::istringstream in(R"(@table x.Row ( a )
+  std::istringstream in(R"(@dataset x.Row ( a )
 # leading comment
 ( 1 )
 // between rows
@@ -244,11 +244,11 @@ TEST_F(PxfTableReader, CommentsBetweenRowsIgnored) {
   comment */
 ( 3 )
 )");
-  auto tr = TableReader::Create(&in);
+  auto tr = DatasetReader::Create(&in);
   ASSERT_TRUE(tr.ok());
   int count = 0;
   for (;;) {
-    TableRow row;
+    DatasetRow row;
     ASSERT_TRUE((*tr)->Next(&row).ok());
     if ((*tr)->Done()) break;
     ++count;
@@ -256,33 +256,33 @@ TEST_F(PxfTableReader, CommentsBetweenRowsIgnored) {
   EXPECT_EQ(count, 3);
 }
 
-// ---- TableReader::Tail chaining ------------------------------------------
+// ---- DatasetReader::Tail chaining ------------------------------------------
 
 TEST_F(PxfTableReader, TailAllowsChainingToSecondTable) {
-  std::istringstream in(R"(@table a.Row ( x )
+  std::istringstream in(R"(@dataset a.Row ( x )
 ( 1 )
 ( 2 )
-@table b.Row ( y )
+@dataset b.Row ( y )
 ( "p" )
 ( "q" )
 )");
-  auto tr1 = TableReader::Create(&in);
+  auto tr1 = DatasetReader::Create(&in);
   ASSERT_TRUE(tr1.ok());
   EXPECT_EQ((*tr1)->Type(), "a.Row");
   // Drain to EOF.
   for (;;) {
-    TableRow row;
+    DatasetRow row;
     ASSERT_TRUE((*tr1)->Next(&row).ok());
     if ((*tr1)->Done()) break;
   }
   // Chain the second table.
   auto tail = (*tr1)->Tail();
-  auto tr2 = TableReader::Create(tail.get());
+  auto tr2 = DatasetReader::Create(tail.get());
   ASSERT_TRUE(tr2.ok()) << tr2.status().message();
   EXPECT_EQ((*tr2)->Type(), "b.Row");
   int n = 0;
   for (;;) {
-    TableRow row;
+    DatasetRow row;
     ASSERT_TRUE((*tr2)->Next(&row).ok());
     if ((*tr2)->Done()) break;
     ++n;
@@ -293,12 +293,12 @@ TEST_F(PxfTableReader, TailAllowsChainingToSecondTable) {
 // ---- BindRow + Scan -------------------------------------------------------
 
 TEST_F(PxfTableReader, BindRowSetsFieldsByColumnName) {
-  std::istringstream in(R"(@table test.v1.AllTypes ( string_field, int32_field )
+  std::istringstream in(R"(@dataset test.v1.AllTypes ( string_field, int32_field )
 ( "alpha", 42 )
 )");
-  auto tr = TableReader::Create(&in);
+  auto tr = DatasetReader::Create(&in);
   ASSERT_TRUE(tr.ok());
-  TableRow row;
+  DatasetRow row;
   ASSERT_TRUE((*tr)->Next(&row).ok());
   ASSERT_FALSE((*tr)->Done());
 
@@ -310,11 +310,11 @@ TEST_F(PxfTableReader, BindRowSetsFieldsByColumnName) {
 }
 
 TEST_F(PxfTableReader, ScanIsEquivalentToNextPlusBindRow) {
-  std::istringstream in(R"(@table test.v1.AllTypes ( string_field )
+  std::istringstream in(R"(@dataset test.v1.AllTypes ( string_field )
 ( "row1" )
 ( "row2" )
 )");
-  auto tr = TableReader::Create(&in);
+  auto tr = DatasetReader::Create(&in);
   ASSERT_TRUE(tr.ok());
   std::vector<std::string> seen;
   for (;;) {
@@ -331,12 +331,12 @@ TEST_F(PxfTableReader, ScanIsEquivalentToNextPlusBindRow) {
 
 TEST_F(PxfTableReader, BindRowAbsentCellLeavesFieldDefault) {
   // proto3 string default is "". An absent cell should not stamp a value.
-  std::istringstream in(R"(@table test.v1.AllTypes ( string_field, int32_field )
+  std::istringstream in(R"(@dataset test.v1.AllTypes ( string_field, int32_field )
 ( , 7 )
 )");
-  auto tr = TableReader::Create(&in);
+  auto tr = DatasetReader::Create(&in);
   ASSERT_TRUE(tr.ok());
-  TableRow row;
+  DatasetRow row;
   ASSERT_TRUE((*tr)->Next(&row).ok());
 
   auto msg = NewAllTypes();
@@ -347,7 +347,7 @@ TEST_F(PxfTableReader, BindRowAbsentCellLeavesFieldDefault) {
 }
 
 TEST_F(PxfTableReader, BindRowMismatchColumnCountErrors) {
-  TableRow row;
+  DatasetRow row;
   row.cells.emplace_back(std::nullopt);
   row.cells.emplace_back(std::nullopt);
   auto msg = NewAllTypes();
@@ -360,10 +360,10 @@ TEST_F(PxfTableReader, BindRowMismatchColumnCountErrors) {
 TEST_F(PxfTableReader, BindRowUnknownColumnErrors) {
   // The synthetic body names a column the schema doesn't know — surfaces
   // as a per-field "field not found" from the underlying Unmarshal.
-  std::istringstream in(R"(@table test.v1.AllTypes ( not_a_field )
+  std::istringstream in(R"(@dataset test.v1.AllTypes ( not_a_field )
 ( "x" )
 )");
-  auto tr = TableReader::Create(&in);
+  auto tr = DatasetReader::Create(&in);
   ASSERT_TRUE(tr.ok());
   auto msg = NewAllTypes();
   auto s = (*tr)->Scan(msg.get());

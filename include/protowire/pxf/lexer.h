@@ -23,6 +23,27 @@ class Lexer {
   // between '{' and '}' once the matching brace has been located.
   std::string_view Input() const { return input_; }
 
+  // Reposition the lexer to byte offset `target`, recomputing line/col
+  // by scanning forward from the current position. Used by parseProto-
+  // Directive to skip past an @proto brace-body whose interior is
+  // protobuf source (not PXF) without lexing through it.
+  void RepositionTo(int target) {
+    if (target < static_cast<int>(pos_)) {
+      pos_ = 0;
+      line_ = 1;
+      column_ = 1;
+    }
+    while (static_cast<int>(pos_) < target && pos_ < input_.size()) {
+      uint8_t ch = static_cast<uint8_t>(input_[pos_++]);
+      if (ch == '\n') {
+        ++line_;
+        column_ = 1;
+      } else {
+        ++column_;
+      }
+    }
+  }
+
  private:
   uint8_t Peek(size_t offset = 0) const {
     size_t i = pos_ + offset;

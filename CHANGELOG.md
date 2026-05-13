@@ -11,6 +11,58 @@ format changes.
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-05-13
+
+First major-version cut. Implements the three one-time spec changes
+from the protowire v1.0 freeze line (`STABILITY.md` in the spec
+repo) in lockstep with `protowire`, `protowire-go`, `protowire-java`
+(v1.0.1), `protowire-typescript`, and `protowire-kotlin`.
+**Breaking** — there is no alias period; v1.0 is itself the major
+bump.
+
+### v1.0 spec changes
+
+- **`@table` → `@dataset` rename** (draft §3.4.4). Public API
+  follows: `Ast::TableDirective` → `Ast::DatasetDirective`,
+  `Ast::TableRow` → `Ast::DatasetRow`, `TokenKind::kAtTable` →
+  `TokenKind::kAtDataset`, `Result::Tables()` → `Result::Datasets()`,
+  `Result::AddTable()` → `Result::AddDataset()`,
+  `class TableReader` → `class DatasetReader`. Headers
+  `protowire/pxf/table_reader.h` → `dataset_reader.h`; source
+  `src/pxf/table_reader.cc` → `dataset_reader.cc`. Hard cutover.
+
+- **`@proto` directive added** (draft §3.4.5). New `Ast::ProtoDirective`
+  struct + `Ast::ProtoShape` enum (`kAnonymous`, `kNamed`, `kSource`,
+  `kDescriptor`). Four body shapes lexically distinguished
+  (anonymous `{ ... }`, named `<dotted-name> { ... }`,
+  source `"""..."""`, descriptor `b"..."`). Exposed via
+  `Document::protos` and `Result::Protos()`. Descriptor form is
+  the MUST-support shape per spec; this port supports all four.
+
+- **Reserved directive names** expanded from 5 to 13 (draft §3.4.6).
+  `IsFutureReservedDirective(name)` exposed from
+  `protowire/pxf/schema.h`. Parser + fast decoder reject `@table`,
+  `@datasource`, `@view`, `@procedure`, `@function`,
+  `@permissions` as spec-reserved.
+
+`@dataset`'s row message type is now optional in the AST — binding
+to an anonymous `@proto` per draft §3.4.4 Anonymous binding.
+
+`Lexer::RepositionTo(int)` added so the parser can skip past an
+`@proto` brace-body whose interior is protobuf source rather than
+PXF.
+
+### Build
+
+- CMake `project(protowire VERSION ...)` bumped `0.75.0` → `1.0.0`.
+
+### Tests
+
+- New `test/pxf_proto_directive_test.cc` with 11 cases covering all
+  four `@proto` body shapes, anonymous binding, multi-`@proto`,
+  nested-brace bodies, reserved-name rejection, `@type` coexistence.
+- `ctest`: 229 tests, 0 failures.
+
 ## [0.75.0] — 2026-05-12
 
 First release after the v0.70.0 baseline that closes the v0.72–v0.75
