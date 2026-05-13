@@ -12,4 +12,18 @@ Position ValuePos(const ValuePtr& v) {
   return std::visit([](auto& p) { return p->pos; }, v);
 }
 
+const char* ProtoShapeName(ProtoShape s) {
+  switch (s) {
+    case ProtoShape::kAnonymous:
+      return "anonymous";
+    case ProtoShape::kNamed:
+      return "named";
+    case ProtoShape::kSource:
+      return "source";
+    case ProtoShape::kDescriptor:
+      return "descriptor";
+  }
+  return "?";
+}
+
 }  // namespace protowire::pxf

@@ -10,12 +10,28 @@
 #include "protowire/pxf/parser.h"
 
 #include <gtest/gtest.h>
+#include "protoc_compat.h"
 
+#include <memory>
 #include <string>
+
+#include <google/protobuf/compiler/importer.h>
+#include <google/protobuf/dynamic_message.h>
 
 namespace pp = protowire::pxf;
 
 namespace {
+
+namespace pb = google::protobuf;
+
+class SilentErrorCollector : public pb::compiler::MultiFileErrorCollector {
+ public:
+  PROTOWIRE_PROTOC_RECORD_ERROR(filename, line, column, msg) {
+    last_ = std::string(filename) + ":" + std::to_string(line) + ":" + std::to_string(column) +
+            ": " + std::string(msg);
+  }
+  std::string last_;
+};
 
 std::string Body(const pp::ProtoDirective& pd) {
   return pd.body;
@@ -156,6 +172,154 @@ TEST(ReservedDirectives, FutureReservedNamesRejected) {
     ASSERT_FALSE(doc.ok()) << "@" << name << " should be rejected";
     EXPECT_NE(doc.status().message().find("spec-reserved"), std::string::npos) << "for @" << name;
   }
+}
+
+// ---- ProtoShapeName coverage --------------------------------------------
+
+TEST(ProtoShape, NameLookup) {
+  EXPECT_STREQ(pp::ProtoShapeName(pp::ProtoShape::kAnonymous), "anonymous");
+  EXPECT_STREQ(pp::ProtoShapeName(pp::ProtoShape::kNamed), "named");
+  EXPECT_STREQ(pp::ProtoShapeName(pp::ProtoShape::kSource), "source");
+  EXPECT_STREQ(pp::ProtoShapeName(pp::ProtoShape::kDescriptor), "descriptor");
+}
+
+// ---- Fast-path coverage (decode_fast.cc) --------------------------------
+// Mirrors the AST tests above but routes through Unmarshal / UnmarshalFull
+// — covers consumeProtoDirective + capture_brace_body on the fast path,
+// plus Result::AddProto / Result::Protos() accessors.
+
+class ProtoFast : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    source_tree_.MapPath("", TESTDATA_DIR);
+    source_tree_.MapPath("", WKT_PROTO_DIR);
+    importer_ = std::make_unique<pb::compiler::Importer>(&source_tree_, &errors_);
+    file_ = importer_->Import("test.proto");
+    ASSERT_NE(file_, nullptr) << errors_.last_;
+    factory_ = std::make_unique<pb::DynamicMessageFactory>(importer_->pool());
+    desc_ = file_->FindMessageTypeByName("AllTypes");
+    ASSERT_NE(desc_, nullptr);
+  }
+  std::unique_ptr<pb::Message> NewAllTypes() {
+    return std::unique_ptr<pb::Message>(factory_->GetPrototype(desc_)->New());
+  }
+  pb::compiler::DiskSourceTree source_tree_;
+  SilentErrorCollector errors_;
+  std::unique_ptr<pb::compiler::Importer> importer_;
+  const pb::FileDescriptor* file_ = nullptr;
+  const pb::Descriptor* desc_ = nullptr;
+  std::unique_ptr<pb::DynamicMessageFactory> factory_;
+};
+
+TEST_F(ProtoFast, AnonymousBody) {
+  auto msg = NewAllTypes();
+  auto rr = pp::UnmarshalFull(R"(@proto {
+  string symbol = 1;
+}
+string_field = "hi"
+)",
+                              msg.get());
+  ASSERT_TRUE(rr.ok()) << rr.status().message();
+  ASSERT_EQ(rr->Protos().size(), 1u);
+  EXPECT_EQ(rr->Protos()[0].shape, pp::ProtoShape::kAnonymous);
+  EXPECT_NE(rr->Protos()[0].body.find("string symbol = 1;"), std::string::npos);
+}
+
+TEST_F(ProtoFast, NamedBody) {
+  auto msg = NewAllTypes();
+  auto rr = pp::UnmarshalFull(R"(@proto trades.v1.Trade {
+  string symbol = 1;
+}
+string_field = "hi"
+)",
+                              msg.get());
+  ASSERT_TRUE(rr.ok()) << rr.status().message();
+  ASSERT_EQ(rr->Protos().size(), 1u);
+  EXPECT_EQ(rr->Protos()[0].shape, pp::ProtoShape::kNamed);
+  EXPECT_EQ(rr->Protos()[0].type_name, "trades.v1.Trade");
+}
+
+TEST_F(ProtoFast, SourceBody) {
+  auto msg = NewAllTypes();
+  auto rr = pp::UnmarshalFull(R"(@proto """
+syntax = "proto3";
+message Trade { string symbol = 1; }
+"""
+string_field = "hi"
+)",
+                              msg.get());
+  ASSERT_TRUE(rr.ok()) << rr.status().message();
+  ASSERT_EQ(rr->Protos().size(), 1u);
+  EXPECT_EQ(rr->Protos()[0].shape, pp::ProtoShape::kSource);
+}
+
+TEST_F(ProtoFast, DescriptorBody) {
+  auto msg = NewAllTypes();
+  // "hello" → "aGVsbG8="
+  auto rr = pp::UnmarshalFull(R"(@proto b"aGVsbG8="
+string_field = "hi"
+)",
+                              msg.get());
+  ASSERT_TRUE(rr.ok()) << rr.status().message();
+  ASSERT_EQ(rr->Protos().size(), 1u);
+  EXPECT_EQ(rr->Protos()[0].shape, pp::ProtoShape::kDescriptor);
+  EXPECT_EQ(rr->Protos()[0].body, "hello");
+}
+
+TEST_F(ProtoFast, NestedBracesInBody) {
+  auto msg = NewAllTypes();
+  auto rr = pp::UnmarshalFull(R"(@proto {
+  message Side {
+    string label = 1;
+  }
+  Side side = 1;
+}
+string_field = "hi"
+)",
+                              msg.get());
+  ASSERT_TRUE(rr.ok()) << rr.status().message();
+  ASSERT_EQ(rr->Protos().size(), 1u);
+  EXPECT_NE(rr->Protos()[0].body.find("message Side"), std::string::npos);
+}
+
+TEST_F(ProtoFast, MultipleProtos) {
+  auto msg = NewAllTypes();
+  auto rr = pp::UnmarshalFull(R"(@proto trades.v1.Trade { string symbol = 1; }
+@proto orders.v1.Order { string id = 1; }
+string_field = "hi"
+)",
+                              msg.get());
+  ASSERT_TRUE(rr.ok()) << rr.status().message();
+  EXPECT_EQ(rr->Protos().size(), 2u);
+}
+
+TEST_F(ProtoFast, RejectsBadShape) {
+  auto msg = NewAllTypes();
+  auto st = pp::Unmarshal("@proto 42\nstring_field = \"hi\"\n", msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("@proto"), std::string::npos);
+}
+
+TEST_F(ProtoFast, RejectsNamedMissingBrace) {
+  auto msg = NewAllTypes();
+  auto st = pp::Unmarshal("@proto trades.v1.Trade 42\nstring_field = \"hi\"\n", msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("'{'"), std::string::npos);
+}
+
+TEST_F(ProtoFast, RejectsAnonymousUnmatchedBrace) {
+  auto msg = NewAllTypes();
+  auto st = pp::Unmarshal("@proto { string symbol = 1;\n", msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("unmatched"), std::string::npos);
+}
+
+TEST_F(ProtoFast, ReservedDirectiveRejected) {
+  // Draft §3.4.6 enforcement on the fast path.
+  auto msg = NewAllTypes();
+  auto st = pp::Unmarshal("@table { x = 1 }\nstring_field = \"hi\"\n", msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("spec-reserved"), std::string::npos);
 }
 
 }  // namespace
