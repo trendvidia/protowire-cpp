@@ -53,7 +53,7 @@ jobs:
             cc: ""
             cxx: ""
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install protobuf (Linux)
         if: runner.os == 'Linux'
@@ -108,7 +108,7 @@ jobs:
     name: ASan + UBSan (Linux/clang)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install deps
         run: |
@@ -139,7 +139,7 @@ jobs:
     name: clang-format check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install clang-format-18
         run: |
@@ -161,7 +161,7 @@ jobs:
     name: clang-tidy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install deps
         run: |
@@ -192,7 +192,7 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install deps
         run: |
