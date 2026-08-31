@@ -12,11 +12,11 @@
 namespace protowire::sbe {
 
 // SBE extension field numbers (from proto/sbe/annotations.proto).
-inline constexpr int kExtSchemaID = 50100;
-inline constexpr int kExtVersion = 50101;
-inline constexpr int kExtTemplateID = 50200;
-inline constexpr int kExtLength = 50300;
-inline constexpr int kExtEncoding = 50301;
+inline constexpr int kExtSchemaID = 1319;
+inline constexpr int kExtVersion = 1320;
+inline constexpr int kExtTemplateID = 1321;
+inline constexpr int kExtLength = 1322;
+inline constexpr int kExtEncoding = 1323;
 
 // Reads a uint32 option from a *Options message by field number. Walks both
 // the message's regular fields (for SourceTree-loaded descriptors) and its
