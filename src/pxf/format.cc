@@ -123,7 +123,11 @@ class Formatter {
   void FormatEntry(const Assignment& a, int level) {
     WriteComments(a.leading_comments, level);
     WriteIndent(level);
-    out_ += a.key;
+    if (a.key_quoted) {
+      WriteQuotedString(a.key, out_);
+    } else {
+      out_ += a.key;
+    }
     out_ += " = ";
     FormatValue(a.value, level);
     if (!a.trailing_comment.empty()) {
@@ -153,7 +157,11 @@ class Formatter {
   void FormatEntry(const Block& b, int level) {
     WriteComments(b.leading_comments, level);
     WriteIndent(level);
-    out_ += b.name;
+    if (b.name_quoted) {
+      WriteQuotedString(b.name, out_);
+    } else {
+      out_ += b.name;
+    }
     out_ += " {\n";
     FormatEntries(b.entries, level + 1);
     WriteIndent(level);

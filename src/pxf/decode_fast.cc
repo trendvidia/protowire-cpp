@@ -599,6 +599,40 @@ class DirectDecoder {
   void SkipBraced();
   void SkipBracketed();
 
+  // KeyedElem carries the key-field checks for the immediate body of one
+  // element of a keyed repeated field (draft -01 §3.13): an explicit
+  // assignment to the key field must not be empty, and in the named
+  // (keyed-block) form must agree with the entry name.
+  struct KeyedElem {
+    std::string field;       // the keyed repeated field's PXF name
+    std::string key_name;    // the element message's key field name
+    std::string entry_name;  // entry name; meaningful only when named
+    bool named = false;      // keyed-block form (true) vs anonymous list element
+  };
+  Status CheckExplicitKey(const KeyedElem& ke, std::string_view value, Position pos) {
+    if (value.empty()) {
+      return PosError(pos,
+                      "explicit empty-string assignment to key field \"" + ke.key_name +
+                          "\" of keyed field \"" + ke.field +
+                          "\": the empty string is not a valid key");
+    }
+    if (ke.named && value != ke.entry_name) {
+      return PosError(pos,
+                      "key field \"" + ke.key_name + "\" = \"" + std::string(value) +
+                          "\" conflicts with entry name \"" + ke.entry_name +
+                          "\" in keyed field \"" + ke.field + "\"");
+    }
+    return Status::OK();
+  }
+  Status QuotedNameUnkeyedError(Position pos, std::string_view name) {
+    return PosError(pos,
+                    "quoted entry name \"" + std::string(name) +
+                        "\" is only valid inside a keyed repeated field's block (draft -01 §3.13)");
+  }
+  Status DecodeKeyedBlockBody(Message* msg,
+                              const FieldDescriptor* fd,
+                              const FieldDescriptor* key_fd);
+
   Lexer lex_;
   Token current_;
   Message* root_ = nullptr;
@@ -609,6 +643,10 @@ class DirectDecoder {
   Limits lim_;
   int depth_ = 0;
   std::string path_prefix_;
+  // Context for the next DecodeFields call: it decodes one element of a
+  // keyed repeated field. Consumed on entry so nested bodies don't
+  // inherit it.
+  std::optional<KeyedElem> keyed_elem_;
 };
 
 // --- top-level body --------------------------------------------------------
@@ -625,6 +663,11 @@ Status DirectDecoder::DecodeFields(Message* msg, bool in_block) {
 Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
   const Descriptor* desc = msg->GetDescriptor();
   std::unordered_map<std::string, std::string> set_oneofs;
+
+  // A pending keyed_elem_ applies to exactly this body: the immediate
+  // entries of one element of a keyed repeated field.
+  std::optional<KeyedElem> ke = std::move(keyed_elem_);
+  keyed_elem_.reset();
 
   for (;;) {
     if (in_block && current_.kind == TokenKind::kRBrace) {
@@ -644,12 +687,20 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
                       std::string("expected identifier, string, or integer, got ") +
                           TokenKindName(current_.kind));
     }
+    const bool key_quoted = current_.kind == TokenKind::kString;
     std::string key(current_.value);
     Advance();
 
     switch (current_.kind) {
       case TokenKind::kEquals: {
         Advance();
+        if (key_quoted) {
+          // The grammar accepts a string at entry-name position
+          // everywhere; the schema layer restricts it to keyed repeated
+          // fields' blocks (draft -01 §3.13), which have their own decode
+          // loop — in message context a quoted name never names a field.
+          return QuotedNameUnkeyedError(pos, key);
+        }
         const FieldDescriptor* fd = desc->FindFieldByName(key);
         if (!fd) {
           if (discard_unknown_) {
@@ -674,6 +725,12 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
           Advance();
           continue;
         }
+        if (ke.has_value() && fd->name() == ke->key_name && current_.kind == TokenKind::kString) {
+          // Explicit assignment to the element's key field: the empty
+          // string is never a valid key, and in the named form the value
+          // must agree with the entry name (draft -01 §3.13).
+          if (Status s = CheckExplicitKey(*ke, current_.value, current_.pos); !s.ok()) return s;
+        }
         if (result_) {
           result_->MarkPresent(path_prefix_ + std::string(fd->name()));
         }
@@ -683,6 +740,7 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
       }
       case TokenKind::kLBrace: {
         Advance();
+        if (key_quoted) return QuotedNameUnkeyedError(pos, key);
         const FieldDescriptor* fd = desc->FindFieldByName(key);
         if (!fd) {
           if (discard_unknown_) {
@@ -695,11 +753,25 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
         if (fd->cpp_type() != FieldDescriptor::CPPTYPE_MESSAGE) {
           return PosError(pos, "field \"" + key + "\" is not a message — block syntax forbidden");
         }
-        if (fd->is_repeated()) {
-          return PosError(pos, "repeated field \"" + key + "\" must use list syntax");
-        }
         if (fd->is_map()) {
           return PosError(pos, "map field \"" + key + "\" must use 'name = { ... }' syntax");
+        }
+        if (fd->is_repeated()) {
+          // Keyed repeated field (draft -01 §3.13): the block form is a
+          // sequence of named entries, one per element.
+          if (const FieldDescriptor* key_fd = KeyField(fd)) {
+            if (result_) result_->MarkPresent(path_prefix_ + std::string(fd->name()));
+            Status st = DecodeKeyedBlockBody(msg, fd, key_fd);
+            if (!st.ok()) return st;
+            continue;
+          }
+          if (current_.kind == TokenKind::kString) {
+            // The block spells the keyed form on a field with no
+            // (pxf.key); report the quoted entry name — the more specific
+            // schema violation — rather than the generic shape error.
+            return QuotedNameUnkeyedError(current_.pos, current_.value);
+          }
+          return PosError(pos, "repeated field \"" + key + "\" must use list syntax");
         }
         Status st = CheckOneof(fd, pos, &set_oneofs);
         if (!st.ok()) return st;
@@ -754,7 +826,18 @@ Status DirectDecoder::CheckOneof(const FieldDescriptor* fd,
 Status DirectDecoder::DecodeFieldValue(Message* msg, const FieldDescriptor* fd) {
   if (Status s = IllegalError(); !s.ok()) return s;
   if (fd->is_map()) return DecodeMapInline(msg, fd);
-  if (fd->is_repeated()) return DecodeListInline(msg, fd);
+  if (fd->is_repeated()) {
+    // Keyed repeated field written `name = { ... }`: a block-tail is an
+    // abbreviation of `= { ... }` (draft -01 §3.13), so the assignment
+    // spelling of the keyed block form is equally valid.
+    if (current_.kind == TokenKind::kLBrace) {
+      if (const FieldDescriptor* key_fd = KeyField(fd)) {
+        Advance();  // consume {
+        return DecodeKeyedBlockBody(msg, fd, key_fd);
+      }
+    }
+    return DecodeListInline(msg, fd);
+  }
   if (fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
     return DecodeMsgValue(msg, fd);
   }
@@ -934,6 +1017,9 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
           return PosError(current_.pos, "expected '{' for repeated message element");
         }
         Advance();
+        if (const FieldDescriptor* key_fd = KeyField(fd)) {
+          keyed_elem_ = KeyedElem{std::string(fd->name()), std::string(key_fd->name()), "", false};
+        }
         Status st = DecodeFields(sub, /*in_block=*/true);
         if (!st.ok()) return st;
       }
@@ -952,6 +1038,79 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
   Advance();
   Ascend();
   return Status::OK();
+}
+
+// DecodeKeyedBlockBody decodes the block form of a keyed repeated field
+// (draft -01 §3.13): a sequence of named entries — `name { ... }` or
+// equivalently `name = { ... }` — where each entry name (unquoted value,
+// for string-literal names) populates the element's key field and entry
+// order is list order. Duplicate entry names within the block, the empty
+// string as a name, and a disagreeing explicit key-field assignment inside
+// an entry are decode errors. The opening '{' has been consumed; the
+// closing '}' is consumed before returning.
+Status DirectDecoder::DecodeKeyedBlockBody(Message* msg,
+                                           const FieldDescriptor* fd,
+                                           const FieldDescriptor* key_fd) {
+  if (Status s = Descend(); !s.ok()) return s;
+  const Reflection* r = msg->GetReflection();
+  std::unordered_map<std::string, bool> seen;
+  for (;;) {
+    if (Status s = IllegalError(); !s.ok()) return s;
+    if (current_.kind == TokenKind::kRBrace) {
+      Advance();
+      Ascend();
+      return Status::OK();
+    }
+    if (current_.kind == TokenKind::kEOF) {
+      return PosError(
+          current_.pos,
+          "expected '}' to close keyed field \"" + std::string(fd->name()) + "\", got EOF");
+    }
+    if (current_.kind != TokenKind::kIdent && current_.kind != TokenKind::kString) {
+      return PosError(current_.pos,
+                      "expected entry name (identifier or string) in keyed field \"" +
+                          std::string(fd->name()) + "\", got " + TokenKindName(current_.kind));
+    }
+    Position name_pos = current_.pos;
+    std::string name(current_.value);
+    if (name.empty()) {
+      return PosError(name_pos,
+                      "empty entry name in keyed field \"" + std::string(fd->name()) +
+                          "\": the empty string is not a valid key");
+    }
+    if (!detail::IsValidUTF8(name)) {
+      return PosError(
+          name_pos,
+          "invalid UTF-8 in entry name for keyed field \"" + std::string(fd->name()) + "\"");
+    }
+    if (!seen.emplace(name, true).second) {
+      return PosError(
+          name_pos,
+          "duplicate key \"" + name + "\" in keyed field \"" + std::string(fd->name()) + "\"");
+    }
+    Advance();
+    if (current_.kind == TokenKind::kLBrace) {
+      Advance();
+    } else if (current_.kind == TokenKind::kEquals) {
+      Advance();
+      if (current_.kind != TokenKind::kLBrace) {
+        return PosError(
+            current_.pos,
+            "keyed entry \"" + name + "\" of field \"" + std::string(fd->name()) +
+                "\" must have a block value ('{ ... }'): the element type is a message");
+      }
+      Advance();
+    } else {
+      return PosError(current_.pos,
+                      "expected '{' or '=' after entry name \"" + name + "\" in keyed field \"" +
+                          std::string(fd->name()) + "\", got " + TokenKindName(current_.kind));
+    }
+    if (Status s = CheckRepeatedCount(*msg, fd, current_.pos); !s.ok()) return s;
+    Message* sub = r->AddMessage(msg, fd);
+    sub->GetReflection()->SetString(sub, key_fd, name);
+    keyed_elem_ = KeyedElem{std::string(fd->name()), std::string(key_fd->name()), name, true};
+    if (Status s = DecodeFields(sub, /*in_block=*/true); !s.ok()) return s;
+  }
 }
 
 // --- map -------------------------------------------------------------------

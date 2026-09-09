@@ -11,6 +11,34 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- **pxf: quoted entry names and keyed repeated fields** (#18; draft `-01`
+  §3.13, protowire#116, reference protowire-go#50). The vendored
+  `proto/pxf/annotations.proto` gains `(pxf.key) = 1316`, matching
+  canonical. The grammar accepts a string at entry-name position with
+  `=` and `{` everywhere (`Assignment::key_quoted`, `Block::name_quoted`
+  retain the spelling for `FormatDocument`); the schema layer rejects it
+  outside a keyed repeated field's block. A repeated message-typed field
+  whose `(pxf.key)` names a singular string field of the element message
+  decodes from the keyed block form — `children { greeting { … } }` or
+  `children = { greeting = { … } }` — with the entry name as the key,
+  entry order as list order, and duplicate names, the empty string, and
+  a disagreeing explicit key assignment as errors; the anonymous list
+  form still decodes, with an explicit empty key rejected. `Marshal`
+  writes the keyed form whenever every key is present, non-empty and
+  distinct (names bare when identifier-safe, quoted otherwise, the key
+  field omitted from the entry body), and the anonymous form otherwise.
+  `CanonicalizeKeyed(Document*, const Descriptor*)` (new
+  `protowire/pxf/keyed.h`) is the schema-aware AST rewrite behind `fmt`:
+  eligible anonymous bindings become keyed blocks, `name = { }` becomes
+  `name { }`, identifier-safe quoted names are unquoted, redundant key
+  assignments are dropped. `ValidateFile` reports a misplaced
+  `(pxf.key)` as `ViolationKind::kKeyOption` with a `detail`;
+  `KeyFieldName`, `KeyField` and `IsKeyed` are exported from
+  `protowire/pxf/annotations.h`. The spec repo's `testdata/keyed/` is
+  vendored and every fixture is pinned.
+
 ### Security
 
 - **HARDENING.md § Mandatory limits are enforced, configurable per
@@ -101,6 +129,8 @@ format changes.
   `"false"` quoted, and anything else is an error naming the key and
   field; on a string `K` the bare keyword is an error that says to
   write it quoted.
+
+
   
 - **pxf: the lexer reads fractional and `µs` duration literals** (#20).
   `1.5ms`, `1.234567ms`, `312.5µs`, `1h30m0.5s` and `-2.5s` — the forms
