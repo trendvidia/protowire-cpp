@@ -18,5 +18,7 @@ target_compile_definitions(check_decode PRIVATE
   WKT_PROTO_DIR="${Protobuf_INCLUDE_DIR}")
 target_link_libraries(check_decode PRIVATE
   protowire_pxf
+  protowire_sbe
+  protowire_pb
   ${PROTOC_LIB}
   protobuf::libprotobuf)

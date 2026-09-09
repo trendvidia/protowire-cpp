@@ -42,6 +42,8 @@
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
 #include "protowire/detail/rfc3339.h"
+#include "protowire/detail/utf8.h"
+#include "protowire/limits.h"
 #include "protowire/pxf/annotations.h"
 #include "protowire/pxf/lexer.h"
 #include "protowire/pxf/wellknown.h"
@@ -76,24 +78,67 @@ bool ParseDouble(std::string_view s, double& out) {
   return end != buf.c_str() && static_cast<size_t>(end - buf.c_str()) == buf.size();
 }
 
+// Limits is UnmarshalOptions' five limits with the defaults of
+// protowire/limits.h applied (HARDENING.md § Mandatory limits).
+struct Limits {
+  int max_message_size = kMaxMessageSize;
+  int max_depth = kMaxNestingDepth;
+  int max_digits = kMaxNumericLiteralDigits;
+  int max_bytes_literal = kMaxBytesLiteralLength;
+  int max_repeated = kMaxRepeatedCount;
+};
+
+Limits ResolveLimits(const UnmarshalOptions& o) {
+  Limits lim;
+  if (o.max_message_size > 0) lim.max_message_size = o.max_message_size;
+  if (o.max_nesting_depth > 0) lim.max_depth = o.max_nesting_depth;
+  if (o.max_numeric_literal_digits > 0) lim.max_digits = o.max_numeric_literal_digits;
+  if (o.max_bytes_literal_length > 0) lim.max_bytes_literal = o.max_bytes_literal_length;
+  if (o.max_repeated_count > 0) lim.max_repeated = o.max_repeated_count;
+  return lim;
+}
+
+// CountDigits returns the number of decimal digits in a numeric literal —
+// the quantity MaxNumericLiteralDigits bounds before the literal reaches
+// an arbitrary-precision parser.
+int CountDigits(std::string_view literal) {
+  int n = 0;
+  for (char c : literal) {
+    if (c >= '0' && c <= '9') ++n;
+  }
+  return n;
+}
+
 class DirectDecoder {
  public:
   DirectDecoder(std::string_view input,
                 Message* root,
                 Result* result,
                 TypeResolver* resolver,
-                bool discard_unknown)
+                bool discard_unknown,
+                const Limits& lim)
       : lex_(input),
         root_(root),
         result_(result),
         resolver_(resolver),
-        discard_unknown_(discard_unknown) {
+        discard_unknown_(discard_unknown),
+        lim_(lim) {
+    lex_.SetMaxBytesLiteral(lim_.max_bytes_literal);
     if (result_) {
       null_mask_fd_ = FindNullMaskField(root_->GetDescriptor());
     }
   }
 
   Status Run() {
+    // MaxMessageSize is checked before the first token is read, so no
+    // work proportional to an oversized input happens.
+    if (lex_.Input().size() > static_cast<size_t>(lim_.max_message_size)) {
+      return Status::Error(
+          1,
+          1,
+          "input of " + std::to_string(lex_.Input().size()) +
+              " bytes exceeds MaxMessageSize=" + std::to_string(lim_.max_message_size));
+    }
     Advance();
     if (auto s = ConsumeDirectives(); !s.ok()) return s;
     return DecodeFields(root_, /*in_block=*/false);
@@ -468,6 +513,7 @@ class DirectDecoder {
   // ----- Field-level dispatch ------------------------------------------
 
   Status DecodeFields(Message* msg, bool in_block);
+  Status DecodeFieldsBody(Message* msg, bool in_block);
   Status DecodeFieldValue(Message* msg, const FieldDescriptor* fd);
   Status DecodeMsgValue(Message* msg, const FieldDescriptor* fd);
   Status DecodeListInline(Message* msg, const FieldDescriptor* fd);
@@ -487,6 +533,67 @@ class DirectDecoder {
                     Position pos,
                     std::unordered_map<std::string, std::string>* set_oneofs);
 
+  // One `{` or `[` is one descent (HARDENING.md § Recursion). The root
+  // message is depth 0, so a document exactly max_depth deep is accepted
+  // and one deeper is not; the AST parser counts the same way, so Parse
+  // and Unmarshal agree at the edge. Skipping (discard_unknown) walks
+  // braces with an explicit counter and never recurses.
+  Status Descend() {
+    if (++depth_ > lim_.max_depth) {
+      --depth_;
+      return PosError(current_.pos,
+                      "nesting depth exceeds MaxNestingDepth=" + std::to_string(lim_.max_depth));
+    }
+    return Status::OK();
+  }
+  void Ascend() { --depth_; }
+
+  // CheckRepeatedCount refuses the next element of a repeated or map
+  // field once it holds max_repeated elements (HARDENING.md
+  // MaxRepeatedCount), before the element is allocated.
+  Status CheckRepeatedCount(const Message& msg, const FieldDescriptor* fd, Position pos) {
+    if (msg.GetReflection()->FieldSize(msg, fd) >= lim_.max_repeated) {
+      return PosError(pos,
+                      std::string(fd->is_map() ? "map" : "repeated") + " field \"" +
+                          std::string(fd->name()) +
+                          "\" exceeds MaxRepeatedCount=" + std::to_string(lim_.max_repeated));
+    }
+    return Status::OK();
+  }
+
+  // CheckDigits bounds a numeric literal before it reaches an
+  // arbitrary-precision parser (HARDENING.md MaxNumericLiteralDigits).
+  Status CheckDigits(std::string_view literal, Position pos) {
+    int n = CountDigits(literal);
+    if (n > lim_.max_digits) {
+      return PosError(pos,
+                      "numeric literal has " + std::to_string(n) +
+                          " digits, MaxNumericLiteralDigits=" + std::to_string(lim_.max_digits));
+    }
+    return Status::OK();
+  }
+
+  // CheckUTF8 enforces HARDENING.md § UTF-8 at the assignment site of a
+  // proto3 string field: \xHH and \NNN escapes (and raw bytes) can
+  // produce invalid sequences; b"…" / bytes fields stay raw.
+  Status CheckUTF8(std::string_view value, const FieldDescriptor* fd, Position pos) {
+    if (!detail::IsValidUTF8(value)) {
+      return PosError(pos,
+                      "invalid UTF-8 in string field \"" + std::string(fd->name()) +
+                          "\" (use b\"…\" for raw bytes)");
+    }
+    return Status::OK();
+  }
+
+  // IllegalError surfaces the lexer's own diagnostic when current_ is an
+  // ILLEGAL token — an invalid escape, a bytes literal over
+  // MaxBytesLiteralLength, an unterminated string — instead of the
+  // generic "expected <kind>" the consumer would otherwise report.
+  Status IllegalError() {
+    if (current_.kind != TokenKind::kIllegal) return Status::OK();
+    return PosError(current_.pos, std::string(current_.value));
+  }
+
   // Skipping for unknown fields.
   void SkipValue();
   void SkipBraced();
@@ -499,12 +606,23 @@ class DirectDecoder {
   const FieldDescriptor* null_mask_fd_ = nullptr;
   TypeResolver* resolver_ = nullptr;
   bool discard_unknown_ = false;
+  Limits lim_;
+  int depth_ = 0;
   std::string path_prefix_;
 };
 
 // --- top-level body --------------------------------------------------------
 
 Status DirectDecoder::DecodeFields(Message* msg, bool in_block) {
+  if (in_block) {
+    if (Status s = Descend(); !s.ok()) return s;
+  }
+  Status st = DecodeFieldsBody(msg, in_block);
+  if (in_block) Ascend();
+  return st;
+}
+
+Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
   const Descriptor* desc = msg->GetDescriptor();
   std::unordered_map<std::string, std::string> set_oneofs;
 
@@ -519,6 +637,7 @@ Status DirectDecoder::DecodeFields(Message* msg, bool in_block) {
     }
 
     Position pos = current_.pos;
+    if (Status s = IllegalError(); !s.ok()) return s;
     if (current_.kind != TokenKind::kIdent && current_.kind != TokenKind::kString &&
         current_.kind != TokenKind::kInt) {
       return PosError(pos,
@@ -633,6 +752,7 @@ Status DirectDecoder::CheckOneof(const FieldDescriptor* fd,
 // --- value dispatch --------------------------------------------------------
 
 Status DirectDecoder::DecodeFieldValue(Message* msg, const FieldDescriptor* fd) {
+  if (Status s = IllegalError(); !s.ok()) return s;
   if (fd->is_map()) return DecodeMapInline(msg, fd);
   if (fd->is_repeated()) return DecodeListInline(msg, fd);
   if (fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
@@ -670,7 +790,12 @@ Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
     if (!inner) return PosError(current_.pos, "wrapper missing 'value' field");
     return SetScalar(sub, inner);
   }
-  // Big-number sugar.
+  // Big-number sugar. The digit cap runs before the literal reaches the
+  // arbitrary-precision parser.
+  if ((IsBigInt(d) || IsDecimal(d) || IsBigFloat(d)) &&
+      (current_.kind == TokenKind::kInt || current_.kind == TokenKind::kFloat)) {
+    if (Status s = CheckDigits(current_.value, current_.pos); !s.ok()) return s;
+  }
   if (IsBigInt(d) && current_.kind == TokenKind::kInt) {
     if (!SetBigIntFromString(sub, current_.value)) {
       return PosError(current_.pos, "invalid pxf.BigInt: " + std::string(current_.value));
@@ -753,16 +878,25 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
     return PosError(current_.pos,
                     "expected '[' for repeated field \"" + std::string(fd->name()) + "\"");
   }
+  // A list is a descent like a block: HARDENING.md § Recursion counts
+  // `[` and `{` alike, and so does the AST parser.
+  if (Status s = Descend(); !s.ok()) return s;
   Advance();
 
   while (current_.kind != TokenKind::kRBracket && current_.kind != TokenKind::kEOF) {
+    if (Status s = IllegalError(); !s.ok()) return s;
+    if (Status s = CheckRepeatedCount(*msg, fd, current_.pos); !s.ok()) return s;
     if (current_.kind == TokenKind::kNull) {
       return PosError(current_.pos,
                       "null is not allowed in repeated field \"" + std::string(fd->name()) + "\"");
     }
     if (fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
-      Message* sub = msg->GetReflection()->AddMessage(msg, fd);
       const Descriptor* d = fd->message_type();
+      if ((IsBigInt(d) || IsDecimal(d) || IsBigFloat(d)) &&
+          (current_.kind == TokenKind::kInt || current_.kind == TokenKind::kFloat)) {
+        if (Status s = CheckDigits(current_.value, current_.pos); !s.ok()) return s;
+      }
+      Message* sub = msg->GetReflection()->AddMessage(msg, fd);
       // Permit the same WKT/sugar tokens as scalar message fields.
       if (IsTimestamp(d) && current_.kind == TokenKind::kTimestamp) {
         auto t = detail::ParseRFC3339(current_.value);
@@ -816,6 +950,7 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
     return PosError(current_.pos, std::string("expected ']', got ") + TokenKindName(current_.kind));
   }
   Advance();
+  Ascend();
   return Status::OK();
 }
 
@@ -825,6 +960,7 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd) {
   if (current_.kind != TokenKind::kLBrace) {
     return PosError(current_.pos, "expected '{' for map field \"" + std::string(fd->name()) + "\"");
   }
+  if (Status s = Descend(); !s.ok()) return s;
   Advance();
   const Reflection* r = msg->GetReflection();
   const FieldDescriptor* key_fd = fd->message_type()->map_key();
@@ -832,6 +968,8 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd) {
 
   while (current_.kind != TokenKind::kRBrace && current_.kind != TokenKind::kEOF) {
     Position pos = current_.pos;
+    if (Status s = IllegalError(); !s.ok()) return s;
+    if (Status s = CheckRepeatedCount(*msg, fd, pos); !s.ok()) return s;
     // map-key = identifier / string / integer / bool (draft -01 § Entries
     // and Keys; the keyword spelling landed in protowire#284).
     TokenKind key_kind = current_.kind;
@@ -857,6 +995,7 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd) {
           current_.pos,
           "null is not allowed as map value in field \"" + std::string(fd->name()) + "\"");
     }
+    if (Status s = IllegalError(); !s.ok()) return s;
     Message* entry = r->AddMessage(msg, fd);
     Status st = SetMapKey(entry, fd, key, key_kind, pos);
     if (!st.ok()) return st;
@@ -880,6 +1019,7 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd) {
     return PosError(current_.pos, std::string("expected '}', got ") + TokenKindName(current_.kind));
   }
   Advance();
+  Ascend();
   return Status::OK();
 }
 
@@ -900,6 +1040,7 @@ Status DirectDecoder::SetMapKey(Message* entry,
                             std::string(map_fd->name()) + "\": the keyword " + std::string(key) +
                             " is a bool key; write \"" + std::string(key) + "\" for the string");
       }
+      if (!detail::IsValidUTF8(key)) return PosError(pos, "invalid UTF-8 in string map key");
       r->SetString(entry, key_fd, std::string(key));
       return Status::OK();
     case FieldDescriptor::CPPTYPE_INT32: {
@@ -973,6 +1114,9 @@ Status DirectDecoder::SetScalar(Message* msg, const FieldDescriptor* fd) {
   switch (fd->cpp_type()) {
     case FieldDescriptor::CPPTYPE_STRING: {
       if (current_.kind == TokenKind::kString) {
+        if (fd->type() == FieldDescriptor::TYPE_STRING) {
+          if (Status s = CheckUTF8(current_.value, fd, pos); !s.ok()) return s;
+        }
         r->SetString(msg, fd, std::string(current_.value));
         Advance();
         return Status::OK();
@@ -1058,6 +1202,9 @@ Status DirectDecoder::AddRepeatedScalar(Message* msg, const FieldDescriptor* fd)
   switch (fd->cpp_type()) {
     case FieldDescriptor::CPPTYPE_STRING: {
       if (current_.kind == TokenKind::kString) {
+        if (fd->type() == FieldDescriptor::TYPE_STRING) {
+          if (Status s = CheckUTF8(current_.value, fd, pos); !s.ok()) return s;
+        }
         r->AddString(msg, fd, std::string(current_.value));
         Advance();
         return Status::OK();
@@ -1490,14 +1637,15 @@ Status CheckSchema(const Message* msg, const UnmarshalOptions& opts) {
 
 Status Unmarshal(std::string_view data, Message* msg, UnmarshalOptions opts) {
   if (Status s = CheckSchema(msg, opts); !s.ok()) return s;
-  DirectDecoder d(data, msg, /*result=*/nullptr, opts.type_resolver, opts.discard_unknown);
+  DirectDecoder d(
+      data, msg, /*result=*/nullptr, opts.type_resolver, opts.discard_unknown, ResolveLimits(opts));
   return d.Run();
 }
 
 StatusOr<Result> UnmarshalFull(std::string_view data, Message* msg, UnmarshalOptions opts) {
   if (Status s = CheckSchema(msg, opts); !s.ok()) return s;
   Result r;
-  DirectDecoder d(data, msg, &r, opts.type_resolver, opts.discard_unknown);
+  DirectDecoder d(data, msg, &r, opts.type_resolver, opts.discard_unknown, ResolveLimits(opts));
   Status st = d.Run();
   if (!st.ok()) return st;
   const auto* null_mask_fd = FindNullMaskField(msg->GetDescriptor());

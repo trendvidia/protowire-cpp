@@ -37,7 +37,7 @@ if(TARGET protowire_pxf)
             pxf_fast_test pxf_full_roundtrip_test pxf_escapes_test
             pxf_annotations_test pxf_format_test pxf_directive_test
             pxf_schema_test pxf_result_directives_test pxf_dataset_reader_test
-            pxf_proto_directive_test pxf_map_keys_test)
+            pxf_proto_directive_test pxf_map_keys_test pxf_keyed_test pxf_hardening_test)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${f}.cc)
       list(APPEND _pxf_test_srcs ${f}.cc)
     endif()

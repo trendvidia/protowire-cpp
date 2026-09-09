@@ -135,6 +135,11 @@ View View::Composite(std::string_view name) const {
 }
 
 View GroupView::Entry(size_t i) const {
+  // Out of range reads as an empty view rather than a span past the
+  // buffer, matching the scalar accessors' "unknown name reads zero".
+  if (i >= count_ || data_.size() < (i + 1) * block_length_) {
+    return View({}, {}, nullptr, nullptr, nullptr);
+  }
   auto entry = data_.subspan(i * block_length_, block_length_);
   return View({}, entry, nullptr, fields_, nullptr);
 }
