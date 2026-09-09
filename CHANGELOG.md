@@ -11,6 +11,19 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **pb: a map entry always carries key and value, zero-valued or not**
+  (#24; protowire#295, decided on protowire-go#105). `pb.h`'s map branch
+  applied proto3 zero-skip inside the entry, so `metadata { "": "" }`
+  serialised as an empty entry (`22022a00`) where protobuf-go, protoc and
+  C++ protobuf write `22062a040a001200`. Field 1 and field 2 of every
+  entry are now written unconditionally; a value held through
+  `std::optional` or a smart pointer that is unset is written as its zero
+  value. `dump_envelope --vector zero-map-entry` prints the bytes for the
+  cross-port gate's golden, and an unknown vector name exits 3 with
+  `not-implemented: <name>`.
+
 ## [1.0.0] — 2026-05-13
 
 First major-version cut. Implements the three one-time spec changes
