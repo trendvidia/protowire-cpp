@@ -3,10 +3,23 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
 #include "protowire/pxf/ast.h"
 
 namespace protowire::pxf {
+
+// IsIdentifierSafe reports whether s can be written bare and read back as
+// the string s: it matches the grammar's identifier production (a letter
+// or underscore, then letters, digits and underscores) and is not one of
+// the value keywords "null", "true", "false" — bare, those are a bool key
+// or no key at all, and a leading digit makes an integer key. The
+// formatter and the marshaller share this one test so they agree on every
+// key both can produce (draft -01 § Entries and Keys; protowire#306).
+// Like the reference's isValidIdent it does not admit '.', which the
+// grammar's ident-part does; that divergence, in every port, is
+// protowire#313.
+bool IsIdentifierSafe(std::string_view s);
 
 // FormatDocument pretty-prints a parsed AST `Document`, preserving comments.
 // Unlike Marshal (which works from a proto.Message and loses comments), this

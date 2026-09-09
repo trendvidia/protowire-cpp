@@ -28,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -523,8 +524,9 @@ class DirectDecoder {
   Status AddRepeatedScalar(Message* msg, const FieldDescriptor* fd);
   Status SetEnum(Message* msg, const FieldDescriptor* fd, bool repeated);
   Status SetMapKey(Message* entry,
-                   const FieldDescriptor* key_fd,
+                   const FieldDescriptor* map_fd,
                    std::string_view key,
+                   TokenKind key_kind,
                    Position pos);
 
   Status CheckOneof(const FieldDescriptor* fd,
@@ -968,8 +970,11 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd) {
     Position pos = current_.pos;
     if (Status s = IllegalError(); !s.ok()) return s;
     if (Status s = CheckRepeatedCount(*msg, fd, pos); !s.ok()) return s;
-    if (current_.kind != TokenKind::kIdent && current_.kind != TokenKind::kString &&
-        current_.kind != TokenKind::kInt) {
+    // map-key = identifier / string / integer / bool (draft -01 § Entries
+    // and Keys; the keyword spelling landed in protowire#284).
+    TokenKind key_kind = current_.kind;
+    if (key_kind != TokenKind::kIdent && key_kind != TokenKind::kString &&
+        key_kind != TokenKind::kInt && key_kind != TokenKind::kBool) {
       return PosError(pos, std::string("expected map key, got ") + TokenKindName(current_.kind));
     }
     std::string key(current_.value);
@@ -992,7 +997,7 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd) {
     }
     if (Status s = IllegalError(); !s.ok()) return s;
     Message* entry = r->AddMessage(msg, fd);
-    Status st = SetMapKey(entry, key_fd, key, pos);
+    Status st = SetMapKey(entry, fd, key, key_kind, pos);
     if (!st.ok()) return st;
     if (val_fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
       if (current_.kind != TokenKind::kLBrace) {
@@ -1019,12 +1024,22 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd) {
 }
 
 Status DirectDecoder::SetMapKey(Message* entry,
-                                const FieldDescriptor* key_fd,
+                                const FieldDescriptor* map_fd,
                                 std::string_view key,
+                                TokenKind key_kind,
                                 Position pos) {
+  const FieldDescriptor* key_fd = map_fd->message_type()->map_key();
   const Reflection* r = entry->GetReflection();
   switch (key_fd->cpp_type()) {
     case FieldDescriptor::CPPTYPE_STRING:
+      if (key_kind == TokenKind::kBool) {
+        // A bool key matches a map<bool,V> field and nothing else; the
+        // string "true" is spelled quoted.
+        return PosError(pos,
+                        "invalid string map key " + std::string(key) + " for field \"" +
+                            std::string(map_fd->name()) + "\": the keyword " + std::string(key) +
+                            " is a bool key; write \"" + std::string(key) + "\" for the string");
+      }
       if (!detail::IsValidUTF8(key)) return PosError(pos, "invalid UTF-8 in string map key");
       r->SetString(entry, key_fd, std::string(key));
       return Status::OK();
@@ -1054,9 +1069,38 @@ Status DirectDecoder::SetMapKey(Message* entry,
       r->SetUInt64(entry, key_fd, n);
       return Status::OK();
     }
-    case FieldDescriptor::CPPTYPE_BOOL:
-      r->SetBool(entry, key_fd, key == "true");
+    case FieldDescriptor::CPPTYPE_BOOL: {
+      // A bool map key has three spellings (draft -01 § Entries and
+      // Keys; map-key = identifier / string / integer / bool): the
+      // keyword true / false bare (protowire#284); the bare integers 0 /
+      // 1 ("bool encoded as 0/1"); and the quoted literals "true" /
+      // "false" (a string key is parsed as a literal of K's type, and a
+      // PXF bool literal is exactly those two words). An identifier key
+      // (t, T, TRUE, yes) matches nothing — an identifier names a field,
+      // and a map has none — and "1" / "0" in quotes are not bool
+      // literals either. Before this the port bound any other spelling
+      // to false.
+      std::optional<bool> b;
+      if (key_kind == TokenKind::kBool) {
+        b = (key == "true");
+      } else if (key_kind == TokenKind::kString) {
+        if (key == "true") b = true;
+        if (key == "false") b = false;
+      } else if (key_kind == TokenKind::kInt) {
+        if (key == "1") b = true;
+        if (key == "0") b = false;
+      }
+      if (!b.has_value()) {
+        std::string spelled =
+            key_kind == TokenKind::kString ? "\"" + std::string(key) + "\"" : std::string(key);
+        return PosError(pos,
+                        "invalid bool map key " + spelled + " for field \"" +
+                            std::string(map_fd->name()) +
+                            "\": a bool key is true, false, 0, 1, \"true\" or \"false\"");
+      }
+      r->SetBool(entry, key_fd, *b);
       return Status::OK();
+    }
     default:
       return PosError(pos, "unsupported map key kind");
   }

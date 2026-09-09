@@ -192,8 +192,11 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry) {
     a->leading_comments = std::move(leading);
     return EntryPtr(std::move(a));
   }
+  // map-key = identifier / string / integer / bool (draft -01 § Entries
+  // and Keys; the keyword spelling landed in protowire#284). A bool
+  // token is only ever a map key: `true = v` / `true { }` name no field.
   if (current_.kind != TokenKind::kIdent && current_.kind != TokenKind::kString &&
-      current_.kind != TokenKind::kInt) {
+      current_.kind != TokenKind::kInt && !(allow_map_entry && current_.kind == TokenKind::kBool)) {
     return Status::Error(pos.line,
                          pos.column,
                          std::string("expected identifier, string, or integer, got ") +
@@ -240,6 +243,7 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry) {
       auto m = std::make_unique<MapEntry>();
       m->pos = pos;
       m->key = std::move(key);
+      m->key_quoted = (key_kind == TokenKind::kString);
       m->value = std::move(v).consume();
       m->leading_comments = std::move(leading);
       return EntryPtr(std::move(m));

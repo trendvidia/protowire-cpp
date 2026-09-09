@@ -25,6 +25,8 @@
 
 #include "protowire/pxf.h"
 
+#include "protowire/detail/duration.h"
+
 #include <gtest/gtest.h>
 #include "protoc_compat.h"
 
@@ -254,6 +256,74 @@ TEST_F(FullRoundTrip, NegativeDuration) {
   std::string src = R"(dur_field = -30s)";
   auto t = RunFullPipeline(this, src);
   ExpectFullEquality(t);
+}
+
+// Every branch of FormatDuration — sub-microsecond, fractional µs and ms,
+// fractional seconds inside an h/m/s literal, negatives, the int64 edges —
+// must read back to the same seconds/nanos. Before #20 the lexer split
+// "1.5ms" into a float and an identifier, so this port could not read
+// its own output for any measured latency. Mirrors protowire-go's
+// TestMarshalDurationReadsBack.
+TEST_F(FullRoundTrip, MarshalDurationReadsBack) {
+  const auto* fd = desc()->FindFieldByName("dur_field");
+  ASSERT_NE(fd, nullptr);
+  const auto* dur_desc = fd->message_type();
+  const auto* secs_fd = dur_desc->FindFieldByName("seconds");
+  const auto* nanos_fd = dur_desc->FindFieldByName("nanos");
+  constexpr int64_t kSec = 1'000'000'000LL;
+  constexpr int64_t kMs = 1'000'000LL;
+  constexpr int64_t kMin = 60 * kSec;
+  constexpr int64_t kHour = 60 * kMin;
+  const std::vector<int64_t> total_nanos = {
+      0,
+      1,
+      999,
+      1000,
+      1234,
+      1500,
+      312500,
+      1234567,
+      1500000,
+      250 * kMs,
+      kSec,
+      1500 * kMs,
+      90 * kMin,
+      90 * kMin + 500 * kMs,
+      kHour + 30 * kMin + 45 * kSec + 123456789,
+      100 * kHour,
+      -1,
+      -1500,
+      -312500,
+      -1500 * kMs,
+      -90 * kMin - 500 * kMs,
+      INT64_MAX,
+      INT64_MIN,
+  };
+  for (int64_t d : total_nanos) {
+    // Go's time.Duration splits with truncation toward zero: nanos carry
+    // the sign of the duration.
+    int64_t secs = d / kSec;
+    int64_t nanos = d % kSec;
+    SCOPED_TRACE(protowire::detail::FormatDuration(secs, static_cast<int32_t>(nanos)));
+
+    auto m = NewAllTypes();
+    auto* sub = m->GetReflection()->MutableMessage(m.get(), fd);
+    sub->GetReflection()->SetInt64(sub, secs_fd, secs);
+    sub->GetReflection()->SetInt32(sub, nanos_fd, static_cast<int32_t>(nanos));
+
+    auto text = protowire::pxf::Marshal(*m);
+    ASSERT_TRUE(text.ok()) << text.status().ToString();
+    std::string expect =
+        "dur_field = " + protowire::detail::FormatDuration(secs, static_cast<int32_t>(nanos));
+    EXPECT_NE(text->find(expect), std::string::npos) << *text;
+
+    auto back = NewAllTypes();
+    auto st = protowire::pxf::Unmarshal(*text, back.get());
+    ASSERT_TRUE(st.ok()) << st.ToString() << "\ntext:\n" << *text;
+    const auto& got = back->GetReflection()->GetMessage(*back, fd);
+    EXPECT_EQ(got.GetReflection()->GetInt64(got, secs_fd), secs);
+    EXPECT_EQ(got.GetReflection()->GetInt32(got, nanos_fd), static_cast<int32_t>(nanos));
+  }
 }
 
 TEST_F(FullRoundTrip, OneofTextBranch) {
