@@ -33,8 +33,9 @@ void CanonicalizeKeyed(Document* doc, const google::protobuf::Descriptor* desc);
 
 // IsIdentifierSafeEntryName reports whether s can be written as an
 // unquoted entry name: it matches the grammar's identifier production
-// (ident-start, then ident-part bytes — dots included, unlike a map key)
-// and is not one of the value keywords null / true / false.
+// (ident-start, then ident-part bytes, dots included) and is not one of
+// the value keywords null / true / false. IsIdentifierSafe (format.h),
+// the string map-key test, is the same rule (protowire#313).
 bool IsIdentifierSafeEntryName(std::string_view s);
 
 }  // namespace protowire::pxf
