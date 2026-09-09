@@ -17,19 +17,17 @@
 #include <variant>
 
 #include "protowire/detail/base64.h"
+#include "protowire/pxf/keyed.h"
 #include "protowire/pxf/lexer.h"
 
 namespace protowire::pxf {
 
 bool IsIdentifierSafe(std::string_view s) {
-  if (s.empty() || s == "true" || s == "false" || s == "null") return false;
-  for (size_t i = 0; i < s.size(); ++i) {
-    char c = s[i];
-    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
-              (i != 0 && c >= '0' && c <= '9');
-    if (!ok) return false;
-  }
-  return true;
+  // One identifier-safe rule for the document: the test keyed entry
+  // names use (protowire#313). The alphabet used to stop at
+  // [A-Za-z0-9_], so "a.b" was written quoted where the identifier
+  // production — ident-part admits '.' — says bare.
+  return IsIdentifierSafeEntryName(s);
 }
 
 namespace {

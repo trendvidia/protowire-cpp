@@ -126,6 +126,39 @@ TEST_F(MapKeys, FmtKeywordKeysPair) {
   EXPECT_EQ(Format(expected), expected) << "expected file is not a fixed point";
 }
 
+// The identifier production admits '.', so a quoted "a.b" canonicalizes
+// to bare and a bare c.d stays bare, as keyed entry names already did;
+// ".e" and "1.5" fail ident-start and stay quoted (protowire#313, #36).
+TEST_F(MapKeys, FmtDottedKeysPair) {
+  const std::string input = ReadFixture("fmt-dotted-keys.pxf");
+  const std::string expected = ReadFixture("fmt-dotted-keys.expected.pxf");
+  EXPECT_EQ(Format(input), expected);
+  EXPECT_EQ(Format(expected), expected) << "expected file is not a fixed point";
+  // Both documents bind to the four string keys, and the marshaller's
+  // spellings match the expected file.
+  for (const std::string* doc : {&input, &expected}) {
+    protowire::Status st;
+    auto got = Bind(labels_, *doc, &st);
+    ASSERT_TRUE(st.ok()) << st.ToString();
+    std::map<std::string, std::string> want = {
+        {"a.b", "quoted dotted"},
+        {"c.d", "bare dotted"},
+        {".e", "leading dot"},
+        {"1.5", "float-shaped"},
+    };
+    EXPECT_EQ(got, want);
+  }
+  auto msg = New(labels_);
+  ASSERT_TRUE(protowire::pxf::Unmarshal(input, msg.get()).ok());
+  protowire::pxf::MarshalOptions opts;
+  opts.type_url = "mapkeys.v1.Labels";
+  auto out = protowire::pxf::Marshal(*msg, opts);
+  ASSERT_TRUE(out.ok()) << out.status().ToString();
+  EXPECT_EQ(*out,
+            "@type mapkeys.v1.Labels\n\nby_label = {\n  \".e\": \"leading dot\"\n"
+            "  \"1.5\": \"float-shaped\"\n  a.b: \"quoted dotted\"\n  c.d: \"bare dotted\"\n}\n");
+}
+
 TEST_F(MapKeys, FmtBareKeysPair) {
   const std::string expected = ReadFixture("fmt-bare-keys.expected.pxf");
   EXPECT_EQ(Format(ReadFixture("fmt-bare-keys.pxf")), expected);

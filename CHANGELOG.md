@@ -11,6 +11,20 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **pxf: a dotted string map key is written bare** (#36; protowire#313,
+  decided as (a)). The identifier-safe test `Marshal` and
+  `FormatDocument` apply to a string map key stopped at `[A-Za-z0-9_]`,
+  while the grammar's *ident-part* — and the test keyed entry names use
+  — admits `.`, so a key `a.b` was marshalled `"a.b":` and a quoted
+  `"a.b"` kept its quotes through fmt, where the text says bare.
+  `IsIdentifierSafe` is `IsIdentifierSafeEntryName` now: one
+  identifier-safe rule for the document. `".e"` and `"1.5"` still fail
+  *ident-start* and stay quoted. The spec's third fmt pair,
+  `fmt-dotted-keys`, is vendored and pinned; the decoder always read
+  `a.b:` as one identifier, so only the writers move.
+
 ### Added
 
 - **pxf: quoted entry names and keyed repeated fields** (#18; draft `-01`
