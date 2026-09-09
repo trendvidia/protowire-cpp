@@ -106,6 +106,13 @@ using EntryPtr =
 struct Assignment {
   Position pos;
   std::string key;
+  // key_quoted records that key was written as a string literal
+  // (`"name" = { ... }`, the quoted entry-name form of draft -01 §3.13).
+  // key always holds the unquoted (denoted) value; the flag exists so
+  // FormatDocument round-trips the source spelling. A quoted name is only
+  // meaningful as the key of a keyed repeated field's entry — the schema
+  // layer rejects it anywhere else.
+  bool key_quoted = false;
   ValuePtr value;
   std::vector<Comment> leading_comments;
   std::string trailing_comment;
@@ -132,6 +139,13 @@ struct MapEntry {
 struct Block {
   Position pos;
   std::string name;
+  // name_quoted records that name was written as a string literal
+  // (`"us-east-1" { ... }`, draft -01 §3.13). name always holds the
+  // unquoted (denoted) value; the flag preserves the source spelling for
+  // FormatDocument. A quoted name is only meaningful as the key of a
+  // keyed repeated field's entry — the schema layer rejects it anywhere
+  // else.
+  bool name_quoted = false;
   std::vector<EntryPtr> entries;
   std::vector<Comment> leading_comments;
 };

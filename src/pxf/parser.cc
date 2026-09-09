@@ -208,10 +208,12 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry) {
 
   switch (current_.kind) {
     case TokenKind::kEquals: {
-      // `=` denotes a field assignment on a proto message; the key must
-      // be an identifier. Map-style keys (string / integer) are only
-      // valid with `:`.
-      if (key_kind != TokenKind::kIdent) {
+      // `=` denotes a field assignment on a proto message; the key is an
+      // identifier, or a string — the quoted entry name of draft -01
+      // §3.13, which the grammar accepts everywhere and the schema layer
+      // restricts to keyed repeated fields' blocks. An integer key is
+      // only valid with `:`.
+      if (key_kind != TokenKind::kIdent && key_kind != TokenKind::kString) {
         return Status::Error(
             pos.line,
             pos.column,
@@ -224,6 +226,7 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry) {
       auto a = std::make_unique<Assignment>();
       a->pos = pos;
       a->key = std::move(key);
+      a->key_quoted = (key_kind == TokenKind::kString);
       a->value = std::move(v).consume();
       a->leading_comments = std::move(leading);
       return EntryPtr(std::move(a));
@@ -249,9 +252,9 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry) {
       return EntryPtr(std::move(m));
     }
     case TokenKind::kLBrace: {
-      // `{ ... }` denotes a submessage field; same identifier-only rule
-      // as `=` applies.
-      if (key_kind != TokenKind::kIdent) {
+      // `{ ... }` denotes a submessage field; the same identifier-or-
+      // string rule as `=` applies.
+      if (key_kind != TokenKind::kIdent && key_kind != TokenKind::kString) {
         return Status::Error(pos.line,
                              pos.column,
                              std::string("submessage block requires an identifier key, got ") +
@@ -263,6 +266,7 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry) {
       auto b = std::make_unique<Block>();
       b->pos = pos;
       b->name = std::move(key);
+      b->name_quoted = (key_kind == TokenKind::kString);
       b->entries = std::move(entries).consume();
       b->leading_comments = std::move(leading);
       return EntryPtr(std::move(b));
