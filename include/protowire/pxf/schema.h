@@ -30,6 +30,10 @@ enum class ViolationKind : uint8_t {
   kField = 1,
   kOneof,
   kEnumValue,
+  // A (pxf.key) annotation whose placement draft -01 §3.13 forbids: on a
+  // field that is not a repeated message-typed field, naming a field the
+  // element message lacks, or naming one that is not a singular string.
+  kKeyOption,
 };
 
 const char* ViolationKindName(ViolationKind k);
@@ -39,8 +43,9 @@ const char* ViolationKindName(ViolationKind k);
 struct Violation {
   std::string file;     // .proto file path the offending element is declared in
   std::string element;  // fully-qualified protobuf name (e.g. "trades.v1.Side.null")
-  std::string name;     // bare reserved identifier ("null" / "true" / "false")
+  std::string name;     // bare reserved identifier, or the (pxf.key) value for kKeyOption
   ViolationKind kind = ViolationKind::kField;
+  std::string detail;  // human-readable explanation; set for kKeyOption
 
   // One-line human-readable description, e.g.
   //   "trades.proto: message field \"trades.v1.X.null\" uses PXF-reserved name \"null\" (draft
