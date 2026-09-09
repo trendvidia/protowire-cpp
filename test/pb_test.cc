@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -219,6 +220,60 @@ TEST(Pb, ZigZagMacro) {
 }
 
 }  // namespace
+
+// Map entries write field 1 and field 2 whether or not they are zero
+// (protowire#295, #24): key "" / value 0 is `0a00 1000` inside the entry,
+// never an empty entry. Also the value held through std::optional or a
+// pointer: unset is written as the zero value, so every entry has both.
+struct MapHolder {
+  std::map<std::string, int32_t> counts;
+  std::map<int32_t, std::string> names;
+  std::map<std::string, std::optional<int32_t>> opt;
+  PROTOWIRE_FIELDS(MapHolder,
+                   PROTOWIRE_FIELD(1, counts),
+                   PROTOWIRE_FIELD(2, names),
+                   PROTOWIRE_FIELD(3, opt))
+};
+
+TEST(Pb, MapEntryAlwaysCarriesKeyAndValue) {
+  MapHolder m;
+  m.counts[""] = 0;
+  m.names[0] = "";
+  m.opt["k"] = std::nullopt;
+  auto bytes = Marshal(m);
+  const std::vector<uint8_t> want = {
+      // counts: entry { key "" (0a 00), value 0 (10 00) }
+      0x0a,
+      0x04,
+      0x0a,
+      0x00,
+      0x10,
+      0x00,
+      // names: entry { key 0 (08 00), value "" (12 00) }
+      0x12,
+      0x04,
+      0x08,
+      0x00,
+      0x12,
+      0x00,
+      // opt: entry { key "k" (0a 01 6b), value 0 (10 00) }
+      0x1a,
+      0x05,
+      0x0a,
+      0x01,
+      0x6b,
+      0x10,
+      0x00,
+  };
+  EXPECT_EQ(bytes, want);
+
+  MapHolder got;
+  ASSERT_TRUE(Unmarshal(bytes, got).ok());
+  EXPECT_EQ(got.counts.at(""), 0);
+  EXPECT_EQ(got.names.at(0), "");
+  ASSERT_TRUE(got.opt.at("k").has_value());
+  EXPECT_EQ(*got.opt.at("k"), 0);
+}
 
 // ---- HARDENING.md § Mandatory limits (#25, #26) --------------------------
 

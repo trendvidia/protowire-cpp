@@ -139,3 +139,31 @@ TEST(Envelope, TransportErrRoundTrip) {
 }
 
 }  // namespace
+
+// A pb map entry always carries both key and value, zero-valued or not —
+// the layout protobuf-go, protoc and C++ protobuf write (protowire#295,
+// #24). The golden is the spec repo's testdata/envelope/
+// zero-map-entry.expected.hex, derived from `protoc --encode` and from
+// protobuf-go's deterministic marshal; it is pinned here against those
+// bytes, not against this port's own decoder. Before #24 the entry was
+// written empty (22022a00): field 4 { field 5 { } }.
+TEST(Envelope, ZeroMapEntryCarriesKeyAndValue) {
+  Envelope e;
+  e.error = std::make_unique<AppError>();
+  e.error->metadata[""] = "";
+  auto bytes = protowire::pb::Marshal(e);
+  std::string hex;
+  for (uint8_t b : bytes) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    hex.push_back(kHex[b >> 4]);
+    hex.push_back(kHex[b & 0xF]);
+  }
+  EXPECT_EQ(hex, "22062a040a001200");
+
+  Envelope got;
+  ASSERT_TRUE(protowire::pb::Unmarshal(bytes, got).ok());
+  ASSERT_NE(got.error, nullptr);
+  ASSERT_EQ(got.error->metadata.size(), 1u);
+  EXPECT_EQ(got.error->metadata.count(""), 1u);
+  EXPECT_EQ(got.error->metadata.at(""), "");
+}
