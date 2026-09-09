@@ -25,6 +25,7 @@
 #include <google/protobuf/message.h>
 
 #include "protowire/detail/status.h"
+#include "protowire/limits.h"
 #include "protowire/sbe/template.h"
 
 namespace protowire::sbe {
@@ -33,15 +34,29 @@ class Codec;
 class View;
 class GroupView;
 
+// CodecOptions carries the HARDENING.md § Mandatory limits the codec's
+// decoders enforce, configurable per codec; 0 selects the default in
+// protowire/limits.h. max_message_size caps the input to one Unmarshal or
+// NewView call; max_repeated_count caps a repeating group's numInGroup,
+// checked before any entry is allocated.
+struct CodecOptions {
+  int max_message_size = 0;
+  int max_repeated_count = 0;
+};
+
 class Codec {
  public:
-  static StatusOr<Codec> New(std::vector<const google::protobuf::FileDescriptor*> files);
+  static StatusOr<Codec> New(std::vector<const google::protobuf::FileDescriptor*> files,
+                             CodecOptions opts = {});
 
   StatusOr<std::vector<uint8_t>> Marshal(const google::protobuf::Message& msg) const;
   Status Unmarshal(std::span<const uint8_t> data, google::protobuf::Message* msg) const;
 
   // Zero-allocation reader over an SBE buffer. The view holds a span into
   // the buffer; strings and bytes returned by it borrow from that buffer.
+  // The header, root block and every group header are validated here
+  // (HARDENING.md § SBE validation), so the accessors never read past the
+  // buffer.
   StatusOr<View> NewView(std::span<const uint8_t> data) const;
 
   // Direct access to a registered template by full name; used by tests.
@@ -53,8 +68,17 @@ class Codec {
                          uint16_t schema_id,
                          uint16_t version);
 
+  // ValidateGroups walks every group header after the root block and
+  // checks it per HARDENING.md § SBE validation, returning the total size
+  // of the groups region on success.
+  Status ValidateGroups(std::span<const uint8_t> data,
+                        const MessageTemplate& tmpl,
+                        size_t pos) const;
+
   std::unordered_map<std::string, std::unique_ptr<MessageTemplate>> by_name_;
   std::unordered_map<uint16_t, MessageTemplate*> by_id_;
+  int max_message_size_ = kMaxMessageSize;
+  int max_repeated_ = kMaxRepeatedCount;
 };
 
 // Zero-allocation read-only view over an SBE-encoded message.

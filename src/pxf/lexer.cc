@@ -468,6 +468,16 @@ Token Lexer::LexBytes(Position pos) {
   size_t start = pos_;
   while (pos_ < input_.size()) {
     char c = input_[pos_];
+    if (max_bytes_literal_ > 0 &&
+        (pos_ - start) / 4 * 3 > static_cast<size_t>(max_bytes_literal_)) {
+      // Decoded base64 is three bytes per four characters; judged from
+      // the length so the literal is neither scanned to its end nor
+      // decoded before it is refused.
+      return Token{TokenKind::kIllegal,
+                   Store("bytes literal decodes to more than MaxBytesLiteralLength=" +
+                         std::to_string(max_bytes_literal_) + " bytes"),
+                   pos};
+    }
     if (c == '"') {
       std::string_view raw = input_.substr(start, pos_ - start);
       Advance();  // closing "

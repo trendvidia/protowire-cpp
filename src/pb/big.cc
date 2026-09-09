@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 TrendVidia, LLC.
+#include "protowire/limits.h"
 #include "protowire/pb_big.h"
 
 #include <algorithm>
@@ -257,36 +258,47 @@ Status UnmarshalBigIntMsg(std::span<const uint8_t> data, BigInt& out) {
                     });
 }
 
-Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out) {
+Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out, int max_digits) {
   out = {};
-  return ReadFields(data,
-                    out,
-                    [](std::span<const uint8_t> d,
-                       wire::FieldNumber num,
-                       wire::WireType,
-                       Decimal& v,
-                       int& consumed) -> Status {
-                      if (num == 1) {
-                        std::span<const uint8_t> b;
-                        int n = wire::ConsumeBytes(d, b);
-                        if (n < 0) return Status::Error("corrupt Decimal.unscaled");
-                        v.unscaled.assign(b.begin(), b.end());
-                        consumed = n;
-                      } else if (num == 2) {
-                        uint64_t x;
-                        int n = wire::ConsumeVarint(d, x);
-                        if (n < 0) return Status::Error("corrupt Decimal.scale");
-                        v.scale = static_cast<int32_t>(wire::DecodeZigZag(x));
-                        consumed = n;
-                      } else if (num == 3) {
-                        uint64_t x;
-                        int n = wire::ConsumeVarint(d, x);
-                        if (n < 0) return Status::Error("corrupt Decimal.negative");
-                        v.negative = x != 0;
-                        consumed = n;
-                      }
-                      return Status::OK();
-                    });
+  if (max_digits <= 0) max_digits = kMaxNumericLiteralDigits;
+  Status st = ReadFields(data,
+                         out,
+                         [](std::span<const uint8_t> d,
+                            wire::FieldNumber num,
+                            wire::WireType,
+                            Decimal& v,
+                            int& consumed) -> Status {
+                           if (num == 1) {
+                             std::span<const uint8_t> b;
+                             int n = wire::ConsumeBytes(d, b);
+                             if (n < 0) return Status::Error("corrupt Decimal.unscaled");
+                             v.unscaled.assign(b.begin(), b.end());
+                             consumed = n;
+                           } else if (num == 2) {
+                             uint64_t x;
+                             int n = wire::ConsumeVarint(d, x);
+                             if (n < 0) return Status::Error("corrupt Decimal.scale");
+                             v.scale = static_cast<int32_t>(wire::DecodeZigZag(x));
+                             consumed = n;
+                           } else if (num == 3) {
+                             uint64_t x;
+                             int n = wire::ConsumeVarint(d, x);
+                             if (n < 0) return Status::Error("corrupt Decimal.negative");
+                             v.negative = x != 0;
+                             consumed = n;
+                           }
+                           return Status::OK();
+                         });
+  if (!st.ok()) return st;
+  // The scale is a digit count and MaxNumericLiteralDigits bounds its
+  // magnitude, on both signs: value = unscaled × 10^(−scale), so a
+  // consumer that materialises the value computes 10^|scale| from five
+  // attacker-written bytes (HARDENING.md § Mandatory limits, protowire#279).
+  if (out.scale > max_digits || out.scale < -max_digits) {
+    return Status::Error("Decimal.scale " + std::to_string(out.scale) +
+                         " exceeds MaxNumericLiteralDigits=" + std::to_string(max_digits));
+  }
+  return Status::OK();
 }
 
 Status UnmarshalBigFloatMsg(std::span<const uint8_t> data, BigFloat& out) {
