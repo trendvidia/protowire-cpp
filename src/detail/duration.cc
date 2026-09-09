@@ -2,6 +2,7 @@
 // Copyright (c) 2026 TrendVidia, LLC.
 #include "protowire/detail/duration.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 
@@ -62,11 +63,23 @@ std::optional<Duration> ParseDuration(std::string_view s) {
   if (s.empty()) return std::nullopt;
   if (s == "0") return Duration{0, 0};
 
-  // Total nanoseconds accumulator. Every multiply / add goes through
-  // overflow-checked int64 helpers (see protowire/detail/checked_arith.h)
-  // so the intermediate doesn't need to be 128-bit — a portability win
-  // because MSVC has no __int128.
-  int64_t total_ns = 0;
+  // Total nanoseconds accumulator, as an unsigned magnitude. Every
+  // multiply / add is overflow-checked so the intermediate doesn't need
+  // to be 128-bit — a portability win because MSVC has no __int128. The
+  // magnitude is unsigned so that -2562047h47m16.854775808s (INT64_MIN,
+  // which FormatDuration writes for that value) reads back: its magnitude
+  // is one more than INT64_MAX (#20).
+  uint64_t total_ns = 0;
+  auto mul_u64 = [](uint64_t a, uint64_t b, uint64_t* out) {
+    if (a != 0 && b > UINT64_MAX / a) return true;
+    *out = a * b;
+    return false;
+  };
+  auto add_u64 = [](uint64_t a, uint64_t b, uint64_t* out) {
+    if (a > UINT64_MAX - b) return true;
+    *out = a + b;
+    return false;
+  };
 
   while (!s.empty()) {
     // integer part
@@ -104,8 +117,10 @@ std::optional<Duration> ParseDuration(std::string_view s) {
     s.remove_prefix(unit_len);
 
     // v = whole * unit_ns  (check overflow)
-    int64_t v;
-    if (MulOverflow(whole, unit_ns, &v)) return std::nullopt;
+    uint64_t v;
+    if (mul_u64(static_cast<uint64_t>(whole), static_cast<uint64_t>(unit_ns), &v)) {
+      return std::nullopt;
+    }
 
     if (frac_num > 0) {
       // frac_part = (frac_num * unit_ns) / frac_div  (mul-check;
@@ -113,26 +128,32 @@ std::optional<Duration> ParseDuration(std::string_view s) {
       int64_t frac_mul;
       if (MulOverflow(frac_num, unit_ns, &frac_mul)) return std::nullopt;
       int64_t frac_part = frac_mul / frac_div;
-      if (AddOverflow(v, frac_part, &v)) return std::nullopt;
+      if (add_u64(v, static_cast<uint64_t>(frac_part), &v)) return std::nullopt;
     }
 
-    if (AddOverflow(total_ns, v, &total_ns)) return std::nullopt;
+    if (add_u64(total_ns, v, &total_ns)) return std::nullopt;
   }
 
+  // The magnitude must fit an int64 once signed: up to INT64_MAX when
+  // positive, and one more than that when negative.
+  int64_t signed_total;
   if (neg) {
-    int64_t neg_total;
-    if (NegOverflow(total_ns, &neg_total)) return std::nullopt;
-    total_ns = neg_total;
+    if (total_ns > static_cast<uint64_t>(INT64_MAX) + 1) return std::nullopt;
+    signed_total = static_cast<int64_t>(0 - total_ns);
+  } else {
+    if (total_ns > static_cast<uint64_t>(INT64_MAX)) return std::nullopt;
+    signed_total = static_cast<int64_t>(total_ns);
   }
 
+  // Split with truncation toward zero, so nanos carries the sign of the
+  // whole value: google.protobuf.Duration requires a non-zero nanos to
+  // have the same sign as seconds, and that is what the reference's
+  // time.Duration split produces (-1.5s → seconds=-1, nanos=-500000000).
+  // Normalising nanos into [0, 1e9) instead wrote -1ns as seconds=-1,
+  // nanos=999999999, a Duration no other port reads back as -1ns (#20).
   Duration d;
-  d.seconds = total_ns / 1'000'000'000LL;
-  d.nanos = static_cast<int32_t>(total_ns % 1'000'000'000LL);
-  // Normalize so that nanos is in [0, 1e9).
-  if (d.nanos < 0) {
-    --d.seconds;
-    d.nanos += 1'000'000'000;
-  }
+  d.seconds = signed_total / 1'000'000'000LL;
+  d.nanos = static_cast<int32_t>(signed_total % 1'000'000'000LL);
   return d;
 }
 
@@ -145,14 +166,12 @@ std::string FormatDuration(int64_t seconds, int32_t nanos) {
       AddOverflow(scaled, static_cast<int64_t>(nanos), &scaled)) {
     return "<duration overflow>";
   }
-  int64_t total_ns = scaled;
-  if (total_ns == 0) return "0s";
-  bool neg = total_ns < 0;
-  if (neg) {
-    int64_t neg_total;
-    if (NegOverflow(total_ns, &neg_total)) return "<duration overflow>";
-    total_ns = neg_total;
-  }
+  if (scaled == 0) return "0s";
+  bool neg = scaled < 0;
+  // The magnitude is taken in unsigned arithmetic so INT64_MIN, whose
+  // negation does not fit an int64, formats as -2562047h47m16.854775808s
+  // like time.Duration.String() rather than as a placeholder (#20).
+  uint64_t total_ns = neg ? 0 - static_cast<uint64_t>(scaled) : static_cast<uint64_t>(scaled);
 
   // If smaller than 1 second, format with smallest unit ns/us/ms.
   std::string out;
@@ -194,11 +213,11 @@ std::string FormatDuration(int64_t seconds, int32_t nanos) {
       out = buf;
     }
   } else {
-    int64_t s = total_ns / 1'000'000'000LL;
-    int64_t rem_ns = total_ns % 1'000'000'000LL;
-    int64_t h = s / 3600;
-    int64_t m = (s / 60) % 60;
-    int64_t sec = s % 60;
+    uint64_t s = total_ns / 1'000'000'000ULL;
+    uint64_t rem_ns = total_ns % 1'000'000'000ULL;
+    uint64_t h = s / 3600;
+    uint64_t m = (s / 60) % 60;
+    uint64_t sec = s % 60;
     if (h > 0) out += std::to_string(h) + "h";
     if (h > 0 || m > 0) out += std::to_string(m) + "m";
     // seconds (with fraction)
@@ -206,7 +225,7 @@ std::string FormatDuration(int64_t seconds, int32_t nanos) {
       out += std::to_string(sec) + "s";
     } else {
       char tmp[16];
-      std::snprintf(tmp, sizeof(tmp), "%09lld", static_cast<long long>(rem_ns));
+      std::snprintf(tmp, sizeof(tmp), "%09llu", static_cast<unsigned long long>(rem_ns));
       int n = 9;
       while (n > 0 && tmp[n - 1] == '0') --n;
       tmp[n] = 0;
