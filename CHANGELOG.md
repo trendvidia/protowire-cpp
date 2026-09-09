@@ -13,6 +13,24 @@ format changes.
 
 ### Fixed
 
+- **pxf: bind-time validation covers the import closure** (#34; draft
+  `-01` § Scope of Bind-Time Checks). `ValidateFile` and
+  `ValidateDescriptor` walked the declaring file only, so a field named
+  `null` or a misplaced `(pxf.key)` in an imported `.proto` bound
+  without a violation and was silently unhonoured when the decoder
+  reached it. They now walk the transitive imports, each file once
+  (the diamond A → B, C → D reports D once), and `Violation::file`
+  names the declaring file; results sort by file, then element.
+  `google/protobuf/*` files are skipped in the walk — they carry no PXF
+  annotation and no reserved name, pinned by a test that validates each
+  of them directly — because descriptor.proto sits in the closure of
+  every annotated schema and walking it measured 1.1 µs per decode, a
+  quarter of a small document's decode; the walk now costs ~160 ns.
+  `UnmarshalOptions::skip_validate` remains the escape hatch for callers
+  that validated once.
+
+### Fixed
+
 - **pxf: a dotted string map key is written bare** (#36; protowire#313,
   decided as (a)). The identifier-safe test `Marshal` and
   `FormatDocument` apply to a string map key stopped at `[A-Za-z0-9_]`,

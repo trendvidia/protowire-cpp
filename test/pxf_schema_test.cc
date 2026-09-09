@@ -6,14 +6,18 @@
 // ValidateDescriptor / ValidateFile and the Unmarshal-time gate.
 
 #include "protowire/pxf.h"
+#include "protowire/pxf/annotations.h"
 #include "protowire/pxf/schema.h"
 
 #include <gtest/gtest.h>
 #include "protoc_compat.h"
 
+#include <algorithm>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <google/protobuf/compiler/importer.h>
 #include <google/protobuf/dynamic_message.h>
@@ -49,6 +53,7 @@ class PxfSchema : public ::testing::Test {
  protected:
   void TearDown() override {
     if (!proto_path_.empty()) std::remove(proto_path_.c_str());
+    for (const auto& p : extra_paths_) std::remove(p.c_str());
   }
 
   const pb::FileDescriptor* CompileFromString(const std::string& proto_src,
@@ -63,10 +68,30 @@ class PxfSchema : public ::testing::Test {
     return importer_->Import(file_basename);
   }
 
+  // Compile several .proto sources written to the temp directory and
+  // import `main_basename`; the closure tests need a schema that imports
+  // another file.
+  const pb::FileDescriptor* CompileFiles(
+      const std::vector<std::pair<std::string, std::string>>& files,
+      const std::string& main_basename) {
+    for (const auto& [name, src] : files) {
+      std::string path = std::string(::testing::TempDir()) + "/" + name;
+      std::ofstream out(path, std::ios::binary);
+      out << src;
+      extra_paths_.push_back(path);
+    }
+    source_tree_.MapPath("", ::testing::TempDir());
+    source_tree_.MapPath("", PROTO_DIR);
+    source_tree_.MapPath("", WKT_PROTO_DIR);
+    importer_ = std::make_unique<pb::compiler::Importer>(&source_tree_, &errors_);
+    return importer_->Import(main_basename);
+  }
+
   pb::compiler::DiskSourceTree source_tree_;
   CollectErrors errors_;
   std::unique_ptr<pb::compiler::Importer> importer_;
   std::string proto_path_;
+  std::vector<std::string> extra_paths_;
 };
 
 TEST_F(PxfSchema, ConformantSchemaProducesNoViolations) {
@@ -319,6 +344,159 @@ message Row {
   ASSERT_FALSE(r.ok());
   EXPECT_NE(std::string(r.status().message()).find("PXF schema reserved-name violations"),
             std::string::npos);
+}
+
+// ---- import closure (draft -01 § Scope of Bind-Time Checks; #34) ---------
+
+// A violation declared in an imported file is reported when the importing
+// file is bound, attributed to the file that declares it — for the
+// reserved-name rule and for (pxf.key) placement alike.
+TEST_F(PxfSchema, ImportedFileViolationsReportedWithDeclaringFile) {
+  const char* b = R"(
+syntax = "proto3";
+package closure.v1;
+import "pxf/annotations.proto";
+message Imported {
+  string null = 1;
+  repeated string tags = 2 [(pxf.key) = "name"];
+}
+)";
+  const char* a = R"(
+syntax = "proto3";
+package closure.v1;
+import "b_closure.proto";
+message Root { Imported inner = 1; }
+)";
+  const pb::FileDescriptor* fd =
+      CompileFiles({{"b_closure.proto", b}, {"a_closure.proto", a}}, "a_closure.proto");
+  ASSERT_NE(fd, nullptr) << errors_.last_;
+  auto vs = ValidateFile(fd);
+  ASSERT_EQ(vs.size(), 2u);
+  EXPECT_EQ(vs[0].file, "b_closure.proto");
+  EXPECT_EQ(vs[0].element, "closure.v1.Imported.null");
+  EXPECT_EQ(vs[0].kind, protowire::pxf::ViolationKind::kField);
+  EXPECT_EQ(vs[1].file, "b_closure.proto");
+  EXPECT_EQ(vs[1].element, "closure.v1.Imported.tags");
+  EXPECT_EQ(vs[1].kind, protowire::pxf::ViolationKind::kKeyOption);
+  // The same through the bound message, and the per-decode gate refuses
+  // the schema even though the document never reaches the imported type.
+  const pb::Descriptor* root = importer_->pool()->FindMessageTypeByName("closure.v1.Root");
+  ASSERT_NE(root, nullptr);
+  EXPECT_EQ(ValidateDescriptor(root).size(), 2u);
+  pb::DynamicMessageFactory factory(importer_->pool());
+  std::unique_ptr<pb::Message> msg(factory.GetPrototype(root)->New());
+  auto st = protowire::pxf::Unmarshal("", msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("b_closure.proto"), std::string::npos) << st.ToString();
+}
+
+// The diamond — A imports B and C, both importing D — reports D's
+// violation once, and the closure's violations sort by file, then element.
+TEST_F(PxfSchema, DiamondImportReportedOnceAndSortedByFile) {
+  const char* d = R"(
+syntax = "proto3";
+package closure.v1;
+message D { string true = 1; }
+)";
+  const char* b = R"(
+syntax = "proto3";
+package closure.v1;
+import "d_closure.proto";
+message B { D d = 1; string false = 2; }
+)";
+  const char* c = R"(
+syntax = "proto3";
+package closure.v1;
+import "d_closure.proto";
+message C { D d = 1; }
+)";
+  const char* a = R"(
+syntax = "proto3";
+package closure.v1;
+import "b_closure.proto";
+import "c_closure.proto";
+message A { B b = 1; C c = 2; string null = 3; }
+)";
+  const pb::FileDescriptor* fd = CompileFiles({{"d_closure.proto", d},
+                                               {"b_closure.proto", b},
+                                               {"c_closure.proto", c},
+                                               {"a_closure.proto", a}},
+                                              "a_closure.proto");
+  ASSERT_NE(fd, nullptr) << errors_.last_;
+  auto vs = ValidateFile(fd);
+  ASSERT_EQ(vs.size(), 3u);
+  EXPECT_EQ(vs[0].file, "a_closure.proto");
+  EXPECT_EQ(vs[0].element, "closure.v1.A.null");
+  EXPECT_EQ(vs[1].file, "b_closure.proto");
+  EXPECT_EQ(vs[1].element, "closure.v1.B.false");
+  EXPECT_EQ(vs[2].file, "d_closure.proto");
+  EXPECT_EQ(vs[2].element, "closure.v1.D.true");
+}
+
+// The closure of a schema that uses the annotations includes
+// pxf/annotations.proto and google/protobuf/descriptor.proto; both are
+// conformant, so a clean schema stays clean.
+TEST_F(PxfSchema, AnnotationsClosureIsConformant) {
+  const char* a = R"(
+syntax = "proto3";
+package closure.v1;
+import "pxf/annotations.proto";
+message Elem { string name = 1; }
+message Root { repeated Elem items = 1 [(pxf.key) = "name"]; }
+)";
+  const pb::FileDescriptor* fd = CompileFiles({{"a_closure.proto", a}}, "a_closure.proto");
+  ASSERT_NE(fd, nullptr) << errors_.last_;
+  EXPECT_TRUE(ValidateFile(fd).empty());
+  EXPECT_GE(fd->dependency_count(), 1);
+}
+
+// The closure walk skips google/protobuf/* on the assumption that
+// Google's files carry no PXF violation. This pins it: each file the
+// annotations closure pulls in is validated directly.
+TEST_F(PxfSchema, GoogleProtobufFilesAreConformant) {
+  const char* a = R"(
+syntax = "proto3";
+package closure.v1;
+import "pxf/annotations.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/wrappers.proto";
+import "google/protobuf/any.proto";
+import "google/protobuf/field_mask.proto";
+message Root { google.protobuf.Timestamp t = 1 [(pxf.required) = true]; }
+)";
+  const pb::FileDescriptor* fd = CompileFiles({{"g_closure.proto", a}}, "g_closure.proto");
+  ASSERT_NE(fd, nullptr) << errors_.last_;
+  std::vector<const pb::FileDescriptor*> stack{fd};
+  std::vector<std::string> seen;
+  int google_files = 0;
+  while (!stack.empty()) {
+    const pb::FileDescriptor* f = stack.back();
+    stack.pop_back();
+    if (std::find(seen.begin(), seen.end(), std::string(f->name())) != seen.end()) continue;
+    seen.push_back(std::string(f->name()));
+    for (int i = 0; i < f->dependency_count(); ++i) stack.push_back(f->dependency(i));
+    if (std::string(f->name()).rfind("google/protobuf/", 0) != 0) continue;
+    ++google_files;
+    // Validate the file's own declarations the way the walk would have.
+    std::vector<protowire::pxf::Violation> vs;
+    for (int i = 0; i < f->message_type_count(); ++i) {
+      const pb::Descriptor* md = f->message_type(i);
+      for (int k = 0; k < md->field_count(); ++k) {
+        const std::string name(md->field(k)->name());
+        EXPECT_FALSE(name == "null" || name == "true" || name == "false") << f->name();
+        EXPECT_FALSE(protowire::pxf::KeyFieldName(md->field(k)).has_value()) << f->name();
+      }
+    }
+    for (int i = 0; i < f->enum_type_count(); ++i) {
+      for (int k = 0; k < f->enum_type(i)->value_count(); ++k) {
+        const std::string name(f->enum_type(i)->value(k)->name());
+        EXPECT_FALSE(name == "null" || name == "true" || name == "false") << f->name();
+      }
+    }
+  }
+  EXPECT_GE(google_files, 6) << "descriptor.proto and five well-known types";
+  EXPECT_TRUE(ValidateFile(fd).empty());
 }
 
 }  // namespace
