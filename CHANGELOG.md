@@ -13,6 +13,20 @@ format changes.
 
 ### Fixed
 
+- **pb: repeated numeric fields are marshalled packed** (#32). `Marshal`
+  wrote one tag + value per element for every element type, so
+  `ListHolder { values: [1, 2, 3] }` was `08 01 08 02 08 03` where the
+  reference's `pb.Marshal` and every protoc-generated encoder write the
+  proto3 default `0a 03 01 02 03`. Bool, integer (zigzag honoured) and
+  float element types are now one LEN record of concatenated element
+  encodings, every element emitted, zeros included; strings, bytes and
+  messages stay one record per element, and an empty repeated field
+  writes nothing. The decoder has accepted both forms since #31; the
+  canonical envelope has no repeated numerics, so its bytes are
+  unchanged.
+
+### Fixed
+
 - **pxf: a dotted string map key is written bare** (#36; protowire#313,
   decided as (a)). The identifier-safe test `Marshal` and
   `FormatDocument` apply to a string map key stopped at `[A-Za-z0-9_]`,
