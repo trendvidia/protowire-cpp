@@ -96,6 +96,17 @@ format changes.
 
 ### Fixed
 
+- **pb: a map entry always carries key and value, zero-valued or not**
+  (#24; protowire#295, decided on protowire-go#105). `pb.h`'s map branch
+  applied proto3 zero-skip inside the entry, so `metadata { "": "" }`
+  serialised as an empty entry (`22022a00`) where protobuf-go, protoc and
+  C++ protobuf write `22062a040a001200`. Field 1 and field 2 of every
+  entry are now written unconditionally; a value held through
+  `std::optional` or a smart pointer that is unset is written as its zero
+  value. `dump_envelope --vector zero-map-entry` prints the bytes for the
+  cross-port gate's golden, and an unknown vector name exits 3 with
+  `not-implemented: <name>`.
+  
 - **pxf fmt: the quotes on a string map key spelled like a keyword or an
   integer are kept** (#27; draft `-01` § Entries and Keys, "Canonical
   spelling of map keys", protowire#306). `FormatDocument` wrote every
@@ -108,6 +119,7 @@ format changes.
   `protowire/pxf/format.h`), so `"123"`, `"true"` and `"null"` string
   keys are written quoted; it also sorts bool keys (false, true). The
   spec repo's `testdata/map-keys/` fixtures are vendored and pinned.
+  
 - **pxf: bool map keys bind in exactly the grammar's spellings**
   (absorbed into #27; protowire#284). The decoder bound any non-`true`
   key on a `map<bool, V>` to `false` — `t`, `yes`, `"TRUE"`, `"0"` all

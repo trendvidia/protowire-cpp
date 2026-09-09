@@ -300,6 +300,29 @@ inline void MarshalScalar(std::vector<uint8_t>& out,
   }
 }
 
+// MarshalMapValue writes field 2 of a map entry unconditionally. A value
+// held through std::optional or a smart pointer that is unset is written
+// as its zero value, so every entry carries both fields on the wire.
+template <class T>
+inline void MarshalMapValue(std::vector<uint8_t>& out,
+                            uint32_t num,
+                            const T& v,
+                            bool zigzag = false) {
+  if constexpr (IsOptional<T>::value) {
+    using E = typename IsOptional<T>::element;
+    MarshalScalar(out, num, v.has_value() ? *v : E{}, zigzag);
+  } else if constexpr (IsSmartPtr<T>::value) {
+    using E = typename IsSmartPtr<T>::element;
+    if (v) {
+      MarshalScalar(out, num, *v, zigzag);
+    } else {
+      MarshalScalar(out, num, E{}, zigzag);
+    }
+  } else {
+    MarshalScalar(out, num, v, zigzag);
+  }
+}
+
 template <class T>
 inline void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v, bool zigzag = false) {
   if constexpr (IsOptional<T>::value) {
@@ -310,13 +333,16 @@ inline void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v, bo
     return;
   } else if constexpr (IsMap<T>::value) {
     // proto3 maps: each entry is a length-prefixed MapEntry message with
-    // key at field 1 and value at field 2. Standard proto3 zero-skip applies
-    // within the entry; missing fields decode to zero.
+    // key at field 1 and value at field 2. Both are written whether or
+    // not they are zero-valued — the layout protobuf-go, protoc and C++
+    // protobuf write, fixed across the family by protowire#295 (#24): a
+    // zero key or value is a present field of the entry, not an absent
+    // one, so proto3 zero-skip does not apply inside it.
     if (v.empty()) return;
     for (const auto& [k, val] : v) {
       std::vector<uint8_t> entry;
-      MarshalField(entry, 1, k, zigzag);
-      MarshalField(entry, 2, val, zigzag);
+      MarshalScalar(entry, 1, k, zigzag);
+      MarshalMapValue(entry, 2, val, zigzag);
       wire::AppendTag(out, num, wire::kBytes);
       wire::AppendBytes(out, entry);
     }
