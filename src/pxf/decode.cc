@@ -20,6 +20,7 @@
 
 #include <charconv>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -446,8 +447,15 @@ Status DecodeMapInto(Message* msg,
     Message* entry = r->AddMessage(msg, fd);
     const Reflection* er = entry->GetReflection();
     // Decode key.
+    const bool bare_keyword = !m->key_quoted && (m->key == "true" || m->key == "false");
     switch (key_fd->cpp_type()) {
       case FieldDescriptor::CPPTYPE_STRING:
+        if (bare_keyword) {
+          return PosError(m->pos,
+                          "invalid string map key " + m->key + " for field \"" +
+                              std::string(fd->name()) + "\": the keyword " + m->key +
+                              " is a bool key; write \"" + m->key + "\" for the string");
+        }
         er->SetString(entry, key_fd, m->key);
         break;
       case FieldDescriptor::CPPTYPE_INT32: {
@@ -478,9 +486,25 @@ Status DecodeMapInto(Message* msg,
         er->SetUInt64(entry, key_fd, n);
         break;
       }
-      case FieldDescriptor::CPPTYPE_BOOL:
-        er->SetBool(entry, key_fd, m->key == "true");
+      case FieldDescriptor::CPPTYPE_BOOL: {
+        // Same three spellings as the fast decoder's SetMapKey: the bare
+        // keyword, the bare integers 0 / 1, the quoted literals.
+        std::optional<bool> b;
+        if (bare_keyword || (m->key_quoted && (m->key == "true" || m->key == "false"))) {
+          b = (m->key == "true");
+        } else if (!m->key_quoted && (m->key == "1" || m->key == "0")) {
+          b = (m->key == "1");
+        }
+        if (!b.has_value()) {
+          return PosError(m->pos,
+                          "invalid bool map key " +
+                              (m->key_quoted ? "\"" + m->key + "\"" : m->key) + " for field \"" +
+                              std::string(fd->name()) +
+                              "\": a bool key is true, false, 0, 1, \"true\" or \"false\"");
+        }
+        er->SetBool(entry, key_fd, *b);
         break;
+      }
       default:
         return PosError(m->pos, "unsupported map key kind");
     }

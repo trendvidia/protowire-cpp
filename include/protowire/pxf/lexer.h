@@ -63,6 +63,7 @@ class Lexer {
   Token LexFloat(Position pos, size_t start);
   Token LexTimestamp(Position pos, size_t start);
   Token LexDuration(Position pos, size_t start);
+  bool AtDurationUnit() const;
   Token LexIdent(Position pos);
 
   // Owned storage for tokens whose .value cannot view the input directly

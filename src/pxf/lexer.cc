@@ -518,13 +518,41 @@ Token Lexer::LexNumber(Position pos) {
   if (!neg && digit_count == 4 && pos_ < input_.size() && Peek() == '-') {
     return LexTimestamp(pos, start);
   }
-  if (pos_ < input_.size() && (Peek() == '.' || Peek() == 'e' || Peek() == 'E')) {
-    return LexFloat(pos, start);
+  // Fraction: '.' followed by at least one digit. Floats and durations
+  // both admit one (draft §3.3: duration-segment = 1*DIGIT [ "." 1*DIGIT ]
+  // time-unit), so it is consumed here and the two are told apart by
+  // what follows it. A '.' with no digit after it is not a
+  // duration-segment; the float branch below keeps it as it always has.
+  bool frac = false;
+  if (Peek() == '.' && IsDigit(Peek(1))) {
+    frac = true;
+    Advance();  // .
+    while (pos_ < input_.size() && IsDigit(Peek())) Advance();
   }
-  if (pos_ < input_.size() && IsDurationUnit(Peek())) {
+  // Duration: magnitude followed by a time unit (§3.10). Checked before
+  // the float branch so "1.5ms" is one DURATION token rather than FLOAT
+  // "1.5" followed by IDENT "ms" — which is what Marshal writes for any
+  // Duration that is not a whole multiple of its largest unit (#20;
+  // protowire-go#75).
+  if (AtDurationUnit()) {
     return LexDuration(pos, start);
   }
+  // Float: fraction, or 'e'/'E' exponent, or a bare trailing '.'.
+  if (frac || (pos_ < input_.size() && (Peek() == '.' || Peek() == 'e' || Peek() == 'E'))) {
+    return LexFloat(pos, start);
+  }
   return Token{TokenKind::kInt, input_.substr(start, pos_ - start), pos};
+}
+
+// AtDurationUnit reports whether the bytes at pos_ start a time-unit of
+// draft §3.3: one of the ASCII unit letters, or the two-byte UTF-8 micro
+// sign U+00B5 (C2 B5) of "µs". U+03BC GREEK SMALL LETTER MU (CE BC) is not
+// in the grammar and is deliberately not a unit here.
+bool Lexer::AtDurationUnit() const {
+  if (pos_ >= input_.size()) return false;
+  uint8_t c = Peek();
+  if (IsDurationUnit(c)) return true;
+  return c == 0xC2 && Peek(1) == 0xB5;
 }
 
 Token Lexer::LexFloat(Position pos, size_t start) {
@@ -558,8 +586,23 @@ Token Lexer::LexTimestamp(Position pos, size_t start) {
 }
 
 Token Lexer::LexDuration(Position pos, size_t start) {
-  while (pos_ < input_.size() && (IsDigit(Peek()) || IsLowerAlpha(Peek()))) {
-    Advance();
+  // A duration literal is digits, lower-case unit letters, a fraction
+  // ('.' followed by a digit) inside any segment, and the two-byte micro
+  // sign. The whole literal is then validated by ParseDuration, which
+  // rejects unit misspellings ("5min") and stray micro signs ("2µ").
+  for (;;) {
+    if (pos_ >= input_.size()) break;
+    uint8_t c = Peek();
+    if (IsDigit(c) || IsLowerAlpha(c)) {
+      Advance();
+    } else if (c == '.' && IsDigit(Peek(1))) {
+      Advance();
+    } else if (c == 0xC2 && Peek(1) == 0xB5) {
+      Advance();
+      Advance();
+    } else {
+      break;
+    }
   }
   std::string_view raw = input_.substr(start, pos_ - start);
   if (!detail::ParseDuration(raw).has_value()) {

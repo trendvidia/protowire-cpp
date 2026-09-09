@@ -9,7 +9,9 @@
 
 namespace protowire::detail {
 
-// Decoded duration broken into seconds + nanos in [0, 1e9).
+// Decoded duration broken into seconds + nanos, split with truncation
+// toward zero as google.protobuf.Duration requires: nanos is in
+// (-1e9, 1e9) and, when non-zero, has the sign of the whole value.
 struct Duration {
   int64_t seconds = 0;
   int32_t nanos = 0;
