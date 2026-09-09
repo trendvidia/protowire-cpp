@@ -11,6 +11,30 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **pxf fmt: the quotes on a string map key spelled like a keyword or an
+  integer are kept** (#27; draft `-01` § Entries and Keys, "Canonical
+  spelling of map keys", protowire#306). `FormatDocument` wrote every
+  identifier-shaped key bare, so `"true": "v"` on a `map<string, V>`
+  became `true: "v"` — a bool key, which no longer binds on a string
+  `K`. `MapEntry` gains `key_quoted`; a quoted key is unquoted only when
+  it is identifier-safe and not `null` / `true` / `false`, and a bare key
+  stays bare (so `404:` is no longer requoted on the way through fmt).
+  The marshaller uses the same test (`IsIdentifierSafe`, exported from
+  `protowire/pxf/format.h`), so `"123"`, `"true"` and `"null"` string
+  keys are written quoted; it also sorts bool keys (false, true). The
+  spec repo's `testdata/map-keys/` fixtures are vendored and pinned.
+- **pxf: bool map keys bind in exactly the grammar's spellings**
+  (absorbed into #27; protowire#284). The decoder bound any non-`true`
+  key on a `map<bool, V>` to `false` — `t`, `yes`, `"TRUE"`, `"0"` all
+  silently became a key the author did not write. A bool key is now
+  `true` / `false` bare (the keyword spelling, newly accepted as a map
+  key by the parser and decoder), `0` / `1` bare, or `"true"` /
+  `"false"` quoted, and anything else is an error naming the key and
+  field; on a string `K` the bare keyword is an error that says to
+  write it quoted.
+
 ## [1.0.0] — 2026-05-13
 
 First major-version cut. Implements the three one-time spec changes
