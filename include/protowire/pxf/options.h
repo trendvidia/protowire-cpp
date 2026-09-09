@@ -30,6 +30,30 @@ struct UnmarshalOptions {
   // ValidateDescriptor in a one-time codegen or registry-load pass) can
   // set this to bypass the per-call recheck.
   bool skip_validate = false;
+
+  // HARDENING.md § Mandatory limits, each configurable per call; 0 selects
+  // the default in protowire/limits.h. max_message_size caps the input to
+  // this call and is checked before the first token is read;
+  // max_nesting_depth caps block / list nesting (the root is depth 0, every
+  // `{` or `[` one descent); max_numeric_literal_digits the digit count of
+  // a literal bound to pxf.BigInt / Decimal / BigFloat;
+  // max_bytes_literal_length the decoded length of any b"…" literal,
+  // refused from the literal's length before it is decoded;
+  // max_repeated_count the element count of any repeated or map field.
+  int max_message_size = 0;
+  int max_nesting_depth = 0;
+  int max_numeric_literal_digits = 0;
+  int max_bytes_literal_length = 0;
+  int max_repeated_count = 0;
+};
+
+// ParseOptions carries the limits Parse enforces — the subset of
+// UnmarshalOptions a schema-free parse can check. 0 selects the default in
+// protowire/limits.h.
+struct ParseOptions {
+  int max_message_size = 0;
+  int max_nesting_depth = 0;
+  int max_bytes_literal_length = 0;
 };
 
 struct MarshalOptions {

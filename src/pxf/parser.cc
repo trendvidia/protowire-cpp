@@ -2,11 +2,13 @@
 // Copyright (c) 2026 TrendVidia, LLC.
 #include "protowire/pxf/parser.h"
 
+#include <string>
 #include <utility>
 
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
 #include "protowire/detail/rfc3339.h"
+#include "protowire/limits.h"
 #include "protowire/pxf/lexer.h"
 #include "protowire/pxf/schema.h"
 
@@ -16,7 +18,11 @@ namespace {
 
 class Parser {
  public:
-  explicit Parser(std::string_view input) : lex_(input) { Advance(); }
+  Parser(std::string_view input, int max_depth, int max_bytes_literal)
+      : lex_(input), max_depth_(max_depth) {
+    lex_.SetMaxBytesLiteral(max_bytes_literal);
+    Advance();
+  }
 
   StatusOr<Document> ParseDocument();
 
@@ -36,9 +42,25 @@ class Parser {
   StatusOr<std::optional<ValuePtr>> ParseRowCell();
   TokenKind PeekKind();
 
+  // One `{` or `[` is one descent (HARDENING.md § Recursion; the decoder
+  // counts the same way). The root is depth 0, so a document exactly
+  // max_depth_ deep parses and one deeper does not.
+  Status Descend() {
+    if (++depth_ > max_depth_) {
+      --depth_;
+      return Status::Error(current_.pos.line,
+                           current_.pos.column,
+                           "nesting depth exceeds MaxNestingDepth=" + std::to_string(max_depth_));
+    }
+    return Status::OK();
+  }
+  void Ascend() { --depth_; }
+
   Lexer lex_;
   Token current_;
   std::vector<Comment> comments_;
+  int depth_ = 0;
+  int max_depth_ = kMaxNestingDepth;
 };
 
 // FindMatchingBrace returns the offset of the `}` that matches the `{`
@@ -337,6 +359,7 @@ StatusOr<ValuePtr> Parser::ParseValue() {
 
 StatusOr<ValuePtr> Parser::ParseList() {
   Position pos = current_.pos;
+  if (Status s = Descend(); !s.ok()) return s;
   Advance();  // [
   auto list = std::make_unique<ListVal>();
   list->pos = pos;
@@ -352,6 +375,7 @@ StatusOr<ValuePtr> Parser::ParseList() {
                          std::string("expected ']', got ") + TokenKindName(current_.kind));
   }
   Advance();
+  Ascend();
   return ValuePtr(std::move(list));
 }
 
@@ -366,7 +390,11 @@ StatusOr<ValuePtr> Parser::ParseBlockVal() {
   return ValuePtr(std::move(bv));
 }
 
+// ParseBody is entered with current_ at the first token after `{`; the
+// brace was consumed by the caller, so the depth check reports its
+// position through current_ (the token just inside it).
 StatusOr<std::vector<EntryPtr>> Parser::ParseBody() {
+  if (Status s = Descend(); !s.ok()) return s;
   std::vector<EntryPtr> out;
   while (current_.kind != TokenKind::kRBrace && current_.kind != TokenKind::kEOF) {
     // Inside a '{ ... }' block both forms are accepted; the schema layer
@@ -381,6 +409,7 @@ StatusOr<std::vector<EntryPtr>> Parser::ParseBody() {
                          std::string("expected '}', got ") + TokenKindName(current_.kind));
   }
   Advance();
+  Ascend();
   return out;
 }
 
@@ -792,8 +821,19 @@ bool ContainsDot(std::string_view s) {
 
 }  // namespace
 
-StatusOr<Document> Parse(std::string_view input) {
-  return Parser(input).ParseDocument();
+StatusOr<Document> Parse(std::string_view input, ParseOptions opts) {
+  const int max_size = opts.max_message_size > 0 ? opts.max_message_size : kMaxMessageSize;
+  if (input.size() > static_cast<size_t>(max_size)) {
+    return Status::Error(1,
+                         1,
+                         "input of " + std::to_string(input.size()) +
+                             " bytes exceeds MaxMessageSize=" + std::to_string(max_size));
+  }
+  Parser p(
+      input,
+      opts.max_nesting_depth > 0 ? opts.max_nesting_depth : kMaxNestingDepth,
+      opts.max_bytes_literal_length > 0 ? opts.max_bytes_literal_length : kMaxBytesLiteralLength);
+  return p.ParseDocument();
 }
 
 }  // namespace protowire::pxf
