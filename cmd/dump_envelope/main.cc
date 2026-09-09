@@ -8,6 +8,14 @@
 //   dump_envelope                        canonical Envelope → pb hex
 //   dump_envelope --pb  FDS MESSAGE DOC  PXF DOC decoded against MESSAGE in FDS → pb hex
 //   dump_envelope --sbe FDS MESSAGE DOC  same → SBE hex
+//   dump_envelope --vector NAME          a named wire vector from the spec repo's
+//                                        testdata/envelope/ → pb hex (protowire#295)
+//
+// The vector mode isolates one layout question the canonical envelope
+// cannot show — today, whether a map entry carries a zero-valued key or
+// value — and the script compares the bytes with a checked-in golden
+// rather than with the other ports, so a layout every port shares wrongly
+// still fails.
 //
 // The fixture modes apply the PXF annotations the descriptor carries, which
 // is how the gate proves this port reads (pxf.required) = 1314,
@@ -17,7 +25,8 @@
 // must reject.
 //
 // Exit 0 with hex on stdout; 1 with "reject: <reason>" on stderr when the
-// schema rejects DOC; 2 for anything that is the harness's fault.
+// schema rejects DOC; 2 for anything that is the harness's fault; 3 with
+// "not-implemented: <name>" for a vector this port has not built.
 
 #include <cstdint>
 #include <cstdio>
@@ -70,6 +79,26 @@ int DumpEnvelope() {
   return 0;
 }
 
+// DumpVector prints a wire vector the gate checks against a golden. The
+// named vectors are the spec repo's testdata/envelope/NAME.textproto.
+int DumpVector(const char* name) {
+  using protowire::envelope::AppError;
+  using protowire::envelope::Envelope;
+
+  Envelope e;
+  if (std::strcmp(name, "zero-map-entry") == 0) {
+    // Envelope { error { metadata { key: "" value: "" } } }
+    e.error = std::make_unique<AppError>();
+    e.error->metadata[""] = "";
+  } else {
+    std::fprintf(stderr, "not-implemented: %s\n", name);
+    return 3;
+  }
+  auto bytes = protowire::pb::Marshal(e);
+  PrintHex(bytes.data(), bytes.size());
+  return 0;
+}
+
 int DumpFixture(const char* mode, const char* fds_path, const char* message, const char* doc_path) {
   google::protobuf::FileDescriptorSet fds;
   if (!fds.ParseFromString(ReadFile(fds_path))) {
@@ -117,8 +146,9 @@ int DumpFixture(const char* mode, const char* fds_path, const char* message, con
 
 int main(int argc, char** argv) {
   if (argc == 1) return DumpEnvelope();
+  if (argc == 3 && std::strcmp(argv[1], "--vector") == 0) return DumpVector(argv[2]);
   if (argc == 5 && (std::strcmp(argv[1], "--pb") == 0 || std::strcmp(argv[1], "--sbe") == 0)) {
     return DumpFixture(argv[1], argv[2], argv[3], argv[4]);
   }
-  Fatal(2, "usage: dump_envelope [--pb|--sbe FDS MESSAGE DOC]");
+  Fatal(2, "usage: dump_envelope [--pb|--sbe FDS MESSAGE DOC | --vector NAME]");
 }
