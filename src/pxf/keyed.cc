@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -32,8 +33,8 @@ void CanonEntries(std::vector<EntryPtr>& entries, const pb::Descriptor* desc);
 // must not silently change its meaning). Leading comments of a dropped
 // assignment move to the next surviving entry.
 void DropKeyAssignments(std::vector<EntryPtr>& entries,
-                        const std::string& key_name,
-                        const std::string& entry_name) {
+                        std::string_view key_name,
+                        std::string_view entry_name) {
   std::vector<Comment> pending;
   std::vector<EntryPtr> out;
   out.reserve(entries.size());
@@ -61,7 +62,7 @@ void DropKeyAssignments(std::vector<EntryPtr>& entries,
 // assignment among entries; false when there is none, more than one, or
 // it is not a string.
 bool ExplicitKeyOf(const std::vector<EntryPtr>& entries,
-                   const std::string& key_name,
+                   std::string_view key_name,
                    std::string* key) {
   bool found = false;
   for (const auto& e : entries) {
@@ -85,7 +86,7 @@ bool ExplicitKeyOf(const std::vector<EntryPtr>& entries,
 // are unquoted, redundant agreeing key assignments are dropped, and entry
 // bodies are canonicalized recursively.
 void CanonKeyedEntries(Block* b, const pb::FieldDescriptor* fd, const pb::FieldDescriptor* key_fd) {
-  const std::string key_name(key_fd->name());
+  const std::string_view key_name = key_fd->name();
   for (auto& e : b->entries) {
     Block* eb = GetMut<EntryPtr, Block>(e);
     if (!eb) {
@@ -118,7 +119,7 @@ void CanonAnonymousKeyed(EntryPtr& entry,
                          ListVal* lv,
                          const pb::FieldDescriptor* fd,
                          const pb::FieldDescriptor* key_fd) {
-  const std::string key_name(key_fd->name());
+  const std::string_view key_name = key_fd->name();
   std::vector<std::string> keys;
   std::unordered_set<std::string> seen;
   bool eligible = true;
