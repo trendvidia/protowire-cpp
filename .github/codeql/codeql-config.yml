@@ -3,44 +3,52 @@
 #
 # CodeQL configuration for protowire-cpp.
 #
-# Excluded paths:
+# This file used to carry `paths-ignore` entries and describe them as
+# excluding cmd/check_decode/, test/ and one source file from the analysis.
+# They never did (#23): for a compiled language analysed by building the
+# code, `paths` / `paths-ignore` in the config file are not applied — GitHub's
+# documentation states they take effect only for interpreted languages or
+# for a compiled language analysed without building — and the alert list on
+# `main` measurably included test/, cmd/ and even build/_deps/ paths while
+# the config claimed otherwise.
 #
-#   cmd/check_decode/  — the per-port HARDENING conformance binary
-#     accepts arbitrary file paths on its CLI by design (the harness
-#     names corpus files via `--input`). `cpp/path-injection` flags
-#     the user-controlled path flowing into std::ifstream, even
-#     though the in-code canonical + is_regular_file check sanitizes
-#     it; CodeQL's C++ taint model doesn't recognize std::filesystem
-#     sanitizers, so the analysis is excluded here instead.
+# The exclusions now live where they take effect: the workflow
+# (.github/workflows/codeql.yml) runs the analysis with the upload deferred,
+# post-filters the SARIF with advanced-security/filter-sarif using the
+# patterns below, and uploads the result. The rationale for each pattern:
 #
-#   test/  — test fixtures legitimately construct paths from
-#     ::testing::TempDir() (which reads TMPDIR / TEST_TMPDIR) and
-#     write .proto sources to disk for libprotoc to compile. These
-#     paths are env-controlled, which CodeQL treats as untrusted
-#     input — but test code is not a security boundary, and the
-#     constructed paths are joined with hard-coded basenames in the
-#     test source. Excluding the directory keeps SAST focused on
-#     library code that ships to consumers.
+#   cmd/**  — the harness-driven CLIs (check_decode, dump_envelope, the
+#     benches) accept arbitrary file paths on their command line by design:
+#     the spec repo's scripts name corpus and fixture files via `--input`
+#     and positional arguments. `cpp/path-injection` flags the
+#     user-controlled path flowing into std::ifstream even where the code
+#     canonicalises and checks it; CodeQL's C++ taint model does not
+#     recognise std::filesystem sanitisers.
 #
-#   src/pxf/table_reader.cc  — TableReader stores a non-owning
-#     `std::istream*` parameter into a member (the canonical C++
-#     pattern for "borrows, doesn't own"). `cpp/stack-address-escape`
-#     flags this because a caller *could* pass the address of a
-#     stack-allocated istringstream that doesn't outlive the reader.
-#     That's a documented lifetime contract (the istream MUST outlive
-#     the reader, same pattern as fopen's FILE*), not a defect we can
-#     fix without an API change that would force every caller to give
-#     up ownership of their istream. The file is mostly mechanical
-#     byte-scanning over already-validated input, so the additional
-#     SAST coverage we lose by path-ignoring the file is minimal.
+#   test/**  — test fixtures construct paths from ::testing::TempDir()
+#     (which reads TMPDIR / TEST_TMPDIR) and write .proto sources to disk for
+#     libprotoc to compile. Env-controlled paths read as untrusted input to
+#     CodeQL, but test code is not a security boundary, and the paths are
+#     joined with hard-coded basenames in the test source.
 #
-# Scope is narrow: library code under `pxf/`, `pb/`, `sbe/`,
-# `envelope/`, `detail/`, etc. (excluding the one file above)
-# remains under full security-and-quality analysis.
+#   build/**  — FetchContent checkouts (googletest, tinyxml2) and
+#     protoc-generated sources. Third-party and generated code; the alerts
+#     there are theirs to fix upstream, and the generated files are
+#     regenerated on every build.
+#
+#   src/pxf/dataset_reader.cc  — DatasetReader stores a non-owning
+#     `std::istream*` parameter into a member (the canonical C++ pattern for
+#     "borrows, doesn't own"). `cpp/stack-address-escape` flags this because
+#     a caller *could* pass the address of a stack-allocated istringstream
+#     that doesn't outlive the reader. That is a documented lifetime contract
+#     (the istream MUST outlive the reader, same pattern as fopen's FILE*),
+#     not a defect fixable without an API change that would force every
+#     caller to give up ownership of their istream. (The file was
+#     table_reader.cc when this rationale was first written; the v1.0 rename
+#     left the old path in the config, which is another way a path filter
+#     that does nothing goes unnoticed.)
+#
+# Scope is otherwise unchanged: library code under src/ and include/ stays
+# under the full security-and-quality analysis.
 
 name: "protowire-cpp CodeQL config"
-
-paths-ignore:
-  - cmd/check_decode/**
-  - test/**
-  - src/pxf/table_reader.cc

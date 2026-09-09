@@ -42,6 +42,28 @@ jobs:
           cmake -S . -B build
           cmake --build build -j
 
+      # The config file's paths-ignore never applied to this build-based
+      # C++ analysis (#23), so the exclusions are enforced here instead:
+      # analyse with the upload deferred, drop the alerts in the excluded
+      # paths from the SARIF, then upload. The rationale for each pattern
+      # is in .github/codeql/codeql-config.yml.
       - uses: github/codeql-action/analyze@v4
         with:
+          category: "/language:cpp"
+          output: sarif-results
+          upload: failure-only
+
+      - uses: advanced-security/filter-sarif@v1.1
+        with:
+          patterns: |
+            -cmd/**
+            -test/**
+            -build/**
+            -src/pxf/dataset_reader.cc
+          input: sarif-results/cpp.sarif
+          output: sarif-results/cpp.sarif
+
+      - uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: sarif-results/cpp.sarif
           category: "/language:cpp"
