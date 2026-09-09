@@ -7,6 +7,7 @@
 // sugar, _null FieldMask emission.
 
 #include "protowire/pxf.h"
+#include "protowire/pxf/format.h"
 
 #include <algorithm>
 #include <charconv>
@@ -324,6 +325,8 @@ Status Encoder::EncodeMapField(const Message& msg, const FieldDescriptor* fd, in
         return er->GetUInt32(ea, key_fd) < er->GetUInt32(eb, key_fd);
       case FieldDescriptor::CPPTYPE_UINT64:
         return er->GetUInt64(ea, key_fd) < er->GetUInt64(eb, key_fd);
+      case FieldDescriptor::CPPTYPE_BOOL:
+        return !er->GetBool(ea, key_fd) && er->GetBool(eb, key_fd);
       default:
         return false;
     }
@@ -337,16 +340,11 @@ Status Encoder::EncodeMapField(const Message& msg, const FieldDescriptor* fd, in
     switch (key_fd->cpp_type()) {
       case FieldDescriptor::CPPTYPE_STRING: {
         std::string scratch;
+        // Bare only when identifier-safe: "true", "null" and "123" bare
+        // would denote a bool key, no key, and an integer key (draft -01
+        // § Entries and Keys; protowire#306).
         const std::string& k = er->GetStringReference(entry, key_fd, &scratch);
-        bool simple_ident = !k.empty();
-        for (char c : k) {
-          if (!(c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                (c >= '0' && c <= '9'))) {
-            simple_ident = false;
-            break;
-          }
-        }
-        if (simple_ident) {
+        if (IsIdentifierSafe(k)) {
           out_ += k;
         } else {
           EmitString(k);
