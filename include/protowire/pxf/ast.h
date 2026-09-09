@@ -106,6 +106,13 @@ using EntryPtr =
 struct Assignment {
   Position pos;
   std::string key;
+  // key_quoted records that key was written as a string literal
+  // (`"name" = { ... }`, the quoted entry-name form of draft -01 §3.13).
+  // key always holds the unquoted (denoted) value; the flag exists so
+  // FormatDocument round-trips the source spelling. A quoted name is only
+  // meaningful as the key of a keyed repeated field's entry — the schema
+  // layer rejects it anywhere else.
+  bool key_quoted = false;
   ValuePtr value;
   std::vector<Comment> leading_comments;
   std::string trailing_comment;
@@ -113,6 +120,18 @@ struct Assignment {
 struct MapEntry {
   Position pos;
   std::string key;
+  // key_quoted records that key was written as a string literal
+  // (`"true": v` rather than `true: v`). key always holds the unquoted
+  // (denoted) text; the flag is what tells the string key "123" from
+  // the integer key 123 and the string "true" from the bool true — a
+  // bare spelling denotes a value of the map's key type, a quoted one a
+  // string literal parsed as that type (draft -01 § Entries and Keys).
+  // FormatDocument keeps a bare key bare and unquotes a quoted key only
+  // when the bare spelling denotes the same key (protowire#306). A
+  // MapEntry built in code sets it for a key meant as a string that is
+  // not identifier-safe; left false, such a key is written bare when it
+  // lexes as one bare map-key token and quoted otherwise.
+  bool key_quoted = false;
   ValuePtr value;
   std::vector<Comment> leading_comments;
   std::string trailing_comment;
@@ -120,6 +139,13 @@ struct MapEntry {
 struct Block {
   Position pos;
   std::string name;
+  // name_quoted records that name was written as a string literal
+  // (`"us-east-1" { ... }`, draft -01 §3.13). name always holds the
+  // unquoted (denoted) value; the flag preserves the source spelling for
+  // FormatDocument. A quoted name is only meaningful as the key of a
+  // keyed repeated field's entry — the schema layer rejects it anywhere
+  // else.
+  bool name_quoted = false;
   std::vector<EntryPtr> entries;
   std::vector<Comment> leading_comments;
 };

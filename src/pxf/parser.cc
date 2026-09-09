@@ -2,11 +2,13 @@
 // Copyright (c) 2026 TrendVidia, LLC.
 #include "protowire/pxf/parser.h"
 
+#include <string>
 #include <utility>
 
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
 #include "protowire/detail/rfc3339.h"
+#include "protowire/limits.h"
 #include "protowire/pxf/lexer.h"
 #include "protowire/pxf/schema.h"
 
@@ -16,7 +18,11 @@ namespace {
 
 class Parser {
  public:
-  explicit Parser(std::string_view input) : lex_(input) { Advance(); }
+  Parser(std::string_view input, int max_depth, int max_bytes_literal)
+      : lex_(input), max_depth_(max_depth) {
+    lex_.SetMaxBytesLiteral(max_bytes_literal);
+    Advance();
+  }
 
   StatusOr<Document> ParseDocument();
 
@@ -36,9 +42,25 @@ class Parser {
   StatusOr<std::optional<ValuePtr>> ParseRowCell();
   TokenKind PeekKind();
 
+  // One `{` or `[` is one descent (HARDENING.md § Recursion; the decoder
+  // counts the same way). The root is depth 0, so a document exactly
+  // max_depth_ deep parses and one deeper does not.
+  Status Descend() {
+    if (++depth_ > max_depth_) {
+      --depth_;
+      return Status::Error(current_.pos.line,
+                           current_.pos.column,
+                           "nesting depth exceeds MaxNestingDepth=" + std::to_string(max_depth_));
+    }
+    return Status::OK();
+  }
+  void Ascend() { --depth_; }
+
   Lexer lex_;
   Token current_;
   std::vector<Comment> comments_;
+  int depth_ = 0;
+  int max_depth_ = kMaxNestingDepth;
 };
 
 // FindMatchingBrace returns the offset of the `}` that matches the `{`
@@ -170,8 +192,11 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry) {
     a->leading_comments = std::move(leading);
     return EntryPtr(std::move(a));
   }
+  // map-key = identifier / string / integer / bool (draft -01 § Entries
+  // and Keys; the keyword spelling landed in protowire#284). A bool
+  // token is only ever a map key: `true = v` / `true { }` name no field.
   if (current_.kind != TokenKind::kIdent && current_.kind != TokenKind::kString &&
-      current_.kind != TokenKind::kInt) {
+      current_.kind != TokenKind::kInt && !(allow_map_entry && current_.kind == TokenKind::kBool)) {
     return Status::Error(pos.line,
                          pos.column,
                          std::string("expected identifier, string, or integer, got ") +
@@ -183,10 +208,12 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry) {
 
   switch (current_.kind) {
     case TokenKind::kEquals: {
-      // `=` denotes a field assignment on a proto message; the key must
-      // be an identifier. Map-style keys (string / integer) are only
-      // valid with `:`.
-      if (key_kind != TokenKind::kIdent) {
+      // `=` denotes a field assignment on a proto message; the key is an
+      // identifier, or a string — the quoted entry name of draft -01
+      // §3.13, which the grammar accepts everywhere and the schema layer
+      // restricts to keyed repeated fields' blocks. An integer key is
+      // only valid with `:`.
+      if (key_kind != TokenKind::kIdent && key_kind != TokenKind::kString) {
         return Status::Error(
             pos.line,
             pos.column,
@@ -199,6 +226,7 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry) {
       auto a = std::make_unique<Assignment>();
       a->pos = pos;
       a->key = std::move(key);
+      a->key_quoted = (key_kind == TokenKind::kString);
       a->value = std::move(v).consume();
       a->leading_comments = std::move(leading);
       return EntryPtr(std::move(a));
@@ -218,14 +246,15 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry) {
       auto m = std::make_unique<MapEntry>();
       m->pos = pos;
       m->key = std::move(key);
+      m->key_quoted = (key_kind == TokenKind::kString);
       m->value = std::move(v).consume();
       m->leading_comments = std::move(leading);
       return EntryPtr(std::move(m));
     }
     case TokenKind::kLBrace: {
-      // `{ ... }` denotes a submessage field; same identifier-only rule
-      // as `=` applies.
-      if (key_kind != TokenKind::kIdent) {
+      // `{ ... }` denotes a submessage field; the same identifier-or-
+      // string rule as `=` applies.
+      if (key_kind != TokenKind::kIdent && key_kind != TokenKind::kString) {
         return Status::Error(pos.line,
                              pos.column,
                              std::string("submessage block requires an identifier key, got ") +
@@ -237,6 +266,7 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry) {
       auto b = std::make_unique<Block>();
       b->pos = pos;
       b->name = std::move(key);
+      b->name_quoted = (key_kind == TokenKind::kString);
       b->entries = std::move(entries).consume();
       b->leading_comments = std::move(leading);
       return EntryPtr(std::move(b));
@@ -337,6 +367,7 @@ StatusOr<ValuePtr> Parser::ParseValue() {
 
 StatusOr<ValuePtr> Parser::ParseList() {
   Position pos = current_.pos;
+  if (Status s = Descend(); !s.ok()) return s;
   Advance();  // [
   auto list = std::make_unique<ListVal>();
   list->pos = pos;
@@ -352,6 +383,7 @@ StatusOr<ValuePtr> Parser::ParseList() {
                          std::string("expected ']', got ") + TokenKindName(current_.kind));
   }
   Advance();
+  Ascend();
   return ValuePtr(std::move(list));
 }
 
@@ -366,7 +398,11 @@ StatusOr<ValuePtr> Parser::ParseBlockVal() {
   return ValuePtr(std::move(bv));
 }
 
+// ParseBody is entered with current_ at the first token after `{`; the
+// brace was consumed by the caller, so the depth check reports its
+// position through current_ (the token just inside it).
 StatusOr<std::vector<EntryPtr>> Parser::ParseBody() {
+  if (Status s = Descend(); !s.ok()) return s;
   std::vector<EntryPtr> out;
   while (current_.kind != TokenKind::kRBrace && current_.kind != TokenKind::kEOF) {
     // Inside a '{ ... }' block both forms are accepted; the schema layer
@@ -381,6 +417,7 @@ StatusOr<std::vector<EntryPtr>> Parser::ParseBody() {
                          std::string("expected '}', got ") + TokenKindName(current_.kind));
   }
   Advance();
+  Ascend();
   return out;
 }
 
@@ -792,8 +829,19 @@ bool ContainsDot(std::string_view s) {
 
 }  // namespace
 
-StatusOr<Document> Parse(std::string_view input) {
-  return Parser(input).ParseDocument();
+StatusOr<Document> Parse(std::string_view input, ParseOptions opts) {
+  const int max_size = opts.max_message_size > 0 ? opts.max_message_size : kMaxMessageSize;
+  if (input.size() > static_cast<size_t>(max_size)) {
+    return Status::Error(1,
+                         1,
+                         "input of " + std::to_string(input.size()) +
+                             " bytes exceeds MaxMessageSize=" + std::to_string(max_size));
+  }
+  Parser p(
+      input,
+      opts.max_nesting_depth > 0 ? opts.max_nesting_depth : kMaxNestingDepth,
+      opts.max_bytes_literal_length > 0 ? opts.max_bytes_literal_length : kMaxBytesLiteralLength);
+  return p.ParseDocument();
 }
 
 }  // namespace protowire::pxf

@@ -5,10 +5,13 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "protowire/limits.h"
 #include "protowire/pb_big.h"
 
 namespace {
@@ -217,3 +220,199 @@ TEST(Pb, ZigZagMacro) {
 }
 
 }  // namespace
+
+// Map entries write field 1 and field 2 whether or not they are zero
+// (protowire#295, #24): key "" / value 0 is `0a00 1000` inside the entry,
+// never an empty entry. Also the value held through std::optional or a
+// pointer: unset is written as the zero value, so every entry has both.
+struct MapHolder {
+  std::map<std::string, int32_t> counts;
+  std::map<int32_t, std::string> names;
+  std::map<std::string, std::optional<int32_t>> opt;
+  PROTOWIRE_FIELDS(MapHolder,
+                   PROTOWIRE_FIELD(1, counts),
+                   PROTOWIRE_FIELD(2, names),
+                   PROTOWIRE_FIELD(3, opt))
+};
+
+TEST(Pb, MapEntryAlwaysCarriesKeyAndValue) {
+  MapHolder m;
+  m.counts[""] = 0;
+  m.names[0] = "";
+  m.opt["k"] = std::nullopt;
+  auto bytes = Marshal(m);
+  const std::vector<uint8_t> want = {
+      // counts: entry { key "" (0a 00), value 0 (10 00) }
+      0x0a,
+      0x04,
+      0x0a,
+      0x00,
+      0x10,
+      0x00,
+      // names: entry { key 0 (08 00), value "" (12 00) }
+      0x12,
+      0x04,
+      0x08,
+      0x00,
+      0x12,
+      0x00,
+      // opt: entry { key "k" (0a 01 6b), value 0 (10 00) }
+      0x1a,
+      0x05,
+      0x0a,
+      0x01,
+      0x6b,
+      0x10,
+      0x00,
+  };
+  EXPECT_EQ(bytes, want);
+
+  MapHolder got;
+  ASSERT_TRUE(Unmarshal(bytes, got).ok());
+  EXPECT_EQ(got.counts.at(""), 0);
+  EXPECT_EQ(got.names.at(0), "");
+  ASSERT_TRUE(got.opt.at("k").has_value());
+  EXPECT_EQ(*got.opt.at("k"), 0);
+}
+
+// ---- HARDENING.md § Mandatory limits (#25, #26) --------------------------
+
+struct Node {
+  std::unique_ptr<Node> child;
+  std::string label;
+  std::vector<int32_t> values;
+  std::map<std::string, int32_t> counts;
+  protowire::pb::Decimal decimal;
+  PROTOWIRE_FIELDS(Node,
+                   PROTOWIRE_FIELD(1, child),
+                   PROTOWIRE_FIELD(2, label),
+                   PROTOWIRE_FIELD(3, values),
+                   PROTOWIRE_FIELD(4, counts),
+                   PROTOWIRE_FIELD(5, decimal))
+};
+
+// n nested submessages under the root: n descents.
+std::vector<uint8_t> NestedNode(int n) {
+  Node root;
+  Node* cur = &root;
+  for (int i = 0; i < n; ++i) {
+    cur->child = std::make_unique<Node>();
+    cur = cur->child.get();
+  }
+  cur->label = "leaf";
+  return Marshal(root);
+}
+
+TEST(PbHardening, DepthBoundBothSides) {
+  Node at;
+  EXPECT_TRUE(Unmarshal(NestedNode(protowire::kMaxNestingDepth), at).ok());
+  Node over;
+  auto st = Unmarshal(NestedNode(protowire::kMaxNestingDepth + 1), over);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("MaxNestingDepth=100"), std::string::npos) << st.ToString();
+  protowire::pb::UnmarshalOptions opts;
+  opts.max_nesting_depth = 3;
+  Node n3;
+  EXPECT_TRUE(Unmarshal(NestedNode(3), n3, opts).ok());
+  Node n4;
+  EXPECT_FALSE(Unmarshal(NestedNode(4), n4, opts).ok());
+}
+
+TEST(PbHardening, MessageSizeBound) {
+  Node n;
+  n.label = std::string(2000, 'x');
+  auto bytes = Marshal(n);
+  protowire::pb::UnmarshalOptions opts;
+  opts.max_message_size = 1024;
+  Node got;
+  auto st = Unmarshal(bytes, got, opts);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("exceeds MaxMessageSize=1024"), std::string::npos) << st.ToString();
+  opts.max_message_size = 4096;
+  EXPECT_TRUE(Unmarshal(bytes, got, opts).ok());
+  std::vector<uint8_t> huge(static_cast<size_t>(protowire::kMaxMessageSize) + 1, 0);
+  st = Unmarshal(huge, got);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("MaxMessageSize=67108864"), std::string::npos) << st.ToString();
+}
+
+TEST(PbHardening, RepeatedCountBoundPackedAndUnpacked) {
+  Node n;
+  for (int i = 0; i < 16; ++i) n.values.push_back(i);
+  auto unpacked = Marshal(n);  // one record per element
+  // The same field packed: tag 3 LEN, then 16 varints.
+  std::vector<uint8_t> packed = {0x1a, 16};
+  for (int i = 0; i < 16; ++i) packed.push_back(static_cast<uint8_t>(i));
+  for (const auto& bytes : {unpacked, packed}) {
+    protowire::pb::UnmarshalOptions opts;
+    opts.max_repeated_count = 8;
+    Node got;
+    auto st = Unmarshal(bytes, got, opts);
+    ASSERT_FALSE(st.ok());
+    EXPECT_NE(st.message().find("repeated field exceeds MaxRepeatedCount=8"), std::string::npos)
+        << st.ToString();
+    opts.max_repeated_count = 16;
+    Node ok;
+    ASSERT_TRUE(Unmarshal(bytes, ok, opts).ok());
+    EXPECT_EQ(ok.values, n.values);
+  }
+
+  Node m;
+  for (int i = 0; i < 16; ++i) m.counts["k" + std::to_string(i)] = i;
+  auto bytes = Marshal(m);
+  protowire::pb::UnmarshalOptions opts;
+  opts.max_repeated_count = 8;
+  Node got;
+  auto st = Unmarshal(bytes, got, opts);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("map field exceeds MaxRepeatedCount=8"), std::string::npos);
+  opts.max_repeated_count = 16;
+  EXPECT_TRUE(Unmarshal(bytes, got, opts).ok());
+}
+
+// proto3 packs repeated numerics by default; every other encoder in the
+// family writes ListHolder { values: [1, 2, 3] } as `0a 03 01 02 03`, which
+// this codec read as one element followed by corrupt tags.
+TEST(PbHardening, PackedRepeatedDecodes) {
+  std::vector<uint8_t> packed_i32 = {0x1a, 0x03, 0x01, 0x02, 0x03};
+  Node got;
+  ASSERT_TRUE(Unmarshal(packed_i32, got).ok());
+  EXPECT_EQ(got.values, (std::vector<int32_t>{1, 2, 3}));
+  struct Floats {
+    std::vector<double> d;
+    std::vector<bool> b;
+    PROTOWIRE_FIELDS(Floats, PROTOWIRE_FIELD(1, d), PROTOWIRE_FIELD(2, b))
+  };
+  // d = [1.0, 2.0] packed (two fixed64), b = [true, false] packed.
+  std::vector<uint8_t> bytes = {0x0a, 16, 0, 0, 0, 0, 0,    0,    0xf0, 0x3f, 0,
+                                0,    0,  0, 0, 0, 0, 0x40, 0x12, 2,    1,    0};
+  Floats f;
+  ASSERT_TRUE(Unmarshal(bytes, f).ok());
+  EXPECT_EQ(f.d, (std::vector<double>{1.0, 2.0}));
+  EXPECT_EQ(f.b, (std::vector<bool>{true, false}));
+}
+
+TEST(PbHardening, DecimalScaleBound) {
+  // Decimal { scale = 2^31-1 } and { scale = -2^31 }: refused; 4096 accepted.
+  auto with_scale = [](int32_t scale) {
+    protowire::pb::Decimal d;
+    d.unscaled = {1};
+    d.scale = scale;
+    Node n;
+    n.decimal = d;
+    return Marshal(n);
+  };
+  Node got;
+  auto st = Unmarshal(with_scale(2147483647), got);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("Decimal.scale 2147483647 exceeds MaxNumericLiteralDigits=4096"),
+            std::string::npos)
+      << st.ToString();
+  EXPECT_FALSE(Unmarshal(with_scale(-2147483647 - 1), got).ok());
+  EXPECT_TRUE(Unmarshal(with_scale(4096), got).ok());
+  EXPECT_TRUE(Unmarshal(with_scale(-4096), got).ok());
+  protowire::pb::UnmarshalOptions opts;
+  opts.max_numeric_literal_digits = 8;
+  EXPECT_FALSE(Unmarshal(with_scale(9), got, opts).ok());
+  EXPECT_TRUE(Unmarshal(with_scale(8), got, opts).ok());
+}

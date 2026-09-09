@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 
+#include "protowire/limits.h"
 #include "protowire/pxf/token.h"
 
 namespace protowire::pxf {
@@ -16,6 +17,12 @@ class Lexer {
   explicit Lexer(std::string_view input) : input_(input) {}
 
   Token Next();
+
+  // Bounds the decoded length of a b"…" literal (HARDENING.md
+  // MaxBytesLiteralLength), judged from the literal's length while it is
+  // scanned so it is neither scanned to its end nor decoded before it is
+  // refused. The parser and decoder set it from their per-call limits.
+  void SetMaxBytesLiteral(int n) { max_bytes_literal_ = n; }
 
   Position CurrentPos() const { return Position{line_, column_, static_cast<int>(pos_)}; }
 
@@ -63,6 +70,7 @@ class Lexer {
   Token LexFloat(Position pos, size_t start);
   Token LexTimestamp(Position pos, size_t start);
   Token LexDuration(Position pos, size_t start);
+  bool AtDurationUnit() const;
   Token LexIdent(Position pos);
 
   // Owned storage for tokens whose .value cannot view the input directly
@@ -73,6 +81,7 @@ class Lexer {
   size_t pos_ = 0;
   int line_ = 1;
   int column_ = 1;
+  int max_bytes_literal_ = kMaxBytesLiteralLength;
   std::deque<std::string> owned_;  // pointer-stable storage
 };
 

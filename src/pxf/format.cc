@@ -17,8 +17,20 @@
 #include <variant>
 
 #include "protowire/detail/base64.h"
+#include "protowire/pxf/lexer.h"
 
 namespace protowire::pxf {
+
+bool IsIdentifierSafe(std::string_view s) {
+  if (s.empty() || s == "true" || s == "false" || s == "null") return false;
+  for (size_t i = 0; i < s.size(); ++i) {
+    char c = s[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+              (i != 0 && c >= '0' && c <= '9');
+    if (!ok) return false;
+  }
+  return true;
+}
 
 namespace {
 
@@ -56,20 +68,34 @@ void WriteQuotedString(std::string_view s, std::string& out) {
   out.push_back('"');
 }
 
-bool IsIdentChar(char c, bool first) {
-  if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') return true;
-  if (!first && c >= '0' && c <= '9') return true;
-  return false;
+// LexesAsBareMapKey reports whether s reads back as exactly one bare
+// map-key token — an identifier, an integer or a bool (map-key =
+// identifier / string / integer / bool) — spelled as s. null is not one.
+bool LexesAsBareMapKey(std::string_view s) {
+  Lexer lex(s);
+  Token t = lex.Next();
+  switch (t.kind) {
+    case TokenKind::kIdent:
+    case TokenKind::kInt:
+    case TokenKind::kBool:
+      return t.value == s && lex.Next().kind == TokenKind::kEOF;
+    default:
+      return false;
+  }
 }
 
-// NeedsQuoting returns true for keys that aren't a plain identifier, matching
-// Go's needsQuoting(). Empty string also requires quoting.
-bool NeedsQuoting(std::string_view s) {
-  if (s.empty()) return true;
-  for (size_t i = 0; i < s.size(); ++i) {
-    if (!IsIdentChar(s[i], i == 0)) return true;
-  }
-  return false;
+// MapKeyQuoted decides the spelling of a map key on the way out. A key
+// the document wrote quoted keeps its quotes unless it is identifier-safe;
+// a key the document wrote bare stays bare, because the bare spellings
+// true, 0 and 123 denote a bool or an integer key and quoting them would
+// change what they denote (draft -01 § Entries and Keys, "Canonical
+// spelling of map keys"; protowire#306). A MapEntry built in code carries
+// no document spelling: it is written bare when its key lexes as one bare
+// map-key token and quoted otherwise, so "" or "my key" never produce a
+// document that does not parse.
+bool MapKeyQuoted(const MapEntry& m) {
+  if (m.key_quoted) return !IsIdentifierSafe(m.key);
+  return !LexesAsBareMapKey(m.key);
 }
 
 class Formatter {
@@ -97,7 +123,11 @@ class Formatter {
   void FormatEntry(const Assignment& a, int level) {
     WriteComments(a.leading_comments, level);
     WriteIndent(level);
-    out_ += a.key;
+    if (a.key_quoted) {
+      WriteQuotedString(a.key, out_);
+    } else {
+      out_ += a.key;
+    }
     out_ += " = ";
     FormatValue(a.value, level);
     if (!a.trailing_comment.empty()) {
@@ -110,7 +140,7 @@ class Formatter {
   void FormatEntry(const MapEntry& m, int level) {
     WriteComments(m.leading_comments, level);
     WriteIndent(level);
-    if (NeedsQuoting(m.key)) {
+    if (MapKeyQuoted(m)) {
       WriteQuotedString(m.key, out_);
     } else {
       out_ += m.key;
@@ -127,7 +157,11 @@ class Formatter {
   void FormatEntry(const Block& b, int level) {
     WriteComments(b.leading_comments, level);
     WriteIndent(level);
-    out_ += b.name;
+    if (b.name_quoted) {
+      WriteQuotedString(b.name, out_);
+    } else {
+      out_ += b.name;
+    }
     out_ += " {\n";
     FormatEntries(b.entries, level + 1);
     WriteIndent(level);

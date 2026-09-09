@@ -11,6 +11,147 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- **pxf: quoted entry names and keyed repeated fields** (#18; draft `-01`
+  §3.13, protowire#116, reference protowire-go#50). The vendored
+  `proto/pxf/annotations.proto` gains `(pxf.key) = 1316`, matching
+  canonical. The grammar accepts a string at entry-name position with
+  `=` and `{` everywhere (`Assignment::key_quoted`, `Block::name_quoted`
+  retain the spelling for `FormatDocument`); the schema layer rejects it
+  outside a keyed repeated field's block. A repeated message-typed field
+  whose `(pxf.key)` names a singular string field of the element message
+  decodes from the keyed block form — `children { greeting { … } }` or
+  `children = { greeting = { … } }` — with the entry name as the key,
+  entry order as list order, and duplicate names, the empty string, and
+  a disagreeing explicit key assignment as errors; the anonymous list
+  form still decodes, with an explicit empty key rejected. `Marshal`
+  writes the keyed form whenever every key is present, non-empty and
+  distinct (names bare when identifier-safe, quoted otherwise, the key
+  field omitted from the entry body), and the anonymous form otherwise.
+  `CanonicalizeKeyed(Document*, const Descriptor*)` (new
+  `protowire/pxf/keyed.h`) is the schema-aware AST rewrite behind `fmt`:
+  eligible anonymous bindings become keyed blocks, `name = { }` becomes
+  `name { }`, identifier-safe quoted names are unquoted, redundant key
+  assignments are dropped. `ValidateFile` reports a misplaced
+  `(pxf.key)` as `ViolationKind::kKeyOption` with a `detail`;
+  `KeyFieldName`, `KeyField` and `IsKeyed` are exported from
+  `protowire/pxf/annotations.h`. The spec repo's `testdata/keyed/` is
+  vendored and every fixture is pinned.
+
+### Security
+
+- **HARDENING.md § Mandatory limits are enforced, configurable per
+  call, and the adversarial corpus passes on every row** (#26, #25;
+  draft `-01` § Mandatory Limits, protowire#299, #301). Measured on
+  `main` at 2a8c854 with the spec repo's `cross_security_check.sh`, ten
+  of the port's rows failed: no PXF depth cap at all (200 and 1000
+  levels accepted, 100 000 levels a stack overflow, 101 levels of blocks
+  or lists accepted), a `\xFF\xFE` escape accepted into a proto3
+  string, a 5000-digit literal accepted on a `pxf.BigInt`, and the
+  three SBE rows reported as crashes. **Cause:** never wired, not a
+  regression — no commit in this repository's history references
+  `MaxNestingDepth`, `check_decode` (#8) exited 2 for `--format sbe`
+  ("not implemented"), which the harness classifies as a crash, and its
+  PB leg went through libprotobuf's parser rather than this port's
+  codec. The gaps #1 recorded at M8 were closed without landing.
+  - `pxf::UnmarshalOptions` gains `max_message_size`,
+    `max_nesting_depth`, `max_numeric_literal_digits`,
+    `max_bytes_literal_length` and `max_repeated_count` (0 = the default
+    in the new `protowire/limits.h`); `Parse` takes a `ParseOptions`
+    with the first, second and fourth. The input size is checked before
+    the first token; every `{` or `[` is one descent from a root at 0,
+    counted identically by `Parse` and `Unmarshal`, so exactly 100
+    descents decode and 101 do not; a `b"…"` literal is refused from its
+    length before it is decoded; a repeated or map field is refused
+    before its element past the bound is allocated; a literal bound to
+    `pxf.BigInt` / `Decimal` / `BigFloat` is refused past 4096 digits;
+    a proto3 `string` field (scalar, repeated, map key) refuses invalid
+    UTF-8 from `\xHH` / `\NNN` escapes or raw bytes, while `bytes` fields
+    take them. The decoder now surfaces the lexer's own diagnostic for an
+    ILLEGAL token instead of "expected string".
+  - `pb::Unmarshal` takes a `pb::UnmarshalOptions` (`max_message_size`,
+    `max_nesting_depth`, `max_numeric_literal_digits`,
+    `max_repeated_count`). The depth counter is threaded through nested
+    submessages, map entries and big-number messages rather than reset
+    by the fresh span; `pxf.Decimal.scale` is bounded to ±4096 on the
+    wire (protowire#279); and repeated numeric fields decode from the
+    **packed** form every other encoder in the family writes — before,
+    `0a 03 01 02 03` read as one element and corrupt tags.
+  - `sbe::Codec::New` takes a `sbe::CodecOptions` (`max_message_size`,
+    `max_repeated_count`). `Unmarshal` and `NewView` validate the header
+    (template id, wire block ≥ template block) and every group header
+    before any entry is allocated: wire entry block ≥ template's, no
+    zero-length block with a non-zero count, count × block within the
+    remaining input (as a division, so it cannot overflow), count within
+    `MaxRepeatedCount`. `GroupView::Entry` past the count reads as an
+    empty view instead of a span past the buffer. A `char[]` decoded into
+    a proto3 string refuses invalid UTF-8.
+  - `check_decode` gains `--limit NAME=VALUE`, decodes `--format sbe`
+    through the codec, and `--format pb` through this port's codec with
+    hand-mirrored `adversarial.proto` types, as the Go reference does.
+    All 38 (port, corpus) pairs pass, including the twelve `limits` rows
+    and the three `pb/decimal-*` rows the manifest skipped for this
+    port.
+
+### Fixed
+
+- **pb: a map entry always carries key and value, zero-valued or not**
+  (#24; protowire#295, decided on protowire-go#105). `pb.h`'s map branch
+  applied proto3 zero-skip inside the entry, so `metadata { "": "" }`
+  serialised as an empty entry (`22022a00`) where protobuf-go, protoc and
+  C++ protobuf write `22062a040a001200`. Field 1 and field 2 of every
+  entry are now written unconditionally; a value held through
+  `std::optional` or a smart pointer that is unset is written as its zero
+  value. `dump_envelope --vector zero-map-entry` prints the bytes for the
+  cross-port gate's golden, and an unknown vector name exits 3 with
+  `not-implemented: <name>`.
+  
+- **pxf fmt: the quotes on a string map key spelled like a keyword or an
+  integer are kept** (#27; draft `-01` § Entries and Keys, "Canonical
+  spelling of map keys", protowire#306). `FormatDocument` wrote every
+  identifier-shaped key bare, so `"true": "v"` on a `map<string, V>`
+  became `true: "v"` — a bool key, which no longer binds on a string
+  `K`. `MapEntry` gains `key_quoted`; a quoted key is unquoted only when
+  it is identifier-safe and not `null` / `true` / `false`, and a bare key
+  stays bare (so `404:` is no longer requoted on the way through fmt).
+  The marshaller uses the same test (`IsIdentifierSafe`, exported from
+  `protowire/pxf/format.h`), so `"123"`, `"true"` and `"null"` string
+  keys are written quoted; it also sorts bool keys (false, true). The
+  spec repo's `testdata/map-keys/` fixtures are vendored and pinned.
+  
+- **pxf: bool map keys bind in exactly the grammar's spellings**
+  (absorbed into #27; protowire#284). The decoder bound any non-`true`
+  key on a `map<bool, V>` to `false` — `t`, `yes`, `"TRUE"`, `"0"` all
+  silently became a key the author did not write. A bool key is now
+  `true` / `false` bare (the keyword spelling, newly accepted as a map
+  key by the parser and decoder), `0` / `1` bare, or `"true"` /
+  `"false"` quoted, and anything else is an error naming the key and
+  field; on a string `K` the bare keyword is an error that says to
+  write it quoted.
+
+
+  
+- **pxf: the lexer reads fractional and `µs` duration literals** (#20).
+  `1.5ms`, `1.234567ms`, `312.5µs`, `1h30m0.5s` and `-2.5s` — the forms
+  every port's encoder writes for a `google.protobuf.Duration` that is
+  not a whole multiple of its largest unit — tokenised as a float
+  followed by an identifier (or an integer followed by a stray byte for
+  the two-byte `µ`), so this port could not read its own output for any
+  measured latency. `LexNumber` now consumes an optional fraction first
+  and takes the duration branch when a time unit follows; the duration
+  scan admits `.` before a digit and the `C2 B5` micro sign (U+00B5
+  only — U+03BC is not in the grammar). Mirrors protowire-go#76.
+  
+- **detail: negative durations split toward zero, and the int64 edges
+  round-trip** (absorbed into #20). `ParseDuration` normalised nanos into
+  `[0, 1e9)`, so `-1ns` decoded to `seconds=-1, nanos=999999999`, which
+  `google.protobuf.Duration` forbids (nanos must carry the sign of the
+  value) and no other port reads back as `-1ns`; it now splits like
+  `time.Duration`. `FormatDuration` and `ParseDuration` take the
+  magnitude in unsigned arithmetic, so `INT64_MIN` formats as
+  `-2562047h47m16.854775808s` instead of a placeholder and reads back.
+
 ## [1.0.0] — 2026-05-13
 
 First major-version cut. Implements the three one-time spec changes

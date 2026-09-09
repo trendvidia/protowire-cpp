@@ -1,0 +1,9 @@
+# Cross-port fixtures are compared byte-for-byte (a formatter's output
+# against its .expected.pxf, a decode → encode round trip against the
+# fixture body). Git's CRLF conversion on Windows checkouts turned every
+# LF into CRLF and failed those comparisons on the windows-latest leg, so
+# the fixture and schema files are pinned to LF on every platform.
+*.pxf   text eol=lf
+*.proto text eol=lf
+*.hex   text eol=lf
+*.jsonl text eol=lf

@@ -7,6 +7,9 @@
 // sugar, _null FieldMask emission.
 
 #include "protowire/pxf.h"
+#include "protowire/pxf/annotations.h"
+#include "protowire/pxf/format.h"
+#include "protowire/pxf/keyed.h"
 
 #include <algorithm>
 #include <charconv>
@@ -69,6 +72,10 @@ class Encoder {
 
   Status EncodeField(const Message& msg, const FieldDescriptor* fd, int level);
   Status EncodeListField(const Message& msg, const FieldDescriptor* fd, int level);
+  Status EncodeKeyedList(const Message& msg,
+                         const FieldDescriptor* fd,
+                         const FieldDescriptor* key_fd,
+                         int level);
   Status EncodeMapField(const Message& msg, const FieldDescriptor* fd, int level);
   Status EncodeMessageValue(const Message& sub, int level);
 
@@ -85,7 +92,29 @@ class Encoder {
   std::unordered_set<std::string> nested_nulls_;
   const google::protobuf::FieldDescriptor* null_mask_fd_ = nullptr;
   bool at_top_level_ = true;
+  // Key field to omit from the NEXT EncodeMessage call: the entry name of
+  // a keyed-block entry already carries its value (draft -01 §3.13).
+  const FieldDescriptor* skip_key_fd_ = nullptr;
 };
+
+// KeyedFormEligible reports whether every element of the repeated field
+// has a non-empty key value that is distinct within the collection — the
+// draft -01 §3.13 condition for emitting the keyed block form.
+bool KeyedFormEligible(const Message& msg,
+                       const FieldDescriptor* fd,
+                       const FieldDescriptor* key_fd) {
+  const Reflection* r = msg.GetReflection();
+  int n = r->FieldSize(msg, fd);
+  std::unordered_set<std::string> seen;
+  seen.reserve(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    const Message& sub = r->GetRepeatedMessage(msg, fd, i);
+    std::string scratch;
+    const std::string& key = sub.GetReflection()->GetStringReference(sub, key_fd, &scratch);
+    if (key.empty() || !seen.insert(key).second) return false;
+  }
+  return true;
+}
 
 void Encoder::EmitString(std::string_view s) {
   static constexpr char kHex[] = "0123456789abcdef";
@@ -270,9 +299,50 @@ Status Encoder::EncodeMessageValue(const Message& sub, int level) {
   return Status::OK();
 }
 
+// EncodeKeyedList emits a keyed repeated field in the keyed block form:
+// one named block per element, in list order. Entry names are written
+// unquoted when identifier-safe and quoted otherwise; the key field is
+// not additionally emitted inside the entry's block.
+Status Encoder::EncodeKeyedList(const Message& msg,
+                                const FieldDescriptor* fd,
+                                const FieldDescriptor* key_fd,
+                                int level) {
+  const Reflection* r = msg.GetReflection();
+  int n = r->FieldSize(msg, fd);
+  Indent(level);
+  out_.append(fd->name().data(), fd->name().size());
+  out_ += " {\n";
+  for (int i = 0; i < n; ++i) {
+    const Message& sub = r->GetRepeatedMessage(msg, fd, i);
+    std::string scratch;
+    const std::string& key = sub.GetReflection()->GetStringReference(sub, key_fd, &scratch);
+    Indent(level + 1);
+    if (IsIdentifierSafeEntryName(key)) {
+      out_ += key;
+    } else {
+      EmitString(key);
+    }
+    out_ += " {\n";
+    skip_key_fd_ = key_fd;
+    Status st = EncodeMessage(sub, level + 2);
+    if (!st.ok()) return st;
+    Indent(level + 1);
+    out_ += "}\n";
+  }
+  Indent(level);
+  out_ += "}\n";
+  return Status::OK();
+}
+
 Status Encoder::EncodeListField(const Message& msg, const FieldDescriptor* fd, int level) {
   const Reflection* r = msg.GetReflection();
   int n = r->FieldSize(msg, fd);
+  // Keyed repeated field (draft -01 §3.13): emit the keyed block form
+  // whenever every element's key is present, non-empty and distinct;
+  // otherwise the anonymous list form is the only representation.
+  if (const FieldDescriptor* key_fd = KeyField(fd); key_fd != nullptr && n > 0) {
+    if (KeyedFormEligible(msg, fd, key_fd)) return EncodeKeyedList(msg, fd, key_fd, level);
+  }
   WriteFieldPrefix(level, fd->name());
   out_ += "[";
   if (fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
@@ -324,6 +394,8 @@ Status Encoder::EncodeMapField(const Message& msg, const FieldDescriptor* fd, in
         return er->GetUInt32(ea, key_fd) < er->GetUInt32(eb, key_fd);
       case FieldDescriptor::CPPTYPE_UINT64:
         return er->GetUInt64(ea, key_fd) < er->GetUInt64(eb, key_fd);
+      case FieldDescriptor::CPPTYPE_BOOL:
+        return !er->GetBool(ea, key_fd) && er->GetBool(eb, key_fd);
       default:
         return false;
     }
@@ -337,16 +409,11 @@ Status Encoder::EncodeMapField(const Message& msg, const FieldDescriptor* fd, in
     switch (key_fd->cpp_type()) {
       case FieldDescriptor::CPPTYPE_STRING: {
         std::string scratch;
+        // Bare only when identifier-safe: "true", "null" and "123" bare
+        // would denote a bool key, no key, and an integer key (draft -01
+        // § Entries and Keys; protowire#306).
         const std::string& k = er->GetStringReference(entry, key_fd, &scratch);
-        bool simple_ident = !k.empty();
-        for (char c : k) {
-          if (!(c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                (c >= '0' && c <= '9'))) {
-            simple_ident = false;
-            break;
-          }
-        }
-        if (simple_ident) {
+        if (IsIdentifierSafe(k)) {
           out_ += k;
         } else {
           EmitString(k);
@@ -450,8 +517,15 @@ Status Encoder::EncodeField(const Message& msg, const FieldDescriptor* fd, int l
 Status Encoder::EncodeMessage(const Message& msg, int level) {
   const auto* desc = msg.GetDescriptor();
   bool was_top = at_top_level_;
+  // A pending skip_key_fd_ applies to exactly this body: the entry name of
+  // a keyed-block entry already carries the key field's value, so the
+  // field is not additionally emitted inside the block. Consume it so
+  // nested messages don't inherit the skip.
+  const FieldDescriptor* skip_key = skip_key_fd_;
+  skip_key_fd_ = nullptr;
   for (int i = 0; i < desc->field_count(); ++i) {
     const FieldDescriptor* fd = desc->field(i);
+    if (skip_key != nullptr && fd == skip_key) continue;
     if (was_top && null_mask_fd_ && fd == null_mask_fd_) {
       continue;  // skip the _null FieldMask itself
     }

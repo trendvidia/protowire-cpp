@@ -52,9 +52,26 @@
 
 #include "protowire/detail/status.h"
 #include "protowire/detail/wire.h"
+#include "protowire/limits.h"
 #include "protowire/pb_big.h"
 
 namespace protowire::pb {
+
+// UnmarshalOptions carries the HARDENING.md § Mandatory limits a decode
+// call enforces, each configurable per call; 0 selects the default in
+// protowire/limits.h. max_message_size caps the input to this call and is
+// checked before anything is read; max_nesting_depth caps submessage /
+// map-entry nesting (the root is depth 0, every submessage, big-number
+// message or map entry one descent); max_repeated_count caps the element
+// count of any repeated or map field, checked before each element is
+// appended.
+struct UnmarshalOptions {
+  int max_message_size = 0;
+  int max_nesting_depth = 0;
+  // Bounds the magnitude of pxf.Decimal.scale on the wire (a digit count).
+  int max_numeric_literal_digits = 0;
+  int max_repeated_count = 0;
+};
 
 // ---- Field descriptor ---------------------------------------------------
 
@@ -145,22 +162,51 @@ template <class T>
 std::vector<uint8_t> Marshal(const T& v);
 
 template <class T>
-Status Unmarshal(std::span<const uint8_t> data, T& v);
+Status Unmarshal(std::span<const uint8_t> data, T& v, UnmarshalOptions opts = {});
 
 namespace detail {
+
+// Limits is UnmarshalOptions with the defaults applied, threaded through
+// every nested decode together with the current depth so a fresh inner
+// span cannot reset the recursion counter (HARDENING.md § Recursion).
+struct Limits {
+  int max_message_size = kMaxMessageSize;
+  int max_depth = kMaxNestingDepth;
+  int max_digits = kMaxNumericLiteralDigits;
+  int max_repeated = kMaxRepeatedCount;
+};
+
+inline Limits ResolveLimits(const UnmarshalOptions& o) {
+  Limits lim;
+  if (o.max_message_size > 0) lim.max_message_size = o.max_message_size;
+  if (o.max_nesting_depth > 0) lim.max_depth = o.max_nesting_depth;
+  if (o.max_numeric_literal_digits > 0) lim.max_digits = o.max_numeric_literal_digits;
+  if (o.max_repeated_count > 0) lim.max_repeated = o.max_repeated_count;
+  return lim;
+}
+
+inline Status DepthError(const Limits& lim) {
+  return Status::Error("nesting depth exceeds MaxNestingDepth=" + std::to_string(lim.max_depth));
+}
 
 template <class T>
 void MarshalStruct(const T& v, std::vector<uint8_t>& out);
 
 template <class T>
-Status UnmarshalStruct(std::span<const uint8_t> data, T& v);
+Status UnmarshalStruct(std::span<const uint8_t> data, T& v, int depth, const Limits& lim);
 
 template <class T>
 void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v);
 
 template <class T>
-Status UnmarshalField(
-    std::span<const uint8_t> data, uint32_t num, wire::WireType type, T& v, int& consumed);
+Status UnmarshalField(std::span<const uint8_t> data,
+                      uint32_t num,
+                      wire::WireType type,
+                      T& v,
+                      int& consumed,
+                      bool zigzag,
+                      int depth,
+                      const Limits& lim);
 
 // ---- Big-number helpers (defined in big.cc) ------------------------------
 
@@ -168,7 +214,9 @@ void MarshalBigIntMsg(const BigInt& v, std::vector<uint8_t>& out);
 void MarshalDecimalMsg(const Decimal& v, std::vector<uint8_t>& out);
 void MarshalBigFloatMsg(const BigFloat& v, std::vector<uint8_t>& out);
 Status UnmarshalBigIntMsg(std::span<const uint8_t> data, BigInt& out);
-Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out);
+// max_digits bounds |Decimal.scale| (HARDENING.md MaxNumericLiteralDigits);
+// 0 selects the default.
+Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out, int max_digits);
 Status UnmarshalBigFloatMsg(std::span<const uint8_t> data, BigFloat& out);
 
 // ---- Marshal dispatch ----------------------------------------------------
@@ -252,6 +300,29 @@ inline void MarshalScalar(std::vector<uint8_t>& out,
   }
 }
 
+// MarshalMapValue writes field 2 of a map entry unconditionally. A value
+// held through std::optional or a smart pointer that is unset is written
+// as its zero value, so every entry carries both fields on the wire.
+template <class T>
+inline void MarshalMapValue(std::vector<uint8_t>& out,
+                            uint32_t num,
+                            const T& v,
+                            bool zigzag = false) {
+  if constexpr (IsOptional<T>::value) {
+    using E = typename IsOptional<T>::element;
+    MarshalScalar(out, num, v.has_value() ? *v : E{}, zigzag);
+  } else if constexpr (IsSmartPtr<T>::value) {
+    using E = typename IsSmartPtr<T>::element;
+    if (v) {
+      MarshalScalar(out, num, *v, zigzag);
+    } else {
+      MarshalScalar(out, num, E{}, zigzag);
+    }
+  } else {
+    MarshalScalar(out, num, v, zigzag);
+  }
+}
+
 template <class T>
 inline void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v, bool zigzag = false) {
   if constexpr (IsOptional<T>::value) {
@@ -262,13 +333,16 @@ inline void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v, bo
     return;
   } else if constexpr (IsMap<T>::value) {
     // proto3 maps: each entry is a length-prefixed MapEntry message with
-    // key at field 1 and value at field 2. Standard proto3 zero-skip applies
-    // within the entry; missing fields decode to zero.
+    // key at field 1 and value at field 2. Both are written whether or
+    // not they are zero-valued — the layout protobuf-go, protoc and C++
+    // protobuf write, fixed across the family by protowire#295 (#24): a
+    // zero key or value is a present field of the entry, not an absent
+    // one, so proto3 zero-skip does not apply inside it.
     if (v.empty()) return;
     for (const auto& [k, val] : v) {
       std::vector<uint8_t> entry;
-      MarshalField(entry, 1, k, zigzag);
-      MarshalField(entry, 2, val, zigzag);
+      MarshalScalar(entry, 1, k, zigzag);
+      MarshalMapValue(entry, 2, val, zigzag);
       wire::AppendTag(out, num, wire::kBytes);
       wire::AppendBytes(out, entry);
     }
@@ -289,9 +363,21 @@ inline void MarshalStruct(const T& v, std::vector<uint8_t>& out) {
 
 // ---- Unmarshal dispatch -------------------------------------------------
 
+// IsPackable: proto3 encodes a repeated field of these element types
+// packed by default — one LEN record carrying the concatenated element
+// encodings — and a decoder must accept both the packed and the
+// one-record-per-element form.
 template <class T>
-inline Status UnmarshalScalar(
-    std::span<const uint8_t> data, wire::WireType type, T& v, int& consumed, bool zigzag = false) {
+inline constexpr bool IsPackable = std::is_arithmetic_v<T>;
+
+template <class T>
+inline Status UnmarshalScalar(std::span<const uint8_t> data,
+                              wire::WireType type,
+                              T& v,
+                              int& consumed,
+                              bool zigzag,
+                              int depth,
+                              const Limits& lim) {
   if constexpr (std::is_same_v<T, bool>) {
     uint64_t x;
     int n = wire::ConsumeVarint(data, x);
@@ -344,25 +430,30 @@ inline Status UnmarshalScalar(
     int n = wire::ConsumeBytes(data, bytes);
     if (n < 0) return Status::Error("corrupt BigInt");
     consumed = n;
+    if (depth + 1 > lim.max_depth) return DepthError(lim);
     return UnmarshalBigIntMsg(bytes, v);
   } else if constexpr (std::is_same_v<T, Decimal>) {
     std::span<const uint8_t> bytes;
     int n = wire::ConsumeBytes(data, bytes);
     if (n < 0) return Status::Error("corrupt Decimal");
     consumed = n;
-    return UnmarshalDecimalMsg(bytes, v);
+    if (depth + 1 > lim.max_depth) return DepthError(lim);
+    return UnmarshalDecimalMsg(bytes, v, lim.max_digits);
   } else if constexpr (std::is_same_v<T, BigFloat>) {
     std::span<const uint8_t> bytes;
     int n = wire::ConsumeBytes(data, bytes);
     if (n < 0) return Status::Error("corrupt BigFloat");
     consumed = n;
+    if (depth + 1 > lim.max_depth) return DepthError(lim);
     return UnmarshalBigFloatMsg(bytes, v);
   } else if constexpr (HasFields<T>::value) {
     std::span<const uint8_t> bytes;
     int n = wire::ConsumeBytes(data, bytes);
     if (n < 0) return Status::Error("corrupt embedded message");
     consumed = n;
-    return UnmarshalStruct(bytes, v);
+    // The submessage is decoded from a fresh span; the counter goes with
+    // it rather than restarting at zero.
+    return UnmarshalStruct(bytes, v, depth + 1, lim);
   } else {
     static_assert(sizeof(T) == 0, "protowire::pb: unsupported field type");
   }
@@ -375,18 +466,20 @@ inline Status UnmarshalField(std::span<const uint8_t> data,
                              wire::WireType type,
                              T& v,
                              int& consumed,
-                             bool zigzag = false) {
+                             bool zigzag,
+                             int depth,
+                             const Limits& lim) {
   if constexpr (IsOptional<T>::value) {
     using E = typename IsOptional<T>::element;
     E tmp{};
-    Status st = UnmarshalScalar(data, type, tmp, consumed, zigzag);
+    Status st = UnmarshalScalar(data, type, tmp, consumed, zigzag, depth, lim);
     if (!st.ok()) return st;
     v = std::move(tmp);
     return Status::OK();
   } else if constexpr (IsSmartPtr<T>::value) {
     using E = typename IsSmartPtr<T>::element;
     if (!v) v.reset(new E());
-    return UnmarshalScalar(data, type, *v, consumed, zigzag);
+    return UnmarshalScalar(data, type, *v, consumed, zigzag, depth, lim);
   } else if constexpr (IsMap<T>::value) {
     using K = typename IsMap<T>::key_type;
     using V = typename IsMap<T>::mapped_type;
@@ -394,6 +487,8 @@ inline Status UnmarshalField(std::span<const uint8_t> data,
     int n = wire::ConsumeBytes(data, entry_bytes);
     if (n < 0) return Status::Error("corrupt map entry");
     consumed = n;
+    // A map entry is a submessage: one descent (HARDENING.md § Recursion).
+    if (depth + 1 > lim.max_depth) return DepthError(lim);
     K key{};
     V val{};
     while (!entry_bytes.empty()) {
@@ -404,11 +499,11 @@ inline Status UnmarshalField(std::span<const uint8_t> data,
       entry_bytes = entry_bytes.subspan(en);
       int sub_consumed = 0;
       if (enum_num == 1) {
-        Status st = UnmarshalField(entry_bytes, 1, etyp, key, sub_consumed, zigzag);
+        Status st = UnmarshalField(entry_bytes, 1, etyp, key, sub_consumed, zigzag, depth + 1, lim);
         if (!st.ok()) return st;
         entry_bytes = entry_bytes.subspan(sub_consumed);
       } else if (enum_num == 2) {
-        Status st = UnmarshalField(entry_bytes, 2, etyp, val, sub_consumed, zigzag);
+        Status st = UnmarshalField(entry_bytes, 2, etyp, val, sub_consumed, zigzag, depth + 1, lim);
         if (!st.ok()) return st;
         entry_bytes = entry_bytes.subspan(sub_consumed);
       } else {
@@ -417,22 +512,57 @@ inline Status UnmarshalField(std::span<const uint8_t> data,
         entry_bytes = entry_bytes.subspan(skipped);
       }
     }
+    if (static_cast<int>(v.size()) >= lim.max_repeated && v.find(key) == v.end()) {
+      return Status::Error("map field exceeds MaxRepeatedCount=" +
+                           std::to_string(lim.max_repeated));
+    }
     v.insert_or_assign(std::move(key), std::move(val));
     return Status::OK();
   } else if constexpr (IsVector<T>::value && !std::is_same_v<T, std::vector<uint8_t>>) {
     using E = typename IsVector<T>::element;
+    if constexpr (IsPackable<E>) {
+      if (type == wire::kBytes) {
+        // Packed: a LEN record of concatenated elements, each read with
+        // its natural encoding. The count is checked before each append.
+        std::span<const uint8_t> payload;
+        int n = wire::ConsumeBytes(data, payload);
+        if (n < 0) return Status::Error("corrupt packed field");
+        consumed = n;
+        while (!payload.empty()) {
+          E tmp{};
+          int sub_consumed = 0;
+          Status st = UnmarshalScalar(payload, type, tmp, sub_consumed, zigzag, depth, lim);
+          if (!st.ok()) return st;
+          payload = payload.subspan(sub_consumed);
+          if (static_cast<int>(v.size()) >= lim.max_repeated) {
+            return Status::Error("repeated field exceeds MaxRepeatedCount=" +
+                                 std::to_string(lim.max_repeated));
+          }
+          v.push_back(tmp);
+        }
+        return Status::OK();
+      }
+    }
     E tmp{};
-    Status st = UnmarshalScalar(data, type, tmp, consumed, zigzag);
+    Status st = UnmarshalScalar(data, type, tmp, consumed, zigzag, depth, lim);
     if (!st.ok()) return st;
+    if (static_cast<int>(v.size()) >= lim.max_repeated) {
+      return Status::Error("repeated field exceeds MaxRepeatedCount=" +
+                           std::to_string(lim.max_repeated));
+    }
     v.push_back(std::move(tmp));
     return Status::OK();
   } else {
-    return UnmarshalScalar(data, type, v, consumed, zigzag);
+    return UnmarshalScalar(data, type, v, consumed, zigzag, depth, lim);
   }
 }
 
+// UnmarshalStruct decodes data into v. depth is the current submessage
+// depth — the root is 0, per HARDENING.md § Recursion, so a message exactly
+// max_depth submessages deep is accepted and one deeper is not.
 template <class T>
-inline Status UnmarshalStruct(std::span<const uint8_t> data, T& v) {
+inline Status UnmarshalStruct(std::span<const uint8_t> data, T& v, int depth, const Limits& lim) {
+  if (depth > lim.max_depth) return DepthError(lim);
   while (!data.empty()) {
     wire::FieldNumber num;
     wire::WireType type;
@@ -447,7 +577,7 @@ inline Status UnmarshalStruct(std::span<const uint8_t> data, T& v) {
         [&](auto&&... f) {
           (((!matched && f.number == num)
                 ? (matched = true,
-                   st = UnmarshalField(data, num, type, v.*(f.ptr), consumed, f.zigzag),
+                   st = UnmarshalField(data, num, type, v.*(f.ptr), consumed, f.zigzag, depth, lim),
                    0)
                 : 0),
            ...);
@@ -479,14 +609,20 @@ std::vector<uint8_t> Marshal(const T& v) {
 }
 
 template <class T>
-Status Unmarshal(std::span<const uint8_t> data, T& v) {
+Status Unmarshal(std::span<const uint8_t> data, T& v, UnmarshalOptions opts) {
   static_assert(HasFields<T>::value, "Unmarshal: type must declare PROTOWIRE_FIELDS(...)");
-  return detail::UnmarshalStruct(data, v);
+  detail::Limits lim = detail::ResolveLimits(opts);
+  // MaxMessageSize is checked before anything is read.
+  if (data.size() > static_cast<size_t>(lim.max_message_size)) {
+    return Status::Error("input of " + std::to_string(data.size()) +
+                         " bytes exceeds MaxMessageSize=" + std::to_string(lim.max_message_size));
+  }
+  return detail::UnmarshalStruct(data, v, /*depth=*/0, lim);
 }
 
 template <class T>
-Status Unmarshal(const std::vector<uint8_t>& data, T& v) {
-  return Unmarshal(std::span<const uint8_t>(data.data(), data.size()), v);
+Status Unmarshal(const std::vector<uint8_t>& data, T& v, UnmarshalOptions opts = {}) {
+  return Unmarshal(std::span<const uint8_t>(data.data(), data.size()), v, opts);
 }
 
 }  // namespace protowire::pb

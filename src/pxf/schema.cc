@@ -9,6 +9,8 @@
 
 #include <google/protobuf/descriptor.h>
 
+#include "protowire/pxf/annotations.h"
+
 namespace protowire::pxf {
 
 namespace {
@@ -51,12 +53,42 @@ void WalkEnumsForMessage(const std::string& path,
   }
 }
 
+// CheckKeyOption validates the placement of a (pxf.key) annotation on f
+// per draft -01 §3.13: the annotated field must be a repeated
+// message-typed field, and the annotation value must name a singular
+// string field of the element message.
+void CheckKeyOption(const std::string& path,
+                    const pb::FieldDescriptor* f,
+                    const std::string& key_name,
+                    std::vector<Violation>* out) {
+  auto violation = [&](std::string detail) {
+    out->push_back(Violation{
+        path, std::string(f->full_name()), key_name, ViolationKind::kKeyOption, std::move(detail)});
+  };
+  if (!f->is_repeated() || f->is_map() || f->cpp_type() != pb::FieldDescriptor::CPPTYPE_MESSAGE) {
+    violation("(pxf.key) is valid only on repeated message-typed fields");
+    return;
+  }
+  const pb::FieldDescriptor* kf = f->message_type()->FindFieldByName(key_name);
+  if (kf == nullptr) {
+    violation("element message " + std::string(f->message_type()->full_name()) +
+              " has no field \"" + key_name + "\"");
+    return;
+  }
+  if (kf->is_repeated() || kf->is_map() || kf->type() != pb::FieldDescriptor::TYPE_STRING) {
+    violation("key field " + std::string(kf->full_name()) + " must be a singular string field");
+  }
+}
+
 void WalkMessages(const std::string& path, const pb::Descriptor* md, std::vector<Violation>* out) {
   for (int i = 0; i < md->field_count(); ++i) {
     const pb::FieldDescriptor* f = md->field(i);
     if (IsReservedName(f->name())) {
       out->push_back(Violation{
           path, std::string(f->full_name()), std::string(f->name()), ViolationKind::kField});
+    }
+    if (auto key = KeyFieldName(f); key.has_value()) {
+      CheckKeyOption(path, f, *key, out);
     }
   }
   // Skip synthetic oneofs (those generated for proto3 optional fields).
@@ -89,11 +121,17 @@ const char* ViolationKindName(ViolationKind k) {
       return "oneof";
     case ViolationKind::kEnumValue:
       return "enum value";
+    case ViolationKind::kKeyOption:
+      return "(pxf.key) placement";
   }
   return "unknown";
 }
 
 std::string Violation::ToString() const {
+  if (kind == ViolationKind::kKeyOption) {
+    return file + ": field \"" + element + "\" carries (pxf.key) = \"" + name + "\": " + detail +
+           " (draft -01 §3.13)";
+  }
   return file + ": " + ViolationKindName(kind) + " \"" + element + "\" uses PXF-reserved name \"" +
          name + "\" (draft §3.13)";
 }
