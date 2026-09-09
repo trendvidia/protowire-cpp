@@ -11,6 +11,61 @@ format changes.
 
 ## [Unreleased]
 
+### Security
+
+- **HARDENING.md § Mandatory limits are enforced, configurable per
+  call, and the adversarial corpus passes on every row** (#26, #25;
+  draft `-01` § Mandatory Limits, protowire#299, #301). Measured on
+  `main` at 2a8c854 with the spec repo's `cross_security_check.sh`, ten
+  of the port's rows failed: no PXF depth cap at all (200 and 1000
+  levels accepted, 100 000 levels a stack overflow, 101 levels of blocks
+  or lists accepted), a `\xFF\xFE` escape accepted into a proto3
+  string, a 5000-digit literal accepted on a `pxf.BigInt`, and the
+  three SBE rows reported as crashes. **Cause:** never wired, not a
+  regression — no commit in this repository's history references
+  `MaxNestingDepth`, `check_decode` (#8) exited 2 for `--format sbe`
+  ("not implemented"), which the harness classifies as a crash, and its
+  PB leg went through libprotobuf's parser rather than this port's
+  codec. The gaps #1 recorded at M8 were closed without landing.
+  - `pxf::UnmarshalOptions` gains `max_message_size`,
+    `max_nesting_depth`, `max_numeric_literal_digits`,
+    `max_bytes_literal_length` and `max_repeated_count` (0 = the default
+    in the new `protowire/limits.h`); `Parse` takes a `ParseOptions`
+    with the first, second and fourth. The input size is checked before
+    the first token; every `{` or `[` is one descent from a root at 0,
+    counted identically by `Parse` and `Unmarshal`, so exactly 100
+    descents decode and 101 do not; a `b"…"` literal is refused from its
+    length before it is decoded; a repeated or map field is refused
+    before its element past the bound is allocated; a literal bound to
+    `pxf.BigInt` / `Decimal` / `BigFloat` is refused past 4096 digits;
+    a proto3 `string` field (scalar, repeated, map key) refuses invalid
+    UTF-8 from `\xHH` / `\NNN` escapes or raw bytes, while `bytes` fields
+    take them. The decoder now surfaces the lexer's own diagnostic for an
+    ILLEGAL token instead of "expected string".
+  - `pb::Unmarshal` takes a `pb::UnmarshalOptions` (`max_message_size`,
+    `max_nesting_depth`, `max_numeric_literal_digits`,
+    `max_repeated_count`). The depth counter is threaded through nested
+    submessages, map entries and big-number messages rather than reset
+    by the fresh span; `pxf.Decimal.scale` is bounded to ±4096 on the
+    wire (protowire#279); and repeated numeric fields decode from the
+    **packed** form every other encoder in the family writes — before,
+    `0a 03 01 02 03` read as one element and corrupt tags.
+  - `sbe::Codec::New` takes a `sbe::CodecOptions` (`max_message_size`,
+    `max_repeated_count`). `Unmarshal` and `NewView` validate the header
+    (template id, wire block ≥ template block) and every group header
+    before any entry is allocated: wire entry block ≥ template's, no
+    zero-length block with a non-zero count, count × block within the
+    remaining input (as a division, so it cannot overflow), count within
+    `MaxRepeatedCount`. `GroupView::Entry` past the count reads as an
+    empty view instead of a span past the buffer. A `char[]` decoded into
+    a proto3 string refuses invalid UTF-8.
+  - `check_decode` gains `--limit NAME=VALUE`, decodes `--format sbe`
+    through the codec, and `--format pb` through this port's codec with
+    hand-mirrored `adversarial.proto` types, as the Go reference does.
+    All 38 (port, corpus) pairs pass, including the twelve `limits` rows
+    and the three `pb/decimal-*` rows the manifest skipped for this
+    port.
+
 ## [1.0.0] — 2026-05-13
 
 First major-version cut. Implements the three one-time spec changes
