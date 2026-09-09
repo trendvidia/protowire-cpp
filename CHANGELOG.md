@@ -34,6 +34,26 @@ format changes.
   `"false"` quoted, and anything else is an error naming the key and
   field; on a string `K` the bare keyword is an error that says to
   write it quoted.
+  
+- **pxf: the lexer reads fractional and `µs` duration literals** (#20).
+  `1.5ms`, `1.234567ms`, `312.5µs`, `1h30m0.5s` and `-2.5s` — the forms
+  every port's encoder writes for a `google.protobuf.Duration` that is
+  not a whole multiple of its largest unit — tokenised as a float
+  followed by an identifier (or an integer followed by a stray byte for
+  the two-byte `µ`), so this port could not read its own output for any
+  measured latency. `LexNumber` now consumes an optional fraction first
+  and takes the duration branch when a time unit follows; the duration
+  scan admits `.` before a digit and the `C2 B5` micro sign (U+00B5
+  only — U+03BC is not in the grammar). Mirrors protowire-go#76.
+  
+- **detail: negative durations split toward zero, and the int64 edges
+  round-trip** (absorbed into #20). `ParseDuration` normalised nanos into
+  `[0, 1e9)`, so `-1ns` decoded to `seconds=-1, nanos=999999999`, which
+  `google.protobuf.Duration` forbids (nanos must carry the sign of the
+  value) and no other port reads back as `-1ns`; it now splits like
+  `time.Duration`. `FormatDuration` and `ParseDuration` take the
+  magnitude in unsigned arithmetic, so `INT64_MIN` formats as
+  `-2562047h47m16.854775808s` instead of a placeholder and reads back.
 
 ## [1.0.0] — 2026-05-13
 
