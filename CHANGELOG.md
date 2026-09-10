@@ -28,6 +28,18 @@ format changes.
   quarter of a small document's decode; the walk now costs ~160 ns.
   `UnmarshalOptions::skip_validate` remains the escape hatch for callers
   that validated once.
+  
+- **pb: repeated numeric fields are marshalled packed** (#32). `Marshal`
+  wrote one tag + value per element for every element type, so
+  `ListHolder { values: [1, 2, 3] }` was `08 01 08 02 08 03` where the
+  reference's `pb.Marshal` and every protoc-generated encoder write the
+  proto3 default `0a 03 01 02 03`. Bool, integer (zigzag honoured) and
+  float element types are now one LEN record of concatenated element
+  encodings, every element emitted, zeros included; strings, bytes and
+  messages stay one record per element, and an empty repeated field
+  writes nothing. The decoder has accepted both forms since #31; the
+  canonical envelope has no repeated numerics, so its bytes are
+  unchanged.
 
 ### Fixed
 

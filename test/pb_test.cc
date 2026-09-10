@@ -339,10 +339,14 @@ TEST(PbHardening, MessageSizeBound) {
 TEST(PbHardening, RepeatedCountBoundPackedAndUnpacked) {
   Node n;
   for (int i = 0; i < 16; ++i) n.values.push_back(i);
-  auto unpacked = Marshal(n);  // one record per element
-  // The same field packed: tag 3 LEN, then 16 varints.
-  std::vector<uint8_t> packed = {0x1a, 16};
-  for (int i = 0; i < 16; ++i) packed.push_back(static_cast<uint8_t>(i));
+  auto packed = Marshal(n);  // tag 3 LEN, then 16 varints (#32)
+  EXPECT_EQ(packed.size(), 18u);
+  // The same field one record per element, which a decoder must accept too.
+  std::vector<uint8_t> unpacked;
+  for (int i = 0; i < 16; ++i) {
+    unpacked.push_back(0x18);
+    unpacked.push_back(static_cast<uint8_t>(i));
+  }
   for (const auto& bytes : {unpacked, packed}) {
     protowire::pb::UnmarshalOptions opts;
     opts.max_repeated_count = 8;
@@ -415,4 +419,112 @@ TEST(PbHardening, DecimalScaleBound) {
   opts.max_numeric_literal_digits = 8;
   EXPECT_FALSE(Unmarshal(with_scale(9), got, opts).ok());
   EXPECT_TRUE(Unmarshal(with_scale(8), got, opts).ok());
+}
+
+// proto3 packs repeated numerics by default; the reference's pb.Marshal
+// and protoc-generated encoders write ListHolder { values: [1, 2, 3] } as
+// `0a 03 01 02 03`, and this codec wrote `08 01 08 02 08 03` (#32). Every
+// element is emitted — packed encoding has no per-element presence — and
+// an empty repeated field writes nothing.
+TEST(Pb, MarshalPacksRepeatedNumerics) {
+  struct Holder {
+    std::vector<int32_t> i32;
+    std::vector<int64_t> s64;
+    std::vector<uint32_t> u32;
+    std::vector<bool> b;
+    std::vector<float> f;
+    std::vector<double> d;
+    std::vector<std::string> strs;
+    PROTOWIRE_FIELDS(Holder,
+                     PROTOWIRE_FIELD(1, i32),
+                     PROTOWIRE_ZIGZAG(2, s64),
+                     PROTOWIRE_FIELD(3, u32),
+                     PROTOWIRE_FIELD(4, b),
+                     PROTOWIRE_FIELD(5, f),
+                     PROTOWIRE_FIELD(6, d),
+                     PROTOWIRE_FIELD(7, strs))
+  };
+  Holder h;
+  h.i32 = {1, 2, 3};
+  auto bytes = Marshal(h);
+  EXPECT_EQ(bytes, (std::vector<uint8_t>{0x0a, 0x03, 0x01, 0x02, 0x03}));
+
+  h.i32 = {0, -1};
+  h.s64 = {-1, 1};
+  h.u32 = {300};
+  h.b = {true, false};
+  h.f = {1.0f};
+  h.d = {2.0};
+  h.strs = {"a", "b"};
+  bytes = Marshal(h);
+  const std::vector<uint8_t> want = {
+      // i32 [0, -1]: 0 then the 10-byte sign-extended varint
+      0x0a,
+      0x0b,
+      0x00,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0x01,
+      // s64 zigzag [-1, 1] → [1, 2]
+      0x12,
+      0x02,
+      0x01,
+      0x02,
+      // u32 [300]
+      0x1a,
+      0x02,
+      0xac,
+      0x02,
+      // bool [true, false]
+      0x22,
+      0x02,
+      0x01,
+      0x00,
+      // float [1.0]
+      0x2a,
+      0x04,
+      0x00,
+      0x00,
+      0x80,
+      0x3f,
+      // double [2.0]
+      0x32,
+      0x08,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x40,
+      // strings stay one record per element
+      0x3a,
+      0x01,
+      0x61,
+      0x3a,
+      0x01,
+      0x62,
+  };
+  EXPECT_EQ(bytes, want);
+
+  Holder got;
+  ASSERT_TRUE(Unmarshal(bytes, got).ok());
+  EXPECT_EQ(got.i32, h.i32);
+  EXPECT_EQ(got.s64, h.s64);
+  EXPECT_EQ(got.u32, h.u32);
+  EXPECT_EQ(got.b, h.b);
+  EXPECT_EQ(got.f, h.f);
+  EXPECT_EQ(got.d, h.d);
+  EXPECT_EQ(got.strs, h.strs);
+
+  Holder empty;
+  EXPECT_TRUE(Marshal(empty).empty());
 }

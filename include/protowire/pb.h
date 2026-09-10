@@ -27,7 +27,8 @@
 //   bool, integers (proto3 int32/int64 plain varint by default; PROTOWIRE_ZIGZAG
 //   selects sint32/sint64 zigzag), float/double, std::string,
 //   std::vector<uint8_t> (bytes), nested struct (must also use the macros),
-//   std::vector<T> (repeated; one tag+value per element),
+//   std::vector<T> (repeated; numeric element types packed as proto3 does,
+//   other element types one tag+value per element),
 //   std::optional<T> (presence — zero values still emitted when set),
 //   std::unique_ptr<T> / std::shared_ptr<T> (presence — null skipped on wire),
 //   std::map<K,V> / std::unordered_map<K,V> (proto3 maps as repeated MapEntry).
@@ -240,6 +241,38 @@ inline bool IsZeroValue(const T& v) {
   }
 }
 
+// IsPackable: proto3 encodes a repeated field of these element types
+// packed by default — one LEN record carrying the concatenated element
+// encodings. The marshaller writes that form and the decoder accepts both
+// it and the one-record-per-element form.
+template <class T>
+inline constexpr bool IsPackable = std::is_arithmetic_v<T>;
+
+// AppendPackedElement writes one element of a packed repeated field: the
+// value encoding alone, with no tag.
+template <class T>
+inline void AppendPackedElement(std::vector<uint8_t>& payload, T v, bool zigzag) {
+  if constexpr (std::is_same_v<T, bool>) {
+    wire::AppendVarint(payload, v ? 1 : 0);
+  } else if constexpr (std::is_same_v<T, double>) {
+    uint64_t bits;
+    std::memcpy(&bits, &v, 8);
+    wire::AppendFixed64(payload, bits);
+  } else if constexpr (std::is_same_v<T, float>) {
+    uint32_t bits;
+    std::memcpy(&bits, &v, 4);
+    wire::AppendFixed32(payload, bits);
+  } else if constexpr (std::is_signed_v<T>) {
+    if (zigzag) {
+      wire::AppendVarint(payload, wire::EncodeZigZag(static_cast<int64_t>(v)));
+    } else {
+      wire::AppendVarint(payload, static_cast<uint64_t>(static_cast<int64_t>(v)));
+    }
+  } else {
+    wire::AppendVarint(payload, static_cast<uint64_t>(v));
+  }
+}
+
 template <class T>
 inline void MarshalScalar(std::vector<uint8_t>& out,
                           uint32_t num,
@@ -348,7 +381,21 @@ inline void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v, bo
     }
     return;
   } else if constexpr (IsVector<T>::value && !std::is_same_v<T, std::vector<uint8_t>>) {
-    for (const auto& el : v) MarshalScalar(out, num, el, zigzag);
+    using E = typename IsVector<T>::element;
+    if (v.empty()) return;
+    if constexpr (IsPackable<E>) {
+      // Repeated numeric scalars: packed, the proto3 default and what
+      // every other encoder in the family writes — one LEN record
+      // carrying the concatenated element encodings. Packed encoding has
+      // no per-element presence, so every element is emitted, zeros
+      // included (#32).
+      std::vector<uint8_t> payload;
+      for (const auto& el : v) AppendPackedElement(payload, static_cast<E>(el), zigzag);
+      wire::AppendTag(out, num, wire::kBytes);
+      wire::AppendBytes(out, payload);
+    } else {
+      for (const auto& el : v) MarshalScalar(out, num, el, zigzag);
+    }
   } else {
     if (IsZeroValue(v)) return;
     MarshalScalar(out, num, v, zigzag);
@@ -362,13 +409,6 @@ inline void MarshalStruct(const T& v, std::vector<uint8_t>& out) {
 }
 
 // ---- Unmarshal dispatch -------------------------------------------------
-
-// IsPackable: proto3 encodes a repeated field of these element types
-// packed by default — one LEN record carrying the concatenated element
-// encodings — and a decoder must accept both the packed and the
-// one-record-per-element form.
-template <class T>
-inline constexpr bool IsPackable = std::is_arithmetic_v<T>;
 
 template <class T>
 inline Status UnmarshalScalar(std::span<const uint8_t> data,
