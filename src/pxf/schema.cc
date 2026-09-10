@@ -141,16 +141,61 @@ std::vector<Violation> ValidateDescriptor(const pb::Descriptor* desc) {
   return ValidateFile(desc->file());
 }
 
-std::vector<Violation> ValidateFile(const pb::FileDescriptor* fd) {
-  if (fd == nullptr) return {};
-  std::vector<Violation> out;
+namespace {
+
+// FileViolations appends one file's own violations, in walk order.
+void FileViolations(const pb::FileDescriptor* fd, std::vector<Violation>* out) {
   std::string path(fd->name());
   for (int i = 0; i < fd->message_type_count(); ++i) {
-    WalkMessages(path, fd->message_type(i), &out);
+    WalkMessages(path, fd->message_type(i), out);
   }
-  WalkEnumsForFile(path, fd, &out);
-  // Stable, deterministic output keyed by element FQN.
-  std::sort(out.begin(), out.end(), [](const Violation& a, const Violation& b) {
+  WalkEnumsForFile(path, fd, out);
+}
+
+// ClosureWalk carries the state of one ValidateFile traversal over the
+// import closure (draft -01 § Scope of Bind-Time Checks). Deduplication
+// is by path rather than by descriptor identity: within one closure a
+// path names one file, and the diamond — A imports B and C, both
+// importing D — is the common shape that would otherwise report D's
+// violations twice. Import closures are small, so a linear scan of the
+// seen paths beats a map.
+struct ClosureWalk {
+  std::vector<std::string> seen;
+  std::vector<Violation> out;
+
+  void Walk(const pb::FileDescriptor* fd) {
+    if (fd == nullptr) return;
+    std::string path(fd->name());
+    // Google's own files — descriptor.proto and the well-known types —
+    // are in nearly every closure (every annotated schema imports
+    // pxf/annotations.proto and, through it, descriptor.proto: 54
+    // messages and enums no PXF document can name) and cannot carry a
+    // violation: they declare no null / true / false and import none of
+    // the annotations. Walking descriptor.proto measured ~1.1 µs, a
+    // quarter of a small document's decode, so it is skipped; the
+    // assumption is pinned by PxfSchema.GoogleProtobufFilesAreConformant,
+    // which validates each of them directly.
+    if (path.rfind("google/protobuf/", 0) == 0) return;
+    if (std::find(seen.begin(), seen.end(), path) != seen.end()) return;
+    seen.push_back(std::move(path));
+    FileViolations(fd, &out);
+    for (int i = 0; i < fd->dependency_count(); ++i) Walk(fd->dependency(i));
+  }
+};
+
+}  // namespace
+
+std::vector<Violation> ValidateFile(const pb::FileDescriptor* fd) {
+  if (fd == nullptr) return {};
+  ClosureWalk w;
+  w.Walk(fd);
+  std::vector<Violation> out = std::move(w.out);
+  // Stable, so the ties one field can produce (a reserved name and a
+  // (pxf.key) placement share an element) keep walk order. File first,
+  // so a multi-file closure reports one file's violations together;
+  // within a file this orders exactly as the single-file walk did.
+  std::stable_sort(out.begin(), out.end(), [](const Violation& a, const Violation& b) {
+    if (a.file != b.file) return a.file < b.file;
     return a.element < b.element;
   });
   return out;

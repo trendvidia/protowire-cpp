@@ -8,7 +8,8 @@
 // the declared element is unreachable from PXF surface syntax.
 //
 // Enforcement runs at descriptor-bind time inside Unmarshal /
-// UnmarshalFull. Callers that have already validated their descriptors
+// UnmarshalFull, over the bound file's import closure (draft -01 § Scope
+// of Bind-Time Checks). Callers that have already validated their descriptors
 // (typically via ValidateDescriptor in a one-time codegen or registry-
 // load pass) may set UnmarshalOptions::skip_validate to bypass the
 // per-call recheck.
@@ -53,18 +54,32 @@ struct Violation {
   std::string ToString() const;
 };
 
-// ValidateDescriptor walks the file containing `desc` and returns every
-// reserved-name collision among messages, oneofs, and enum values
-// reachable from that file. The returned vector is sorted by element
-// fully-qualified name for stable output. An empty vector means the
+// ValidateDescriptor walks the file containing `desc` together with its
+// transitive imports, and returns every bind-time violation in that
+// closure: reserved-name collisions among messages, oneofs, and enum
+// values, and invalid (pxf.key) placements (draft -01 §3.13). The
+// returned vector is sorted by declaring file path and then by element
+// fully-qualified name, for stable output. An empty vector means the
 // schema is conformant.
+//
+// Scope is the import closure, per draft -01 § Scope of Bind-Time
+// Checks: a misplaced annotation on a message type declared in an
+// imported .proto is reported here, whether or not any field of `desc`
+// refers to that type. Violation::file names the file that declares the
+// offending element, which need not be desc's own. The closure of any
+// schema using the annotations includes pxf/annotations.proto and,
+// through it, google/protobuf/descriptor.proto; callers that decode the
+// same schema repeatedly and have validated it once can set
+// UnmarshalOptions::skip_validate.
 //
 // The check is case-sensitive: identifiers such as "NULL" or "True"
 // lex as ordinary identifiers and are accepted.
 std::vector<Violation> ValidateDescriptor(const google::protobuf::Descriptor* desc);
 
-// ValidateFile walks `fd` and returns every reserved-name collision in
-// the file. See ValidateDescriptor for the rule and semantics.
+// ValidateFile walks `fd` and its transitive imports, and returns every
+// bind-time violation in that closure. See ValidateDescriptor for the
+// rules and the scope. Each file in the closure is checked once (the
+// diamond A → B, C → D reports D once).
 std::vector<Violation> ValidateFile(const google::protobuf::FileDescriptor* fd);
 
 // IsFutureReservedDirective returns true when `name` is one of the
