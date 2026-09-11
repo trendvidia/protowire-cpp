@@ -120,6 +120,8 @@ Cutting a release:
 1. Bump `project(... VERSION X.Y.Z ...)` in `CMakeLists.txt`.
 2. Add a `## [X.Y.Z]` section to `CHANGELOG.md`.
 3. Tag `vX.Y.Z` on `main`.
-4. The `.github/workflows/release.yml` workflow will produce build
-   artifacts and post a GitHub Release. (Conan / vcpkg distribution is
-   intentionally deferred to a later milestone.)
+4. Publish a GitHub Release on the tag (`gh release create vX.Y.Z`)
+   whose body summarises the new `CHANGELOG.md` section. There is no
+   release workflow and no build artifacts; consumers build from source
+   via the cmake flow above. (Conan / vcpkg distribution is intentionally
+   deferred to a later milestone.)
