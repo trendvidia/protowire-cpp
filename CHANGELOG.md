@@ -11,49 +11,7 @@ format changes.
 
 ## [Unreleased]
 
-### Fixed
-
-- **pxf: bind-time validation covers the import closure** (#34; draft
-  `-01` § Scope of Bind-Time Checks). `ValidateFile` and
-  `ValidateDescriptor` walked the declaring file only, so a field named
-  `null` or a misplaced `(pxf.key)` in an imported `.proto` bound
-  without a violation and was silently unhonoured when the decoder
-  reached it. They now walk the transitive imports, each file once
-  (the diamond A → B, C → D reports D once), and `Violation::file`
-  names the declaring file; results sort by file, then element.
-  `google/protobuf/*` files are skipped in the walk — they carry no PXF
-  annotation and no reserved name, pinned by a test that validates each
-  of them directly — because descriptor.proto sits in the closure of
-  every annotated schema and walking it measured 1.1 µs per decode, a
-  quarter of a small document's decode; the walk now costs ~160 ns.
-  `UnmarshalOptions::skip_validate` remains the escape hatch for callers
-  that validated once.
-  
-- **pb: repeated numeric fields are marshalled packed** (#32). `Marshal`
-  wrote one tag + value per element for every element type, so
-  `ListHolder { values: [1, 2, 3] }` was `08 01 08 02 08 03` where the
-  reference's `pb.Marshal` and every protoc-generated encoder write the
-  proto3 default `0a 03 01 02 03`. Bool, integer (zigzag honoured) and
-  float element types are now one LEN record of concatenated element
-  encodings, every element emitted, zeros included; strings, bytes and
-  messages stay one record per element, and an empty repeated field
-  writes nothing. The decoder has accepted both forms since #31; the
-  canonical envelope has no repeated numerics, so its bytes are
-  unchanged.
-
-### Fixed
-
-- **pxf: a dotted string map key is written bare** (#36; protowire#313,
-  decided as (a)). The identifier-safe test `Marshal` and
-  `FormatDocument` apply to a string map key stopped at `[A-Za-z0-9_]`,
-  while the grammar's *ident-part* — and the test keyed entry names use
-  — admits `.`, so a key `a.b` was marshalled `"a.b":` and a quoted
-  `"a.b"` kept its quotes through fmt, where the text says bare.
-  `IsIdentifierSafe` is `IsIdentifierSafeEntryName` now: one
-  identifier-safe rule for the document. `".e"` and `"1.5"` still fail
-  *ident-start* and stay quoted. The spec's third fmt pair,
-  `fmt-dotted-keys`, is vendored and pinned; the decoder always read
-  `a.b:` as one identifier, so only the writers move.
+## [1.1.0] — 2026-09-11
 
 ### Added
 
@@ -82,6 +40,102 @@ format changes.
   `KeyFieldName`, `KeyField` and `IsKeyed` are exported from
   `protowire/pxf/annotations.h`. The spec repo's `testdata/keyed/` is
   vendored and every fixture is pinned.
+
+### Fixed
+
+- **pxf: bind-time validation covers the import closure** (#34; draft
+  `-01` § Scope of Bind-Time Checks). `ValidateFile` and
+  `ValidateDescriptor` walked the declaring file only, so a field named
+  `null` or a misplaced `(pxf.key)` in an imported `.proto` bound
+  without a violation and was silently unhonoured when the decoder
+  reached it. They now walk the transitive imports, each file once
+  (the diamond A → B, C → D reports D once), and `Violation::file`
+  names the declaring file; results sort by file, then element.
+  `google/protobuf/*` files are skipped in the walk — they carry no PXF
+  annotation and no reserved name, pinned by a test that validates each
+  of them directly — because descriptor.proto sits in the closure of
+  every annotated schema and walking it measured 1.1 µs per decode, a
+  quarter of a small document's decode; the walk now costs ~160 ns.
+  `UnmarshalOptions::skip_validate` remains the escape hatch for callers
+  that validated once.
+
+- **pb: repeated numeric fields are marshalled packed** (#32). `Marshal`
+  wrote one tag + value per element for every element type, so
+  `ListHolder { values: [1, 2, 3] }` was `08 01 08 02 08 03` where the
+  reference's `pb.Marshal` and every protoc-generated encoder write the
+  proto3 default `0a 03 01 02 03`. Bool, integer (zigzag honoured) and
+  float element types are now one LEN record of concatenated element
+  encodings, every element emitted, zeros included; strings, bytes and
+  messages stay one record per element, and an empty repeated field
+  writes nothing. The decoder has accepted both forms since #31; the
+  canonical envelope has no repeated numerics, so its bytes are
+  unchanged.
+
+- **pxf: a dotted string map key is written bare** (#36; protowire#313,
+  decided as (a)). The identifier-safe test `Marshal` and
+  `FormatDocument` apply to a string map key stopped at `[A-Za-z0-9_]`,
+  while the grammar's *ident-part* — and the test keyed entry names use
+  — admits `.`, so a key `a.b` was marshalled `"a.b":` and a quoted
+  `"a.b"` kept its quotes through fmt, where the text says bare.
+  `IsIdentifierSafe` is `IsIdentifierSafeEntryName` now: one
+  identifier-safe rule for the document. `".e"` and `"1.5"` still fail
+  *ident-start* and stay quoted. The spec's third fmt pair,
+  `fmt-dotted-keys`, is vendored and pinned; the decoder always read
+  `a.b:` as one identifier, so only the writers move.
+
+- **pb: a map entry always carries key and value, zero-valued or not**
+  (#24; protowire#295, decided on protowire-go#105). `pb.h`'s map branch
+  applied proto3 zero-skip inside the entry, so `metadata { "": "" }`
+  serialised as an empty entry (`22022a00`) where protobuf-go, protoc and
+  C++ protobuf write `22062a040a001200`. Field 1 and field 2 of every
+  entry are now written unconditionally; a value held through
+  `std::optional` or a smart pointer that is unset is written as its zero
+  value. `dump_envelope --vector zero-map-entry` prints the bytes for the
+  cross-port gate's golden, and an unknown vector name exits 3 with
+  `not-implemented: <name>`.
+
+- **pxf fmt: the quotes on a string map key spelled like a keyword or an
+  integer are kept** (#27; draft `-01` § Entries and Keys, "Canonical
+  spelling of map keys", protowire#306). `FormatDocument` wrote every
+  identifier-shaped key bare, so `"true": "v"` on a `map<string, V>`
+  became `true: "v"` — a bool key, which no longer binds on a string
+  `K`. `MapEntry` gains `key_quoted`; a quoted key is unquoted only when
+  it is identifier-safe and not `null` / `true` / `false`, and a bare key
+  stays bare (so `404:` is no longer requoted on the way through fmt).
+  The marshaller uses the same test (`IsIdentifierSafe`, exported from
+  `protowire/pxf/format.h`), so `"123"`, `"true"` and `"null"` string
+  keys are written quoted; it also sorts bool keys (false, true). The
+  spec repo's `testdata/map-keys/` fixtures are vendored and pinned.
+
+- **pxf: bool map keys bind in exactly the grammar's spellings**
+  (absorbed into #27; protowire#284). The decoder bound any non-`true`
+  key on a `map<bool, V>` to `false` — `t`, `yes`, `"TRUE"`, `"0"` all
+  silently became a key the author did not write. A bool key is now
+  `true` / `false` bare (the keyword spelling, newly accepted as a map
+  key by the parser and decoder), `0` / `1` bare, or `"true"` /
+  `"false"` quoted, and anything else is an error naming the key and
+  field; on a string `K` the bare keyword is an error that says to
+  write it quoted.
+
+- **pxf: the lexer reads fractional and `µs` duration literals** (#20).
+  `1.5ms`, `1.234567ms`, `312.5µs`, `1h30m0.5s` and `-2.5s` — the forms
+  every port's encoder writes for a `google.protobuf.Duration` that is
+  not a whole multiple of its largest unit — tokenised as a float
+  followed by an identifier (or an integer followed by a stray byte for
+  the two-byte `µ`), so this port could not read its own output for any
+  measured latency. `LexNumber` now consumes an optional fraction first
+  and takes the duration branch when a time unit follows; the duration
+  scan admits `.` before a digit and the `C2 B5` micro sign (U+00B5
+  only — U+03BC is not in the grammar). Mirrors protowire-go#76.
+
+- **detail: negative durations split toward zero, and the int64 edges
+  round-trip** (absorbed into #20). `ParseDuration` normalised nanos into
+  `[0, 1e9)`, so `-1ns` decoded to `seconds=-1, nanos=999999999`, which
+  `google.protobuf.Duration` forbids (nanos must carry the sign of the
+  value) and no other port reads back as `-1ns`; it now splits like
+  `time.Duration`. `FormatDuration` and `ParseDuration` take the
+  magnitude in unsigned arithmetic, so `INT64_MIN` formats as
+  `-2562047h47m16.854775808s` instead of a placeholder and reads back.
 
 ### Security
 
@@ -137,64 +191,6 @@ format changes.
     All 38 (port, corpus) pairs pass, including the twelve `limits` rows
     and the three `pb/decimal-*` rows the manifest skipped for this
     port.
-
-### Fixed
-
-- **pb: a map entry always carries key and value, zero-valued or not**
-  (#24; protowire#295, decided on protowire-go#105). `pb.h`'s map branch
-  applied proto3 zero-skip inside the entry, so `metadata { "": "" }`
-  serialised as an empty entry (`22022a00`) where protobuf-go, protoc and
-  C++ protobuf write `22062a040a001200`. Field 1 and field 2 of every
-  entry are now written unconditionally; a value held through
-  `std::optional` or a smart pointer that is unset is written as its zero
-  value. `dump_envelope --vector zero-map-entry` prints the bytes for the
-  cross-port gate's golden, and an unknown vector name exits 3 with
-  `not-implemented: <name>`.
-  
-- **pxf fmt: the quotes on a string map key spelled like a keyword or an
-  integer are kept** (#27; draft `-01` § Entries and Keys, "Canonical
-  spelling of map keys", protowire#306). `FormatDocument` wrote every
-  identifier-shaped key bare, so `"true": "v"` on a `map<string, V>`
-  became `true: "v"` — a bool key, which no longer binds on a string
-  `K`. `MapEntry` gains `key_quoted`; a quoted key is unquoted only when
-  it is identifier-safe and not `null` / `true` / `false`, and a bare key
-  stays bare (so `404:` is no longer requoted on the way through fmt).
-  The marshaller uses the same test (`IsIdentifierSafe`, exported from
-  `protowire/pxf/format.h`), so `"123"`, `"true"` and `"null"` string
-  keys are written quoted; it also sorts bool keys (false, true). The
-  spec repo's `testdata/map-keys/` fixtures are vendored and pinned.
-  
-- **pxf: bool map keys bind in exactly the grammar's spellings**
-  (absorbed into #27; protowire#284). The decoder bound any non-`true`
-  key on a `map<bool, V>` to `false` — `t`, `yes`, `"TRUE"`, `"0"` all
-  silently became a key the author did not write. A bool key is now
-  `true` / `false` bare (the keyword spelling, newly accepted as a map
-  key by the parser and decoder), `0` / `1` bare, or `"true"` /
-  `"false"` quoted, and anything else is an error naming the key and
-  field; on a string `K` the bare keyword is an error that says to
-  write it quoted.
-
-
-  
-- **pxf: the lexer reads fractional and `µs` duration literals** (#20).
-  `1.5ms`, `1.234567ms`, `312.5µs`, `1h30m0.5s` and `-2.5s` — the forms
-  every port's encoder writes for a `google.protobuf.Duration` that is
-  not a whole multiple of its largest unit — tokenised as a float
-  followed by an identifier (or an integer followed by a stray byte for
-  the two-byte `µ`), so this port could not read its own output for any
-  measured latency. `LexNumber` now consumes an optional fraction first
-  and takes the duration branch when a time unit follows; the duration
-  scan admits `.` before a digit and the `C2 B5` micro sign (U+00B5
-  only — U+03BC is not in the grammar). Mirrors protowire-go#76.
-  
-- **detail: negative durations split toward zero, and the int64 edges
-  round-trip** (absorbed into #20). `ParseDuration` normalised nanos into
-  `[0, 1e9)`, so `-1ns` decoded to `seconds=-1, nanos=999999999`, which
-  `google.protobuf.Duration` forbids (nanos must carry the sign of the
-  value) and no other port reads back as `-1ns`; it now splits like
-  `time.Duration`. `FormatDuration` and `ParseDuration` take the
-  magnitude in unsigned arithmetic, so `INT64_MIN` formats as
-  `-2562047h47m16.854775808s` instead of a placeholder and reads back.
 
 ## [1.0.0] — 2026-05-13
 
