@@ -18,6 +18,10 @@ format changes.
   map-depth rows could not reach the decoder's map path. The decoders
   needed no change: they already count a map's `{` and every PB map entry
   toward `MaxNestingDepth`.
+  
+### Changed
+
+- **The vendored shared schemas are re-synced with [trendvidia/protos](https://github.com/trendvidia/protos) v0.1.2** ([trendvidia/protowire#447](https://github.com/trendvidia/protowire/issues/447)). They gain protos' file options, and `envelope.proto`'s `go_package` now names a published package. Declarations and field numbers are unchanged, and so is this port's public API.
 
 ## [1.1.0] — 2026-09-11
 
