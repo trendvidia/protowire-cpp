@@ -11,6 +11,8 @@ format changes.
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-10-31
+
 ### Fixed
 
 - **`pxf::Marshal` refuses a `pxf.Decimal` past the bounds, and no longer hangs** (protowire#448). A scale near `INT32_MAX` padded one digit at a time, so five input bytes took the encoder effectively forever. A scale past `MaxNumericLiteralDigits` on either sign now fails before any work, as does a `BigInt` or `Decimal` literal past the digit cap. This reaches a message read by a protobuf runtime, which the PB decoder's own bound doesn't cover.
