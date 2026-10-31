@@ -11,6 +11,14 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`check_decode`'s `Tree` has `branches` and `tags`** (protowire#449).
+  Without them the PB leg skipped both fields as unknown, so the corpus's
+  map-depth rows could not reach the decoder's map path. The decoders
+  needed no change: they already count a map's `{` and every PB map entry
+  toward `MaxNestingDepth`.
+
 ## [1.1.0] — 2026-09-11
 
 ### Added
