@@ -304,7 +304,9 @@ bool PxfDecode(std::string_view data,
 // and bounding nothing, and they are then written as PXF. pb::Unmarshal is
 // bypassed on purpose, or it would refuse the row and the encoder would go
 // untested, which is how a hang here stayed hidden (protowire#448).
-bool PbRender(const std::string& data, const std::string& schema, const std::string& proto_path,
+bool PbRender(const std::string& data,
+              const std::string& schema,
+              const std::string& proto_path,
               std::string* err) {
   if (proto_path.empty()) {
     *err = "--proto is required for format=pb-render";

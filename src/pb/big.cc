@@ -155,9 +155,9 @@ StatusOr<std::string> BoundLiteral(const char* kind, std::string literal) {
   if (literal.size() > static_cast<size_t>(kMaxNumericLiteralDigits)) {
     size_t n = SignificantDigits(literal);
     if (n > static_cast<size_t>(kMaxNumericLiteralDigits)) {
-      return Status::Error(std::string(kind) + " renders to " + std::to_string(n) +
-                           " digits; MaxNumericLiteralDigits=" +
-                           std::to_string(kMaxNumericLiteralDigits));
+      return Status::Error(
+          std::string(kind) + " renders to " + std::to_string(n) +
+          " digits; MaxNumericLiteralDigits=" + std::to_string(kMaxNumericLiteralDigits));
     }
   }
   return literal;
@@ -175,9 +175,9 @@ StatusOr<std::string> FormatDecimal(const Decimal& v) {
   // Compared as int64 so -scale is defined at INT32_MIN.
   const int64_t scale = v.scale;
   if (scale > kMaxNumericLiteralDigits || scale < -int64_t{kMaxNumericLiteralDigits}) {
-    return Status::Error("pxf.Decimal scale " + std::to_string(scale) +
-                         " exceeds MaxNumericLiteralDigits=" +
-                         std::to_string(kMaxNumericLiteralDigits));
+    return Status::Error(
+        "pxf.Decimal scale " + std::to_string(scale) +
+        " exceeds MaxNumericLiteralDigits=" + std::to_string(kMaxNumericLiteralDigits));
   }
   std::string digits = FormatMagnitude(v.unscaled);
   std::string out;

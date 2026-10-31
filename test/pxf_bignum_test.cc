@@ -7,9 +7,9 @@
 #include <gtest/gtest.h>
 #include "protoc_compat.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <cstdint>
 #include <memory>
 #include <string>
 

@@ -6,7 +6,9 @@
 #include <string>
 #include <vector>
 
-#include "protowire/detail/status.h"
+// Relative, because clang-tidy runs on this header with flags it infers, and
+// they do not always carry the include root.
+#include "detail/status.h"
 
 namespace protowire::pb {
 
