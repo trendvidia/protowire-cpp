@@ -49,7 +49,9 @@ const char* ViolationKindName(ViolationKind k);
 struct Violation {
   std::string file;     // .proto file path the offending element is declared in
   std::string element;  // fully-qualified protobuf name (e.g. "trades.v1.Side.null")
-  std::string name;     // bare reserved identifier, or the (pxf.key) value for kKeyOption
+  // Bare reserved identifier, the (pxf.key) value for kKeyOption, or the
+  // (pxf.default) literal for kRequiredOption beside a default.
+  std::string name;
   ViolationKind kind = ViolationKind::kField;
   std::string detail;  // human-readable explanation; set for kKeyOption and kRequiredOption
 
