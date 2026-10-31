@@ -7,6 +7,11 @@ package pxf;
 
 import "google/protobuf/descriptor.proto";
 
+option csharp_namespace = "Protowire.Pxf";
+option go_package = "github.com/trendvidia/protos/pxf;pxf";
+option java_multiple_files = true;
+option java_package = "org.protowire.proto.pxf";
+
 // Extension numbers live in protowire's block in the global extension
 // registry, 1314–1363, granted by protocolbuffers/protobuf#28919; the PXF
 // sub-range is 1314–1318 (STABILITY.md promise 3). Before the block existed
