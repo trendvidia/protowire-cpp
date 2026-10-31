@@ -13,6 +13,15 @@ format changes.
 
 ### Fixed
 
+- **`pxf::Marshal` refuses a `pxf.Decimal` past the bounds, and no longer hangs** (protowire#448). A scale near `INT32_MAX` padded one digit at a time, so five input bytes took the encoder effectively forever. A scale past `MaxNumericLiteralDigits` on either sign now fails before any work, as does a `BigInt` or `Decimal` literal past the digit cap. This reaches a message read by a protobuf runtime, which the PB decoder's own bound doesn't cover.
+- **A negative `Decimal` scale keeps its value.** It was dropped, so `5` at scale `-2` was written as `5` rather than `500`.
+
+### Changed
+
+- **`FormatBigInt`, `FormatDecimal`, `ReadBigIntAsString` and `ReadDecimalAsString` return `StatusOr<std::string>`,** so they can refuse a value.
+
+### Fixed
+
 - **`(pxf.required)` with `(pxf.default)` on one field is a bind-time
   violation** (#50), as draft -01 now requires (protowire#453).
   `ValidateFile` reports it as `ViolationKind::kRequiredOption`, over the

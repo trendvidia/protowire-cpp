@@ -10,6 +10,8 @@
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/message.h>
 
+#include "protowire/detail/status.h"
+
 namespace protowire::pxf {
 
 // Detection helpers for google.protobuf.* well-known types.
@@ -42,8 +44,8 @@ bool SetBigIntFromString(google::protobuf::Message* msg, std::string_view litera
 bool SetDecimalFromString(google::protobuf::Message* msg, std::string_view literal);
 bool SetBigFloatFromString(google::protobuf::Message* msg, std::string_view literal);
 
-std::string ReadBigIntAsString(const google::protobuf::Message& msg);
-std::string ReadDecimalAsString(const google::protobuf::Message& msg);
+StatusOr<std::string> ReadBigIntAsString(const google::protobuf::Message& msg);
+StatusOr<std::string> ReadDecimalAsString(const google::protobuf::Message& msg);
 std::string ReadBigFloatAsString(const google::protobuf::Message& msg);
 
 // Locates the `_null` `google.protobuf.FieldMask` field on a descriptor used

@@ -207,14 +207,14 @@ bool SetBigFloatFromString(pb::Message* msg, std::string_view literal) {
   return true;
 }
 
-std::string ReadBigIntAsString(const pb::Message& msg) {
+StatusOr<std::string> ReadBigIntAsString(const pb::Message& msg) {
   protowire::pb::BigInt bi;
   bi.abs = GetBytes(msg, "abs");
   bi.negative = GetBoolField(msg, "negative");
   return protowire::pb::FormatBigInt(bi);
 }
 
-std::string ReadDecimalAsString(const pb::Message& msg) {
+StatusOr<std::string> ReadDecimalAsString(const pb::Message& msg) {
   protowire::pb::Decimal d;
   d.unscaled = GetBytes(msg, "unscaled");
   d.scale = GetInt32Field(msg, "scale");

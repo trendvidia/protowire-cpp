@@ -167,36 +167,36 @@ TEST(Pb, ParseFormatBigInt) {
   BigInt b;
   ASSERT_TRUE(protowire::pb::ParseBigInt("12345678901234567890", b));
   EXPECT_FALSE(b.negative);
-  EXPECT_EQ(protowire::pb::FormatBigInt(b), "12345678901234567890");
+  EXPECT_EQ(*protowire::pb::FormatBigInt(b), "12345678901234567890");
 
   BigInt n;
   ASSERT_TRUE(protowire::pb::ParseBigInt("-42", n));
   EXPECT_TRUE(n.negative);
-  EXPECT_EQ(protowire::pb::FormatBigInt(n), "-42");
+  EXPECT_EQ(*protowire::pb::FormatBigInt(n), "-42");
 
   BigInt z;
   ASSERT_TRUE(protowire::pb::ParseBigInt("0", z));
   EXPECT_FALSE(z.negative);
   EXPECT_TRUE(z.abs.empty());
-  EXPECT_EQ(protowire::pb::FormatBigInt(z), "0");
+  EXPECT_EQ(*protowire::pb::FormatBigInt(z), "0");
 }
 
 TEST(Pb, ParseFormatDecimal) {
   Decimal d;
   ASSERT_TRUE(protowire::pb::ParseDecimal("3.14", d));
   EXPECT_EQ(d.scale, 2);
-  EXPECT_EQ(protowire::pb::FormatDecimal(d), "3.14");
+  EXPECT_EQ(*protowire::pb::FormatDecimal(d), "3.14");
 
   Decimal small;
   ASSERT_TRUE(protowire::pb::ParseDecimal("0.05", small));
   EXPECT_EQ(small.scale, 2);
-  EXPECT_EQ(protowire::pb::FormatDecimal(small), "0.05");
+  EXPECT_EQ(*protowire::pb::FormatDecimal(small), "0.05");
 
   Decimal neg;
   ASSERT_TRUE(protowire::pb::ParseDecimal("-1.000", neg));
   EXPECT_TRUE(neg.negative);
   EXPECT_EQ(neg.scale, 3);
-  EXPECT_EQ(protowire::pb::FormatDecimal(neg), "-1.000");
+  EXPECT_EQ(*protowire::pb::FormatDecimal(neg), "-1.000");
 }
 
 struct WithZigZag {
