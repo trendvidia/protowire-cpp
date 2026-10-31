@@ -23,6 +23,12 @@ format changes.
   reference, instead of `PXF schema reserved-name violations:`, because
   it no longer lists only reserved names.
 
+- **`check_decode`'s `Tree` has `branches` and `tags`** (protowire#449).
+  Without them the PB leg skipped both fields as unknown, so the corpus's
+  map-depth rows could not reach the decoder's map path. The decoders
+  needed no change: they already count a map's `{` and every PB map entry
+  toward `MaxNestingDepth`.
+  
 ### Changed
 
 - **The vendored shared schemas are re-synced with [trendvidia/protos](https://github.com/trendvidia/protos) v0.1.2** ([trendvidia/protowire#447](https://github.com/trendvidia/protowire/issues/447)). They gain protos' file options, and `envelope.proto`'s `go_package` now names a published package. Declarations and field numbers are unchanged, and so is this port's public API.

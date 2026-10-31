@@ -40,6 +40,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <span>
 #include <sstream>
@@ -111,10 +112,16 @@ struct Tree {
   std::unique_ptr<Tree> child;
   std::string label;
   std::vector<Tree> children;
+  // Held by pointer so the map's value type is complete here, where the
+  // standard requires it; the wire form is the same as map<string, Tree>.
+  std::map<std::string, std::unique_ptr<Tree>> branches;
+  std::map<std::string, std::string> tags;
   PROTOWIRE_FIELDS(Tree,
                    PROTOWIRE_FIELD(1, child),
                    PROTOWIRE_FIELD(2, label),
-                   PROTOWIRE_FIELD(3, children))
+                   PROTOWIRE_FIELD(3, children),
+                   PROTOWIRE_FIELD(4, branches),
+                   PROTOWIRE_FIELD(5, tags))
 };
 
 struct StringHolder {
