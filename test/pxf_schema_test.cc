@@ -278,6 +278,7 @@ TEST_F(PxfSchema, ViolationKindNameRendersExpectedLabels) {
   EXPECT_STREQ(ViolationKindName(ViolationKind::kField), "message field");
   EXPECT_STREQ(ViolationKindName(ViolationKind::kOneof), "oneof");
   EXPECT_STREQ(ViolationKindName(ViolationKind::kEnumValue), "enum value");
+  EXPECT_STREQ(ViolationKindName(ViolationKind::kRequiredOption), "(pxf.required) placement");
 }
 
 // ---- Unmarshal-time integration (the decode gate) ------------------------
@@ -298,8 +299,7 @@ message Row {
 
   auto st = protowire::pxf::Unmarshal("a = 1\n", msg.get());
   ASSERT_FALSE(st.ok());
-  EXPECT_NE(std::string(st.message()).find("PXF schema reserved-name violations"),
-            std::string::npos);
+  EXPECT_NE(std::string(st.message()).find("PXF schema violations"), std::string::npos);
 }
 
 TEST_F(PxfSchema, UnmarshalSkipsValidateWhenOptionSet) {
@@ -342,8 +342,7 @@ message Row {
   std::unique_ptr<pb::Message> msg(factory.GetPrototype(fd->message_type(0))->New());
   auto r = protowire::pxf::UnmarshalFull("a = 1\n", msg.get());
   ASSERT_FALSE(r.ok());
-  EXPECT_NE(std::string(r.status().message()).find("PXF schema reserved-name violations"),
-            std::string::npos);
+  EXPECT_NE(std::string(r.status().message()).find("PXF schema violations"), std::string::npos);
 }
 
 // ---- import closure (draft -01 § Scope of Bind-Time Checks; #34) ---------
@@ -388,6 +387,99 @@ message Root { Imported inner = 1; }
   auto st = protowire::pxf::Unmarshal("", msg.get());
   ASSERT_FALSE(st.ok());
   EXPECT_NE(st.message().find("b_closure.proto"), std::string::npos) << st.ToString();
+}
+
+// ---- (pxf.required) with (pxf.default) (draft -01 "Required and Default") -
+
+// The pair is refused when the schema is bound, whatever the document
+// says, and the Status names the field. The document here supplies the
+// field, so a check deferred to an absent field would miss it.
+TEST_F(PxfSchema, RequiredWithDefaultRejected) {
+  const pb::FileDescriptor* fd = CompileFiles({{"req_def.proto", R"src(
+syntax = "proto3";
+package reqdef.v1;
+import "pxf/annotations.proto";
+message Row {
+  string f = 1 [(pxf.required) = true, (pxf.default) = "x"];
+  message Inner {
+    string empty = 1 [(pxf.required) = true, (pxf.default) = ""];
+  }
+}
+)src"}},
+                                              "req_def.proto");
+  ASSERT_NE(fd, nullptr) << errors_.last_;
+  auto vs = ValidateFile(fd);
+  ASSERT_EQ(vs.size(), 2u);
+  EXPECT_EQ(vs[0].element, "reqdef.v1.Row.Inner.empty");
+  EXPECT_EQ(vs[0].kind, ViolationKind::kRequiredOption);
+  EXPECT_EQ(vs[1].element, "reqdef.v1.Row.f");
+  EXPECT_EQ(vs[1].kind, ViolationKind::kRequiredOption);
+  EXPECT_NE(vs[1].ToString().find("(pxf.required) and (pxf.default) are exclusive on one field"),
+            std::string::npos)
+      << vs[1].ToString();
+
+  pb::DynamicMessageFactory factory(importer_->pool());
+  const pb::Descriptor* row = fd->message_type(0);
+  std::unique_ptr<pb::Message> msg(factory.GetPrototype(row)->New());
+  auto st = protowire::pxf::Unmarshal("f = \"given\"\n", msg.get());
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("reqdef.v1.Row.f"), std::string::npos) << st.ToString();
+  std::unique_ptr<pb::Message> full(factory.GetPrototype(row)->New());
+  auto r = protowire::pxf::UnmarshalFull("f = \"given\"\n", full.get());
+  ASSERT_FALSE(r.ok());
+  EXPECT_NE(r.status().message().find("are exclusive on one field"), std::string::npos)
+      << r.status().ToString();
+}
+
+// (pxf.required) = false requires nothing, so it does not conflict with a
+// default, and the default still applies.
+TEST_F(PxfSchema, RequiredFalseBesideDefaultAccepted) {
+  const pb::FileDescriptor* fd = CompileFiles({{"req_false.proto", R"src(
+syntax = "proto3";
+package reqfalse.v1;
+import "pxf/annotations.proto";
+message Row {
+  string f = 1 [(pxf.required) = false, (pxf.default) = "x"];
+}
+)src"}},
+                                              "req_false.proto");
+  ASSERT_NE(fd, nullptr) << errors_.last_;
+  EXPECT_TRUE(ValidateFile(fd).empty());
+
+  pb::DynamicMessageFactory factory(importer_->pool());
+  const pb::Descriptor* row = fd->message_type(0);
+  std::unique_ptr<pb::Message> msg(factory.GetPrototype(row)->New());
+  auto r = protowire::pxf::UnmarshalFull("", msg.get());
+  ASSERT_TRUE(r.ok()) << r.status().ToString();
+  EXPECT_EQ(msg->GetReflection()->GetString(*msg, row->FindFieldByName("f")), "x");
+}
+
+// The pair on a type only an import declares is refused too, even though
+// the bound message never refers to it (draft -01 § Scope of Bind-Time
+// Checks), and is attributed to the importing file's dependency.
+TEST_F(PxfSchema, RequiredWithDefaultInImportReported) {
+  const char* b = R"src(
+syntax = "proto3";
+package reqimp.v1;
+import "pxf/annotations.proto";
+message Unreferenced {
+  string f = 1 [(pxf.required) = true, (pxf.default) = "x"];
+}
+)src";
+  const char* a = R"src(
+syntax = "proto3";
+package reqimp.v1;
+import "b_req.proto";
+message Root { string s = 1; }
+)src";
+  const pb::FileDescriptor* fd =
+      CompileFiles({{"b_req.proto", b}, {"a_req.proto", a}}, "a_req.proto");
+  ASSERT_NE(fd, nullptr) << errors_.last_;
+  auto vs = ValidateDescriptor(fd->message_type(0));
+  ASSERT_EQ(vs.size(), 1u);
+  EXPECT_EQ(vs[0].file, "b_req.proto");
+  EXPECT_EQ(vs[0].element, "reqimp.v1.Unreferenced.f");
+  EXPECT_EQ(vs[0].kind, ViolationKind::kRequiredOption);
 }
 
 // The diamond — A imports B and C, both importing D — reports D's

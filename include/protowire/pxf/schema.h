@@ -35,6 +35,11 @@ enum class ViolationKind : uint8_t {
   // field that is not a repeated message-typed field, naming a field the
   // element message lacks, or naming one that is not a singular string.
   kKeyOption,
+  // (pxf.required) = true beside (pxf.default) on one field, which draft
+  // -01 §annotation-extensions ("Required and Default") forbids: the first
+  // rejects a document where the field is absent, and the second treats it
+  // as supplied.
+  kRequiredOption,
 };
 
 const char* ViolationKindName(ViolationKind k);
@@ -46,7 +51,7 @@ struct Violation {
   std::string element;  // fully-qualified protobuf name (e.g. "trades.v1.Side.null")
   std::string name;     // bare reserved identifier, or the (pxf.key) value for kKeyOption
   ViolationKind kind = ViolationKind::kField;
-  std::string detail;  // human-readable explanation; set for kKeyOption
+  std::string detail;  // human-readable explanation; set for kKeyOption and kRequiredOption
 
   // One-line human-readable description, e.g.
   //   "trades.proto: message field \"trades.v1.X.null\" uses PXF-reserved name \"null\" (draft
@@ -57,10 +62,12 @@ struct Violation {
 // ValidateDescriptor walks the file containing `desc` together with its
 // transitive imports, and returns every bind-time violation in that
 // closure: reserved-name collisions among messages, oneofs, and enum
-// values, and invalid (pxf.key) placements (draft -01 §3.13). The
-// returned vector is sorted by declaring file path and then by element
-// fully-qualified name, for stable output. An empty vector means the
-// schema is conformant.
+// values; invalid (pxf.key) placements (draft -01 §3.13); and
+// (pxf.required) with (pxf.default) on one field (draft -01
+// §annotation-extensions, "Required and Default"). (pxf.required) = false
+// demands nothing, so a default beside it stands. The returned vector is
+// sorted by declaring file path and then by element fully-qualified name,
+// for stable output. An empty vector means the schema is conformant.
 //
 // Scope is the import closure, per draft -01 § Scope of Bind-Time
 // Checks: a misplaced annotation on a message type declared in an
