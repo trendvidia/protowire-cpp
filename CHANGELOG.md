@@ -11,6 +11,18 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`(pxf.required)` with `(pxf.default)` on one field is a bind-time
+  violation** (#50), as draft -01 now requires (protowire#453).
+  `ValidateFile` reports it as `ViolationKind::kRequiredOption`, over the
+  import closure, and `Unmarshal` and `UnmarshalFull` refuse such a schema.
+  Such a schema used to bind here, and which option won depended on the
+  engine. `(pxf.required) = false` beside a default stays accepted. The
+  bind-failure `Status` now starts `PXF schema violations:`, as in the Go
+  reference, instead of `PXF schema reserved-name violations:`, because
+  it no longer lists only reserved names.
+
 ## [1.1.0] — 2026-09-11
 
 ### Added

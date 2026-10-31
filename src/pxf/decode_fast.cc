@@ -1776,15 +1776,15 @@ Status PostDecode(Message* msg,
 
 namespace {
 
-// CheckSchema runs the PXF schema reserved-name check (draft §3.13) on
-// the descriptor of `msg`. Returns a Status with the joined violation
+// CheckSchema runs the PXF schema's bind-time checks on the descriptor
+// of `msg`. Returns a Status with the joined violation
 // list on conflict, OK otherwise. Skipped when opts.skip_validate is
 // true.
 Status CheckSchema(const Message* msg, const UnmarshalOptions& opts) {
   if (opts.skip_validate) return Status::OK();
   auto vs = ValidateDescriptor(msg->GetDescriptor());
   if (vs.empty()) return Status::OK();
-  std::string msg_str = "PXF schema reserved-name violations:\n  ";
+  std::string msg_str = "PXF schema violations:\n  ";
   for (size_t i = 0; i < vs.size(); ++i) {
     if (i != 0) msg_str.append("\n  ");
     msg_str.append(vs[i].ToString());

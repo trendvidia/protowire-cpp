@@ -90,6 +90,15 @@ void WalkMessages(const std::string& path, const pb::Descriptor* md, std::vector
     if (auto key = KeyFieldName(f); key.has_value()) {
       CheckKeyOption(path, f, *key, out);
     }
+    if (IsRequired(f) && GetDefault(f).has_value()) {
+      out->push_back(Violation{path,
+                               std::string(f->full_name()),
+                               "",
+                               ViolationKind::kRequiredOption,
+                               "(pxf.required) and (pxf.default) are exclusive on one field: the "
+                               "first rejects a document where the field is absent, and the second "
+                               "treats it as supplied"});
+    }
   }
   // Skip synthetic oneofs (those generated for proto3 optional fields).
   // libprotobuf exposes a real oneof count and a "real" count; the
@@ -123,6 +132,8 @@ const char* ViolationKindName(ViolationKind k) {
       return "enum value";
     case ViolationKind::kKeyOption:
       return "(pxf.key) placement";
+    case ViolationKind::kRequiredOption:
+      return "(pxf.required) placement";
   }
   return "unknown";
 }
@@ -131,6 +142,10 @@ std::string Violation::ToString() const {
   if (kind == ViolationKind::kKeyOption) {
     return file + ": field \"" + element + "\" carries (pxf.key) = \"" + name + "\": " + detail +
            " (draft -01 §3.13)";
+  }
+  if (kind == ViolationKind::kRequiredOption) {
+    return file + ": field \"" + element + "\": invalid (pxf.required): " + detail +
+           " (draft -01 §annotation-extensions)";
   }
   return file + ": " + ViolationKindName(kind) + " \"" + element + "\" uses PXF-reserved name \"" +
          name + "\" (draft §3.13)";
