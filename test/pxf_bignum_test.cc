@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -119,6 +120,57 @@ price = -0.05
   auto out = protowire::pxf::Marshal(*msg);
   ASSERT_TRUE(out.ok());
   EXPECT_NE(out->find("price = -0.05"), std::string::npos);
+}
+
+// Sets Wallet.price from raw fields, as a protobuf runtime leaves it.
+static void SetPrice(pbuf::Message* msg, std::string unscaled, int32_t scale) {
+  const pbuf::Reflection* r = msg->GetReflection();
+  pbuf::Message* price = r->MutableMessage(msg, msg->GetDescriptor()->FindFieldByName("price"));
+  const pbuf::Reflection* pr = price->GetReflection();
+  const pbuf::Descriptor* pd = price->GetDescriptor();
+  pr->SetString(price, pd->FindFieldByName("unscaled"), std::move(unscaled));
+  pr->SetInt32(price, pd->FindFieldByName("scale"), scale);
+}
+
+// A producer of PXF text fails on a value past a bound (HARDENING.md §
+// Arbitrary-precision magnitudes), on both signs, before doing the work: the
+// scale is four bytes and was a hang at INT32_MAX.
+TEST_F(PxfBigNum, DecimalScalePastTheBoundIsRefused) {
+  for (int32_t scale : {4097, -4097, INT32_MAX, INT32_MIN}) {
+    auto msg = NewWallet();
+    SetPrice(msg.get(), "\x19", scale);
+    auto out = protowire::pxf::Marshal(*msg);
+    ASSERT_FALSE(out.ok()) << "scale " << scale;
+    EXPECT_NE(out.status().message().find("exceeds MaxNumericLiteralDigits"), std::string::npos)
+        << out.status().message();
+  }
+}
+
+TEST_F(PxfBigNum, DecimalNegativeScaleIsTrailingZeros) {
+  auto msg = NewWallet();
+  SetPrice(msg.get(), "\x05", -2);
+  auto out = protowire::pxf::Marshal(*msg);
+  ASSERT_TRUE(out.ok()) << out.status().ToString();
+  EXPECT_NE(out->find("price = 500"), std::string::npos) << *out;
+}
+
+// Scale 4096 is accepted, and leading zeros don't count toward the cap.
+TEST_F(PxfBigNum, DecimalAtTheBoundRenders) {
+  auto msg = NewWallet();
+  SetPrice(msg.get(), "\x05", 4096);
+  auto out = protowire::pxf::Marshal(*msg);
+  ASSERT_TRUE(out.ok()) << out.status().ToString();
+  EXPECT_NE(out->find("price = 0." + std::string(4095, '0') + "5"), std::string::npos);
+}
+
+// Trailing zeros are significant, so these have no literal.
+TEST_F(PxfBigNum, DecimalLiteralPastTheCapIsRefused) {
+  auto msg = NewWallet();
+  SetPrice(msg.get(), "\x0a", -4096);  // 4098 digits
+  auto out = protowire::pxf::Marshal(*msg);
+  ASSERT_FALSE(out.ok());
+  EXPECT_NE(out.status().message().find("renders to 4098 digits"), std::string::npos)
+      << out.status().message();
 }
 
 TEST_F(PxfBigNum, BigFloatRoundTripsApprox) {

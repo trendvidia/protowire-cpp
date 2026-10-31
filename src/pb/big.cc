@@ -136,27 +136,66 @@ bool ParseDecimal(const std::string& s, Decimal& out) {
   return true;
 }
 
-std::string FormatBigInt(const BigInt& v) {
-  std::string digits = FormatMagnitude(v.abs);
-  if (v.negative && !v.abs.empty()) return "-" + digits;
-  return digits;
+namespace {
+
+// The digits a literal is bounded by: leading zeros are not significant, so
+// 0.000…5 at the largest scale counts one.
+size_t SignificantDigits(const std::string& literal) {
+  size_t n = 0;
+  bool leading = true;
+  for (char c : literal) {
+    if (c < '0' || c > '9' || (leading && c == '0')) continue;
+    leading = false;
+    ++n;
+  }
+  return n;
 }
 
-std::string FormatDecimal(const Decimal& v) {
+StatusOr<std::string> BoundLiteral(const char* kind, std::string literal) {
+  if (literal.size() > static_cast<size_t>(kMaxNumericLiteralDigits)) {
+    size_t n = SignificantDigits(literal);
+    if (n > static_cast<size_t>(kMaxNumericLiteralDigits)) {
+      return Status::Error(std::string(kind) + " renders to " + std::to_string(n) +
+                           " digits; MaxNumericLiteralDigits=" +
+                           std::to_string(kMaxNumericLiteralDigits));
+    }
+  }
+  return literal;
+}
+
+}  // namespace
+
+StatusOr<std::string> FormatBigInt(const BigInt& v) {
+  std::string digits = FormatMagnitude(v.abs);
+  if (v.negative && !v.abs.empty()) digits.insert(digits.begin(), '-');
+  return BoundLiteral("pxf.BigInt", std::move(digits));
+}
+
+StatusOr<std::string> FormatDecimal(const Decimal& v) {
+  // Compared as int64 so -scale is defined at INT32_MIN.
+  const int64_t scale = v.scale;
+  if (scale > kMaxNumericLiteralDigits || scale < -int64_t{kMaxNumericLiteralDigits}) {
+    return Status::Error("pxf.Decimal scale " + std::to_string(scale) +
+                         " exceeds MaxNumericLiteralDigits=" +
+                         std::to_string(kMaxNumericLiteralDigits));
+  }
   std::string digits = FormatMagnitude(v.unscaled);
   std::string out;
   if (v.negative && !v.unscaled.empty()) out = "-";
-  if (v.scale <= 0) {
+  if (scale <= 0) {
     out += digits;
-    return out;
+    // A negative scale means trailing zeros: unscaled 5, scale -2 is 500.
+    if (!v.unscaled.empty()) out.append(static_cast<size_t>(-scale), '0');
+    return BoundLiteral("pxf.Decimal", std::move(out));
   }
   // Pad with leading zeros so we have at least scale+1 digits.
-  while (static_cast<int32_t>(digits.size()) <= v.scale) digits = "0" + digits;
-  size_t int_len = digits.size() - static_cast<size_t>(v.scale);
+  const size_t want = static_cast<size_t>(scale) + 1;
+  if (digits.size() < want) digits.insert(0, want - digits.size(), '0');
+  size_t int_len = digits.size() - static_cast<size_t>(scale);
   out += digits.substr(0, int_len);
   out += '.';
   out += digits.substr(int_len);
-  return out;
+  return BoundLiteral("pxf.Decimal", std::move(out));
 }
 
 // --- Wire-format nested-message helpers (called from pb.h templates) -----
