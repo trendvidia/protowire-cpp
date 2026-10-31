@@ -299,6 +299,37 @@ bool PxfDecode(std::string_view data,
   return true;
 }
 
+// The producer's side of the bounds (HARDENING.md § Arbitrary-precision
+// magnitudes): the stock protobuf runtime reads the bytes, storing the fields
+// and bounding nothing, and they are then written as PXF. pb::Unmarshal is
+// bypassed on purpose, or it would refuse the row and the encoder would go
+// untested, which is how a hang here stayed hidden (protowire#448).
+bool PbRender(const std::string& data, const std::string& schema, const std::string& proto_path,
+              std::string* err) {
+  if (proto_path.empty()) {
+    *err = "--proto is required for format=pb-render";
+    return false;
+  }
+  pb::compiler::DiskSourceTree tree;
+  CollectErrors errors;
+  pb::compiler::Importer importer(&tree, &errors);
+  const pb::Descriptor* desc = LoadDescriptor(proto_path, schema, &importer, &tree, &errors, err);
+  if (desc == nullptr) return false;
+
+  pb::DynamicMessageFactory factory(importer.pool());
+  std::unique_ptr<pb::Message> msg(factory.GetPrototype(desc)->New());
+  if (!msg->ParseFromString(data)) {
+    *err = "protobuf runtime refused the input";
+    return false;
+  }
+  auto out = protowire::pxf::Marshal(*msg);
+  if (!out.ok()) {
+    *err = std::string(out.status().message());
+    return false;
+  }
+  return true;
+}
+
 template <class T>
 bool PbDecodeAs(std::string_view data, const Limits& lim, std::string* err) {
   T msg;
@@ -427,6 +458,8 @@ int main(int argc, char** argv) {
     ok = PxfDecode(data, schema, proto_path, lim, &err);
   } else if (format == "pb") {
     ok = PbDecode(data, schema, lim, &err);
+  } else if (format == "pb-render") {
+    ok = PbRender(std::string(data), schema, proto_path, &err);
   } else if (format == "sbe") {
     ok = SbeDecode(data, schema, proto_path, lim, &err);
   } else if (format == "envelope") {
