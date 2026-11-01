@@ -64,7 +64,7 @@ struct Token {
   // The digits of an integer or float's precision suffix (`1.5p53`), empty
   // for none. Any field but a pxf.BigFloat rejects one; that is the
   // decoder's call, not the lexer's.
-  std::string_view prec;
+  std::string_view prec = {};
 };
 
 }  // namespace protowire::pxf
