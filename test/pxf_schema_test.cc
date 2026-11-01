@@ -412,8 +412,10 @@ message Row {
   ASSERT_EQ(vs.size(), 2u);
   EXPECT_EQ(vs[0].element, "reqdef.v1.Row.Inner.empty");
   EXPECT_EQ(vs[0].kind, ViolationKind::kRequiredOption);
+  EXPECT_EQ(vs[0].name, "");  // The empty default is the literal.
   EXPECT_EQ(vs[1].element, "reqdef.v1.Row.f");
   EXPECT_EQ(vs[1].kind, ViolationKind::kRequiredOption);
+  EXPECT_EQ(vs[1].name, "x");
   EXPECT_NE(vs[1].ToString().find("(pxf.required) and (pxf.default) are exclusive on one field"),
             std::string::npos)
       << vs[1].ToString();

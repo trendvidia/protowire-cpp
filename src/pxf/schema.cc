@@ -90,10 +90,10 @@ void WalkMessages(const std::string& path, const pb::Descriptor* md, std::vector
     if (auto key = KeyFieldName(f); key.has_value()) {
       CheckKeyOption(path, f, *key, out);
     }
-    if (IsRequired(f) && GetDefault(f).has_value()) {
+    if (auto def = GetDefault(f); IsRequired(f) && def.has_value()) {
       out->push_back(Violation{path,
                                std::string(f->full_name()),
-                               "",
+                               std::string(*def),
                                ViolationKind::kRequiredOption,
                                "(pxf.required) and (pxf.default) are exclusive on one field: the "
                                "first rejects a document where the field is absent, and the second "
