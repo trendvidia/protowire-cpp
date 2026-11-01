@@ -14,6 +14,7 @@
 #include "protowire/pxf/parser.h"
 
 #include <gtest/gtest.h>
+#include "fixture_dir.h"
 #include "protoc_compat.h"
 
 #include <algorithm>
@@ -183,6 +184,56 @@ TEST(PxfCorpus, Nulls) {
   RunDecoderCorpus("nulls", NullProtos(), ParseVerdict::kAccepts);
 }
 
+TEST(PxfCorpus, Duplicates) {
+  RunDecoderCorpus("duplicates", {"duplicates.proto"}, ParseVerdict::kAccepts);
+}
+
+// A map's keys are scanned while short and move to a set when long; a
+// repeated key has to be caught on both sides of that line.
+TEST(PxfCorpus, MapKeyBoundTwiceInALongMap) {
+  Schema schema("duplicates", {"duplicates.proto"});
+  const pbuf::Descriptor* d = schema.Find("dup.v1.Holder");
+  for (int n : {1, 15, 16, 17, 18, 100}) {
+    SCOPED_TRACE(n);
+    std::string entries;
+    for (int i = 0; i < n; ++i) entries += "k" + std::to_string(i) + ": \"v\"\n";
+    auto ok = schema.New(d);
+    EXPECT_TRUE(pxf::Unmarshal("labels = {\n" + entries + "}\n", ok.get()).ok());
+    for (int dup : {0, n - 1}) {
+      auto bad = schema.New(d);
+      std::string again = "k" + std::to_string(dup) + ": \"w\"\n";
+      EXPECT_FALSE(pxf::Unmarshal("labels = {\n" + entries + again + "}\n", bad.get()).ok());
+    }
+  }
+}
+
+// BodyScope keeps the first 64 field indexes in a word and the rest in a
+// vector; the rule has to hold on both sides of that line.
+TEST(PxfCorpus, BoundTwicePastTheSixtyFourthField) {
+  const std::string name = "wide.proto";
+  {
+    std::ofstream out(fs::path(protowire_test::FixtureDir()) / name);
+    out << "syntax = \"proto3\";\npackage wide.v1;\nmessage M {\n";
+    for (int i = 1; i <= 70; ++i) out << "  int32 f" << i << " = " << i << ";\n";
+    out << "}\n";
+  }
+  pbuf::compiler::DiskSourceTree tree;
+  tree.MapPath("", protowire_test::FixtureDir());
+  CollectErrors errors;
+  pbuf::compiler::Importer importer(&tree, &errors);
+  ASSERT_NE(importer.Import(name), nullptr) << errors.last_;
+  pbuf::DynamicMessageFactory factory(importer.pool());
+  const pbuf::Descriptor* d = importer.pool()->FindMessageTypeByName("wide.v1.M");
+  for (const char* f : {"f64", "f65", "f70"}) {
+    SCOPED_TRACE(f);
+    const std::string once = std::string(f) + " = 1\n";
+    std::unique_ptr<pbuf::Message> a(factory.GetPrototype(d)->New());
+    EXPECT_TRUE(pxf::Unmarshal(once, a.get()).ok());
+    std::unique_ptr<pbuf::Message> b(factory.GetPrototype(d)->New());
+    EXPECT_FALSE(pxf::Unmarshal(once + once, b.get()).ok());
+  }
+}
+
 // Every accept fixture in nulls/ binds null and nothing else: the message
 // stays empty and a full decode reports the field present-but-null.
 TEST(PxfCorpus, NullsLeaveTheFieldUnsetAndNull) {
@@ -257,7 +308,7 @@ const std::map<std::string, DatasetFixture>& DatasetVerdicts() {
       {"dotted-into-timestamp.pxf", {false}},
       {"dotted-into-wrapper.pxf", {false}},
       {"dotted-overlap.pxf", {false}},
-      {"duplicate-column.pxf", {false, "#43"}},
+      {"duplicate-column.pxf", {false}},
       {"dotted-required-missing.pxf", {false}},
       {"dotted-empty-segment.pxf", {false}},
       {"dotted-trailing-dot.pxf", {false}},

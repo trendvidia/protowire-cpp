@@ -23,15 +23,18 @@
 
 #include "protowire/pxf.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -107,6 +110,85 @@ int CountDigits(std::string_view literal) {
     if (c >= '0' && c <= '9') ++n;
   }
   return n;
+}
+
+// BodyScope is what one message body has bound so far (draft -01 § Entries
+// and Keys): each body is its own scope. A singular field binds at most
+// once in it, and a map key at most once across every binding of its map.
+class BodyScope {
+ public:
+  // Bind records field index i and reports whether it was the first time.
+  bool Bind(int i) {
+    if (i < 64) {
+      const uint64_t bit = uint64_t{1} << i;
+      const bool first = (low_ & bit) == 0;
+      low_ |= bit;
+      return first;
+    }
+    if (high_.size() <= static_cast<size_t>(i - 64)) high_.resize(i - 63);
+    const bool first = !high_[i - 64];
+    high_[i - 64] = true;
+    return first;
+  }
+
+  // BindKey records one key of map field fd, as a value of the key type.
+  // A message rarely has more than a map or two and a map rarely has many
+  // keys, so both are scanned while short, which measured faster than a
+  // hash node per key. A long map moves to a set, so that an adversarial
+  // one stays linear.
+  bool BindKey(const FieldDescriptor* fd, std::string key) {
+    MapKeys* keys = nullptr;
+    for (MapKeys& m : maps_) {
+      if (m.fd == fd) keys = &m;
+    }
+    if (keys == nullptr) {
+      maps_.emplace_back();
+      keys = &maps_.back();
+      keys->fd = fd;
+    }
+    if (keys->large != nullptr) return keys->large->insert(std::move(key)).second;
+    if (std::find(keys->small.begin(), keys->small.end(), key) != keys->small.end()) return false;
+    keys->small.push_back(std::move(key));
+    if (keys->small.size() > kScanLimit) {
+      keys->large = std::make_unique<std::unordered_set<std::string>>(
+          std::make_move_iterator(keys->small.begin()), std::make_move_iterator(keys->small.end()));
+      keys->small.clear();
+    }
+    return true;
+  }
+
+ private:
+  static constexpr size_t kScanLimit = 16;
+  struct MapKeys {
+    const FieldDescriptor* fd = nullptr;
+    std::vector<std::string> small;
+    std::unique_ptr<std::unordered_set<std::string>> large;
+  };
+
+  uint64_t low_ = 0;  // most messages have under 64 fields, so no allocation
+  std::vector<bool> high_;
+  std::vector<MapKeys> maps_;
+};
+
+// MapKeyText renders the key an entry ended up with, so that two spellings
+// of one value (`1` and `"1"` on an int-keyed map) compare equal, and
+// quotes a string for the error message.
+std::string MapKeyText(const Message& entry, const FieldDescriptor* key_fd) {
+  const Reflection* r = entry.GetReflection();
+  switch (key_fd->cpp_type()) {
+    case FieldDescriptor::CPPTYPE_INT32:
+      return std::to_string(r->GetInt32(entry, key_fd));
+    case FieldDescriptor::CPPTYPE_INT64:
+      return std::to_string(r->GetInt64(entry, key_fd));
+    case FieldDescriptor::CPPTYPE_UINT32:
+      return std::to_string(r->GetUInt32(entry, key_fd));
+    case FieldDescriptor::CPPTYPE_UINT64:
+      return std::to_string(r->GetUInt64(entry, key_fd));
+    case FieldDescriptor::CPPTYPE_BOOL:
+      return r->GetBool(entry, key_fd) ? "true" : "false";
+    default:
+      return "\"" + r->GetString(entry, key_fd) + "\"";
+  }
 }
 
 class DirectDecoder {
@@ -514,10 +596,10 @@ class DirectDecoder {
 
   Status DecodeFields(Message* msg, bool in_block);
   Status DecodeFieldsBody(Message* msg, bool in_block);
-  Status DecodeFieldValue(Message* msg, const FieldDescriptor* fd);
+  Status DecodeFieldValue(Message* msg, const FieldDescriptor* fd, BodyScope* scope);
   Status DecodeMsgValue(Message* msg, const FieldDescriptor* fd);
   Status DecodeListInline(Message* msg, const FieldDescriptor* fd);
-  Status DecodeMapInline(Message* msg, const FieldDescriptor* fd);
+  Status DecodeMapInline(Message* msg, const FieldDescriptor* fd, BodyScope* scope);
   Status DecodeAnyInner(Message* any_msg);
 
   Status SetScalar(Message* msg, const FieldDescriptor* fd);
@@ -547,6 +629,13 @@ class DirectDecoder {
     return Status::OK();
   }
   void Ascend() { --depth_; }
+
+  // CheckBindOnce rejects a second binding of a singular field. Repeated
+  // fields concatenate, and a map field's bindings merge key by key.
+  Status CheckBindOnce(const FieldDescriptor* fd, Position pos, BodyScope* scope) {
+    if (fd->is_repeated() || scope->Bind(fd->index())) return Status::OK();
+    return PosError(pos, "field \"" + std::string(fd->name()) + "\" is already set");
+  }
 
   // CheckNullable enforces the null rule (draft -01 § Booleans, Null, and
   // Identifier Values): null leaves a field unset, so it binds only where
@@ -683,6 +772,7 @@ Status DirectDecoder::DecodeFields(Message* msg, bool in_block) {
 Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
   const Descriptor* desc = msg->GetDescriptor();
   std::unordered_map<std::string, std::string> set_oneofs;
+  BodyScope scope;
 
   // A pending keyed_elem_ applies to exactly this body: the immediate
   // entries of one element of a keyed repeated field.
@@ -732,6 +822,7 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
         }
         Status st = CheckOneof(fd, pos, &set_oneofs);
         if (!st.ok()) return st;
+        if (st = CheckBindOnce(fd, pos, &scope); !st.ok()) return st;
 
         // null literal: track and continue without setting any field value.
         if (current_.kind == TokenKind::kNull) {
@@ -755,7 +846,7 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
         if (result_) {
           result_->MarkPresent(path_prefix_ + std::string(fd->name()));
         }
-        st = DecodeFieldValue(msg, fd);
+        st = DecodeFieldValue(msg, fd, &scope);
         if (!st.ok()) return st;
         break;
       }
@@ -796,6 +887,7 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
         }
         Status st = CheckOneof(fd, pos, &set_oneofs);
         if (!st.ok()) return st;
+        if (st = CheckBindOnce(fd, pos, &scope); !st.ok()) return st;
         if (result_) {
           result_->MarkPresent(path_prefix_ + std::string(fd->name()));
         }
@@ -844,9 +936,9 @@ Status DirectDecoder::CheckOneof(const FieldDescriptor* fd,
 
 // --- value dispatch --------------------------------------------------------
 
-Status DirectDecoder::DecodeFieldValue(Message* msg, const FieldDescriptor* fd) {
+Status DirectDecoder::DecodeFieldValue(Message* msg, const FieldDescriptor* fd, BodyScope* scope) {
   if (Status s = IllegalError(); !s.ok()) return s;
-  if (fd->is_map()) return DecodeMapInline(msg, fd);
+  if (fd->is_map()) return DecodeMapInline(msg, fd, scope);
   if (fd->is_repeated()) {
     // Keyed repeated field written `name = { ... }`: a block-tail is an
     // abbreviation of `= { ... }` (draft -01 §3.13), so the assignment
@@ -1136,7 +1228,7 @@ Status DirectDecoder::DecodeKeyedBlockBody(Message* msg,
 
 // --- map -------------------------------------------------------------------
 
-Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd) {
+Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd, BodyScope* scope) {
   if (current_.kind != TokenKind::kLBrace) {
     return PosError(current_.pos, "expected '{' for map field \"" + std::string(fd->name()) + "\"");
   }
@@ -1179,6 +1271,13 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd) {
     Message* entry = r->AddMessage(msg, fd);
     Status st = SetMapKey(entry, fd, key, key_kind, pos);
     if (!st.ok()) return st;
+    // Compared after SetMapKey: keys compare as values of the key type.
+    std::string key_text = MapKeyText(*entry, key_fd);
+    if (!scope->BindKey(fd, key_text)) {
+      return PosError(
+          pos,
+          "map field \"" + std::string(fd->name()) + "\": key " + key_text + " is already set");
+    }
     if (val_fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
       if (current_.kind != TokenKind::kLBrace) {
         return PosError(current_.pos, "expected '{' for map message value");
