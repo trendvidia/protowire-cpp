@@ -278,14 +278,12 @@ Status Encoder::EncodeMessageValue(const Message& sub, int level) {
     EncodeScalarValue(sub, inner, /*idx=*/-1);
     return Status::OK();
   }
-  if (IsBigInt(d) || IsDecimal(d)) {
-    auto literal = IsBigInt(d) ? ReadBigIntAsString(sub) : ReadDecimalAsString(sub);
+  if (IsBigInt(d) || IsDecimal(d) || IsBigFloat(d)) {
+    auto literal = IsBigInt(d)    ? ReadBigIntAsString(sub)
+                   : IsDecimal(d) ? ReadDecimalAsString(sub)
+                                  : ReadBigFloatAsString(sub);
     if (!literal.ok()) return literal.status();
     out_ += *literal;
-    return Status::OK();
-  }
-  if (IsBigFloat(d)) {
-    out_ += ReadBigFloatAsString(sub);
     return Status::OK();
   }
   // Generic message — open block, recurse, close.

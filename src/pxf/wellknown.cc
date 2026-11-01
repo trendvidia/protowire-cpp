@@ -4,11 +4,9 @@
 
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/message.h>
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 
+#include "bigfloat.h"
+#include "protowire/limits.h"
 #include "protowire/pb_big.h"
 
 namespace protowire::pxf {
@@ -160,51 +158,34 @@ bool SetDecimalFromString(pb::Message* msg, std::string_view literal) {
 }
 
 bool SetBigFloatFromString(pb::Message* msg, std::string_view literal) {
-  // Parse via strtod into a double, then extract the IEEE 754 mantissa and
-  // exponent. Precision is fixed at 53 bits — covers everyday floats
-  // losslessly while avoiding a math-library dependency. The wire format
-  // remains the open-ended BigFloat schema.
-  std::string buf(literal);
-  char* end = nullptr;
-  double d = std::strtod(buf.c_str(), &end);
-  if (end == buf.c_str() || static_cast<size_t>(end - buf.c_str()) != buf.size()) {
-    return false;
-  }
-  if (d == 0.0) {
-    // BigFloat zero: prec stays at default (0 means "nothing emitted").
-    return true;
-  }
-  bool negative = d < 0;
-  if (negative) d = -d;
-  // Decompose into mantissa (in [0.5, 1.0)) and exponent.
-  int exp = 0;
-  double mant = std::frexp(d, &exp);  // d = mant * 2^exp
-  // Scale to integer: mantInt = mant * 2^53 (53-bit mantissa).
-  uint64_t mant_int = static_cast<uint64_t>(std::ldexp(mant, 53));
-  // Strip trailing zero bits to keep the magnitude compact.
-  while (mant_int != 0 && (mant_int & 1) == 0) {
-    mant_int >>= 1;
-    ++exp;
-  }
-  // Adjusted exponent: in our schema, value = mantInt × 2^(exp - prec).
-  int32_t adj_exp = static_cast<int32_t>(exp) - 53;
+  const size_t p = literal.find('p');
+  if (p != std::string_view::npos && p + 1 == literal.size()) return false;
+  const std::string_view number = literal.substr(0, p);
+  const std::string_view prec =
+      p == std::string_view::npos ? std::string_view() : literal.substr(p + 1);
+  return SetBigFloatFromLiteral(msg, number, prec, kMaxNumericLiteralDigits, kMaxBigFloatExponent)
+      .ok();
+}
 
-  // Encode mantInt as big-endian byte magnitude.
-  std::vector<uint8_t> mant_bytes;
-  for (int i = 7; i >= 0; --i) {
-    uint8_t b = static_cast<uint8_t>((mant_int >> (i * 8)) & 0xff);
-    if (!mant_bytes.empty() || b != 0) mant_bytes.push_back(b);
+Status SetBigFloatFromLiteral(pb::Message* msg,
+                              std::string_view literal,
+                              std::string_view prec_digits,
+                              int max_digits,
+                              int max_exponent) {
+  BigFloatFields f;
+  if (Status s = ParseBigFloatLiteral(literal, prec_digits, max_digits, max_exponent, &f);
+      !s.ok()) {
+    return s;
   }
-  SetBytes(msg, "mantissa", mant_bytes);
-  if (adj_exp != 0) {
-    const pb::FieldDescriptor* fd = msg->GetDescriptor()->FindFieldByName("exponent");
-    msg->GetReflection()->SetInt32(msg, fd, adj_exp);
+  SetBytes(msg, "mantissa", f.mantissa);
+  const pb::Descriptor* d = msg->GetDescriptor();
+  const pb::Reflection* r = msg->GetReflection();
+  if (f.exponent != 0) {
+    r->SetInt32(msg, d->FindFieldByName("exponent"), static_cast<int32_t>(f.exponent));
   }
-  // Always emit prec since 0 is "no value".
-  const pb::FieldDescriptor* prec_fd = msg->GetDescriptor()->FindFieldByName("prec");
-  msg->GetReflection()->SetUInt32(msg, prec_fd, 53);
-  SetBoolField(msg, "negative", negative);
-  return true;
+  if (f.prec != 0) r->SetUInt32(msg, d->FindFieldByName("prec"), f.prec);
+  SetBoolField(msg, "negative", f.negative);
+  return Status::OK();
 }
 
 StatusOr<std::string> ReadBigIntAsString(const pb::Message& msg) {
@@ -222,20 +203,13 @@ StatusOr<std::string> ReadDecimalAsString(const pb::Message& msg) {
   return protowire::pb::FormatDecimal(d);
 }
 
-std::string ReadBigFloatAsString(const pb::Message& msg) {
-  std::vector<uint8_t> mant = GetBytes(msg, "mantissa");
-  int32_t exp = GetInt32Field(msg, "exponent");
-  uint32_t prec = GetUInt32Field(msg, "prec");
-  bool neg = GetBoolField(msg, "negative");
-  if (prec == 0) return "0";
-  // Reconstruct as a double with the limited precision we wrote.
-  uint64_t mant_int = 0;
-  for (uint8_t b : mant) mant_int = (mant_int << 8) | b;
-  double d = std::ldexp(static_cast<double>(mant_int), exp);
-  if (neg) d = -d;
-  char buf[64];
-  std::snprintf(buf, sizeof(buf), "%.17g", d);
-  return std::string(buf);
+StatusOr<std::string> ReadBigFloatAsString(const pb::Message& msg) {
+  BigFloatFields f;
+  f.mantissa = GetBytes(msg, "mantissa");
+  f.exponent = GetInt32Field(msg, "exponent");
+  f.prec = GetUInt32Field(msg, "prec");
+  f.negative = GetBoolField(msg, "negative");
+  return FormatBigFloatLiteral(f, kMaxNumericLiteralDigits, kMaxBigFloatExponent);
 }
 
 std::vector<std::string> ReadNullPaths(const pb::Message& root,

@@ -88,6 +88,7 @@ struct Limits {
   int max_digits = kMaxNumericLiteralDigits;
   int max_bytes_literal = kMaxBytesLiteralLength;
   int max_repeated = kMaxRepeatedCount;
+  int max_big_float_exponent = kMaxBigFloatExponent;
 };
 
 Limits ResolveLimits(const UnmarshalOptions& o) {
@@ -97,6 +98,7 @@ Limits ResolveLimits(const UnmarshalOptions& o) {
   if (o.max_numeric_literal_digits > 0) lim.max_digits = o.max_numeric_literal_digits;
   if (o.max_bytes_literal_length > 0) lim.max_bytes_literal = o.max_bytes_literal_length;
   if (o.max_repeated_count > 0) lim.max_repeated = o.max_repeated_count;
+  if (o.max_big_float_exponent > 0) lim.max_big_float_exponent = o.max_big_float_exponent;
   return lim;
 }
 
@@ -489,6 +491,28 @@ class DirectDecoder {
     return Status::OK();
   }
 
+  // CheckNoPrecision rejects a precision suffix on a literal bound to fd,
+  // which only a pxf.BigFloat takes (draft -01 § PXF Annotations). The
+  // suffix lexes on any number, so the check is the binding site's.
+  Status CheckNoPrecision(const FieldDescriptor* fd) {
+    if (current_.prec.empty()) return Status::OK();
+    return PosError(current_.pos,
+                    "precision suffix p" + std::string(current_.prec) +
+                        " is allowed only on a pxf.BigFloat, not on field \"" +
+                        std::string(fd->name()) + "\"");
+  }
+
+  // SetBigFloat reads the current literal into a pxf.BigFloat. Its own
+  // parser checks the digit limit: only mantissa digits count, and
+  // CheckDigits would count the exponent's too.
+  Status SetBigFloat(Message* sub) {
+    Status st = SetBigFloatFromLiteral(
+        sub, current_.value, current_.prec, lim_.max_digits, lim_.max_big_float_exponent);
+    if (!st.ok()) return PosError(current_.pos, st.message());
+    Advance();
+    return Status::OK();
+  }
+
   // CheckUTF8 enforces HARDENING.md § UTF-8 at the assignment site of a
   // proto3 string field: \xHH and \NNN escapes (and raw bytes) can
   // produce invalid sequences; b"…" / bytes fields stay raw.
@@ -775,6 +799,9 @@ Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
     Advance();
     return Status::OK();
   }
+  if (!IsBigFloat(d)) {
+    if (Status s = CheckNoPrecision(fd); !s.ok()) return s;
+  }
   // Wrapper sugar: bare scalar → wrapper.value.
   if (WrapperInnerCppType(d) != -1 && current_.kind != TokenKind::kLBrace) {
     const FieldDescriptor* inner = d->FindFieldByName("value");
@@ -783,7 +810,7 @@ Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
   }
   // Big-number sugar. The digit cap runs before the literal reaches the
   // arbitrary-precision parser.
-  if ((IsBigInt(d) || IsDecimal(d) || IsBigFloat(d)) &&
+  if ((IsBigInt(d) || IsDecimal(d)) &&
       (current_.kind == TokenKind::kInt || current_.kind == TokenKind::kFloat)) {
     if (Status s = CheckDigits(current_.value, current_.pos); !s.ok()) return s;
   }
@@ -802,11 +829,7 @@ Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
     return Status::OK();
   }
   if (IsBigFloat(d) && (current_.kind == TokenKind::kInt || current_.kind == TokenKind::kFloat)) {
-    if (!SetBigFloatFromString(sub, current_.value)) {
-      return PosError(current_.pos, "invalid pxf.BigFloat: " + std::string(current_.value));
-    }
-    Advance();
-    return Status::OK();
+    return SetBigFloat(sub);
   }
   if (current_.kind != TokenKind::kLBrace) {
     return PosError(current_.pos,
@@ -894,7 +917,10 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
     }
     if (fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
       const Descriptor* d = fd->message_type();
-      if ((IsBigInt(d) || IsDecimal(d) || IsBigFloat(d)) &&
+      if (!IsBigFloat(d)) {
+        if (Status s = CheckNoPrecision(fd); !s.ok()) return s;
+      }
+      if ((IsBigInt(d) || IsDecimal(d)) &&
           (current_.kind == TokenKind::kInt || current_.kind == TokenKind::kFloat)) {
         if (Status s = CheckDigits(current_.value, current_.pos); !s.ok()) return s;
       }
@@ -927,10 +953,7 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
         Advance();
       } else if (IsBigFloat(d) &&
                  (current_.kind == TokenKind::kInt || current_.kind == TokenKind::kFloat)) {
-        if (!SetBigFloatFromString(sub, current_.value)) {
-          return PosError(current_.pos, "invalid BigFloat");
-        }
-        Advance();
+        if (Status s = SetBigFloat(sub); !s.ok()) return s;
       } else {
         if (current_.kind != TokenKind::kLBrace) {
           return PosError(current_.pos, "expected '{' for repeated message element");
@@ -1058,6 +1081,12 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd, B
       return PosError(pos, std::string("expected map key, got ") + TokenKindName(current_.kind));
     }
     std::string key(current_.value);
+    if (!current_.prec.empty()) {
+      return PosError(pos,
+                      "map field \"" + std::string(fd->name()) +
+                          "\": a key cannot carry a precision suffix (p" +
+                          std::string(current_.prec) + ")");
+    }
     Advance();
     switch (current_.kind) {
       case TokenKind::kColon:
@@ -1199,6 +1228,7 @@ Status DirectDecoder::SetMapKey(Message* entry,
 
 Status DirectDecoder::SetScalar(Message* msg, const FieldDescriptor* fd) {
   Position pos = current_.pos;
+  if (Status s = CheckNoPrecision(fd); !s.ok()) return s;
   const Reflection* r = msg->GetReflection();
   switch (fd->cpp_type()) {
     case FieldDescriptor::CPPTYPE_STRING: {
@@ -1287,6 +1317,7 @@ Status DirectDecoder::SetScalar(Message* msg, const FieldDescriptor* fd) {
 
 Status DirectDecoder::AddRepeatedScalar(Message* msg, const FieldDescriptor* fd) {
   Position pos = current_.pos;
+  if (Status s = CheckNoPrecision(fd); !s.ok()) return s;
   const Reflection* r = msg->GetReflection();
   switch (fd->cpp_type()) {
     case FieldDescriptor::CPPTYPE_STRING: {
@@ -1366,6 +1397,7 @@ Status DirectDecoder::AddRepeatedScalar(Message* msg, const FieldDescriptor* fd)
 
 Status DirectDecoder::SetEnum(Message* msg, const FieldDescriptor* fd, bool repeated) {
   Position pos = current_.pos;
+  if (Status s = CheckNoPrecision(fd); !s.ok()) return s;
   const Reflection* r = msg->GetReflection();
   const auto* enum_d = fd->enum_type();
   if (current_.kind == TokenKind::kIdent) {

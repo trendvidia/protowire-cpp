@@ -57,11 +57,13 @@ struct StringVal {
 };
 struct IntVal {
   Position pos;
-  std::string raw;  // raw text — decoded later by schema
+  std::string raw;   // raw text — decoded later by schema
+  std::string prec;  // precision suffix digits, empty for none
 };
 struct FloatVal {
   Position pos;
   std::string raw;
+  std::string prec;
 };
 struct BoolVal {
   Position pos;

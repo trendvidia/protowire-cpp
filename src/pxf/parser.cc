@@ -225,6 +225,12 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry, bool allow_type_entr
   }
   TokenKind key_kind = current_.kind;
   std::string key(current_.value);
+  if (!current_.prec.empty()) {
+    return Status::Error(pos.line,
+                         pos.column,
+                         "key " + key + ": a key cannot carry a precision suffix (p" +
+                             std::string(current_.prec) + ")");
+  }
   Advance();
 
   switch (current_.kind) {
@@ -314,6 +320,7 @@ StatusOr<ValuePtr> Parser::ParseValue() {
       auto v = std::make_unique<IntVal>();
       v->pos = pos;
       v->raw = std::string(current_.value);
+      v->prec = std::string(current_.prec);
       Advance();
       return ValuePtr(std::move(v));
     }
@@ -321,6 +328,7 @@ StatusOr<ValuePtr> Parser::ParseValue() {
       auto v = std::make_unique<FloatVal>();
       v->pos = pos;
       v->raw = std::string(current_.value);
+      v->prec = std::string(current_.prec);
       Advance();
       return ValuePtr(std::move(v));
     }

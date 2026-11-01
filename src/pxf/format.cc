@@ -171,9 +171,16 @@ class Formatter {
   }
 
  private:
+  void FormatNumber(const std::string& raw, const std::string& prec) {
+    out_ += raw;
+    if (!prec.empty()) {
+      out_.push_back('p');
+      out_ += prec;
+    }
+  }
   void FormatValueImpl(const StringVal& v, int /*level*/) { WriteQuotedString(v.value, out_); }
-  void FormatValueImpl(const IntVal& v, int /*level*/) { out_ += v.raw; }
-  void FormatValueImpl(const FloatVal& v, int /*level*/) { out_ += v.raw; }
+  void FormatValueImpl(const IntVal& v, int /*level*/) { FormatNumber(v.raw, v.prec); }
+  void FormatValueImpl(const FloatVal& v, int /*level*/) { FormatNumber(v.raw, v.prec); }
   void FormatValueImpl(const BoolVal& v, int /*level*/) { out_ += v.value ? "true" : "false"; }
   void FormatValueImpl(const BytesVal& v, int /*level*/) {
     std::string_view raw(reinterpret_cast<const char*>(v.value.data()), v.value.size());
