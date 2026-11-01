@@ -561,6 +561,25 @@ class DirectDecoder {
     return PosError(current_.pos, std::string(current_.value));
   }
 
+  // MsgValueForms names the value forms a message type admits, for the
+  // error when the token matched none of them. Every message takes a block,
+  // so "'{'" is the floor. DecodeLiteral's forms need naming here. Wrappers
+  // never reach this: any other token goes to their inner scalar.
+  static const char* MsgValueForms(const Descriptor* d) {
+    if (IsTimestamp(d)) return "a timestamp literal or '{'";
+    if (IsDuration(d)) return "a duration literal or '{'";
+    if (IsBigInt(d)) return "an integer literal or '{'";
+    if (IsDecimal(d) || IsBigFloat(d)) return "a numeric literal or '{'";
+    if (IsSecret(d)) return "a string literal or '{'";
+    return "'{'";
+  }
+
+  // TokenErrMsg describes the current token for "expected X, got Y".
+  std::string TokenErrMsg() const {
+    if (current_.kind == TokenKind::kIllegal) return std::string(current_.value);
+    return std::string(TokenKindName(current_.kind)) + " (\"" + std::string(current_.value) + "\")";
+  }
+
   // Skipping for unknown fields.
   void SkipValue();
   void SkipBraced();
@@ -875,7 +894,8 @@ Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
   }
   if (current_.kind != TokenKind::kLBrace) {
     return PosError(current_.pos,
-                    "expected '{' for message field \"" + std::string(fd->name()) + "\"");
+                    std::string("expected ") + MsgValueForms(d) + " for message field \"" +
+                        std::string(fd->name()) + "\", got " + TokenErrMsg());
   }
   Advance();
   return DecodeBlockInto(sub, fd);
@@ -964,7 +984,9 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
       if (Status s = DecodeLiteral(sub, fd, &bound); !s.ok()) return s;
       if (!bound) {
         if (current_.kind != TokenKind::kLBrace) {
-          return PosError(current_.pos, "expected '{' for repeated message element");
+          return PosError(current_.pos,
+                          std::string("expected ") + MsgValueForms(d) +
+                              " for repeated message element, got " + TokenErrMsg());
         }
         Advance();
         if (const FieldDescriptor* key_fd = KeyField(fd)) {
@@ -1129,7 +1151,9 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd, B
       if (st = DecodeLiteral(value, fd, &bound); !st.ok()) return st;
       if (bound) continue;
       if (current_.kind != TokenKind::kLBrace) {
-        return PosError(current_.pos, "expected '{' for map message value");
+        return PosError(current_.pos,
+                        std::string("expected ") + MsgValueForms(value->GetDescriptor()) +
+                            " for map message value, got " + TokenErrMsg());
       }
       Advance();
       st = current_.kind == TokenKind::kAtType && IsAny(value->GetDescriptor())
