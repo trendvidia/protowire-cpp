@@ -47,6 +47,7 @@
 #include "parser_internal.h"
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
+#include "protowire/detail/go_quote.h"
 #include "protowire/detail/rfc3339.h"
 #include "protowire/detail/utf8.h"
 #include "protowire/limits.h"
@@ -175,55 +176,6 @@ class BodyScope {
   std::vector<MapKeys> maps_;
 };
 
-// QuoteKey quotes a string as protowire-go's strconv.Quote does, so the ports
-// name one map key alike. The difference left: strconv.Quote also escapes
-// non-printable runes above ASCII, which takes Unicode tables.
-std::string QuoteKey(const std::string& key) {
-  static constexpr char kHex[] = "0123456789abcdef";
-  std::string out = "\"";
-  for (unsigned char c : key) {
-    switch (c) {
-      case '"':
-        out += "\\\"";
-        break;
-      case '\\':
-        out += "\\\\";
-        break;
-      case '\a':
-        out += "\\a";
-        break;
-      case '\b':
-        out += "\\b";
-        break;
-      case '\f':
-        out += "\\f";
-        break;
-      case '\n':
-        out += "\\n";
-        break;
-      case '\r':
-        out += "\\r";
-        break;
-      case '\t':
-        out += "\\t";
-        break;
-      case '\v':
-        out += "\\v";
-        break;
-      default:
-        if (c < 0x20 || c == 0x7f) {
-          out += "\\x";
-          out += kHex[c >> 4];
-          out += kHex[c & 0xF];
-        } else {
-          out += static_cast<char>(c);
-        }
-    }
-  }
-  out += '"';
-  return out;
-}
-
 // MapKeyText renders the key an entry ended up with, so that two spellings
 // of one value (`1` and `"1"` on an int-keyed map) compare equal. It is also
 // how a key appears in an error message and a presence path, `by_key["k"]`.
@@ -241,7 +193,7 @@ std::string MapKeyText(const Message& entry, const FieldDescriptor* key_fd) {
     case FieldDescriptor::CPPTYPE_BOOL:
       return r->GetBool(entry, key_fd) ? "true" : "false";
     default:
-      return QuoteKey(r->GetString(entry, key_fd));
+      return detail::GoQuote(r->GetString(entry, key_fd));
   }
 }
 
@@ -692,7 +644,7 @@ class DirectDecoder {
   std::string TokenErrMsg() const {
     if (current_.kind == TokenKind::kIllegal) return std::string(current_.value);
     return std::string(TokenKindName(current_.kind)) + " (" +
-           QuoteKey(std::string(current_.value)) + ")";
+           detail::GoQuote(std::string(current_.value)) + ")";
   }
 
   // Skipping for unknown fields.
@@ -1076,13 +1028,13 @@ Status DirectDecoder::DecodeAnyInner(Message* any_msg) {
   Advance();
   if (resolver_ == nullptr) {
     return PosError(url_pos,
-                    "cannot resolve Any type " + QuoteKey(type_url) +
+                    "cannot resolve Any type " + detail::GoQuote(type_url) +
                         ": no TypeResolver (UnmarshalOptions::type_resolver)");
   }
 
   const Descriptor* inner_desc = resolver_->FindMessageByURL(type_url);
   if (!inner_desc) {
-    return PosError(url_pos, "cannot resolve Any type " + QuoteKey(type_url));
+    return PosError(url_pos, "cannot resolve Any type " + detail::GoQuote(type_url));
   }
   pb::DynamicMessageFactory factory(inner_desc->file()->pool());
   std::unique_ptr<Message> inner(factory.GetPrototype(inner_desc)->New());
@@ -1992,7 +1944,8 @@ Status PostDecoder::Run(Message* msg,
     if (null_mask_fd != nullptr && fd->number() == null_mask_fd->number()) continue;
     std::string path = prefix + std::string(fd->name());
     if (!result_->Has(path)) {
-      if (p.required) return Status::Error(1, 1, "required field " + QuoteKey(path) + " is absent");
+      if (p.required)
+        return Status::Error(1, 1, "required field " + detail::GoQuote(path) + " is absent");
       if (p.def.has_value() && !OneofChosen(fd, prefix)) {
         if (Status st = ApplyDefault(msg, fd, *p.def); !st.ok()) return st;
       }

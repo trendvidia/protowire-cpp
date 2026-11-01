@@ -138,12 +138,12 @@ std::string FormatRFC3339Nano(int64_t seconds, int32_t nanos) {
                   ss);
     return std::string(buf);
   }
-  // Trim trailing zeros to 3/6/9 width.
+  // Trim every trailing zero, as Go's time.RFC3339Nano does.
   int width = 9;
   int n = nanos;
-  while (width > 3 && n % 1000 == 0) {
-    n /= 1000;
-    width -= 3;
+  while (n % 10 == 0) {
+    n /= 10;
+    --width;
   }
   std::snprintf(buf,
                 sizeof(buf),

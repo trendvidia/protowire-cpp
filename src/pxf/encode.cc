@@ -4,20 +4,22 @@
 //
 // Coverage matches the decoder: scalars, repeats, maps, nested messages,
 // and the sugar of the well-known types, Any, the big numbers and pxf.Secret.
-// Of the _null FieldMask, only top-level paths are written as `field = null`.
+// Mirrors protowire-go's encode.go, which fixes the text byte for byte.
 
 #include "protowire/pxf.h"
 #include "protowire/pxf/annotations.h"
 #include "protowire/pxf/format.h"
 #include "protowire/pxf/keyed.h"
+#include "protowire/pxf/result.h"
 
 #include <algorithm>
 #include <charconv>
-#include <cstdio>
+#include <cmath>
 #include <map>
-#include <sstream>
+#include <memory>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <google/protobuf/descriptor.h>
@@ -26,6 +28,7 @@
 
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
+#include "protowire/detail/go_quote.h"
 #include "protowire/detail/rfc3339.h"
 #include "protowire/pxf/wellknown.h"
 
@@ -42,20 +45,15 @@ class Encoder {
  public:
   Encoder(const MarshalOptions& opts, std::string& out) : opts_(opts), out_(out) {}
 
-  // Pre-compute null-path lookup at the top level. Only top-level paths
-  // currently emitted as `field = null`; nested null tracking would require
-  // walking the path components against descriptors at each level.
-  void SetNullPaths(std::vector<std::string> paths) {
-    for (auto& p : paths) {
-      if (p.find('.') == std::string::npos) {
-        top_level_nulls_.insert(std::move(p));
-      } else {
-        nested_nulls_.insert(std::move(p));
-      }
-    }
+  // SetNullPaths names the fields written as `field = null`, by the path
+  // UnmarshalFull records them under. Paths are only built once there is a
+  // set to look them up in.
+  void SetNullPaths(const std::vector<std::string>& paths) {
+    null_set_.insert(paths.begin(), paths.end());
+    track_nulls_ = true;
   }
 
-  void SetNullMaskFd(const google::protobuf::FieldDescriptor* fd) { null_mask_fd_ = fd; }
+  void SetNullMaskFd(const FieldDescriptor* fd) { null_mask_fd_ = fd; }
 
   Status EncodeMessage(const Message& msg, int level);
 
@@ -70,6 +68,25 @@ class Encoder {
     out_ += " = ";
   }
 
+  void WriteBlockOpen(int level, std::string_view name) {
+    Indent(level);
+    out_.append(name.data(), name.size());
+    out_ += " {\n";
+  }
+
+  // Enter extends the null-lookup path by `name<suffix>.`, as the decoder
+  // extends its presence path, so that a null recorded inside a body is
+  // found where it was recorded. It returns the path to restore.
+  std::string Enter(std::string_view name, const std::string& suffix = "") {
+    std::string saved = path_prefix_;
+    if (track_nulls_) {
+      path_prefix_.append(name.data(), name.size());
+      path_prefix_ += suffix;
+      path_prefix_ += '.';
+    }
+    return saved;
+  }
+
   Status EncodeField(const Message& msg, const FieldDescriptor* fd, int level);
   Status EncodeListField(const Message& msg, const FieldDescriptor* fd, int level);
   Status EncodeKeyedList(const Message& msg,
@@ -77,21 +94,25 @@ class Encoder {
                          const FieldDescriptor* key_fd,
                          int level);
   Status EncodeMapField(const Message& msg, const FieldDescriptor* fd, int level);
-  Status EncodeMessageValue(const Message& sub, int level);
+  Status EncodeMessageField(const FieldDescriptor* fd, const Message& sub, int level);
+  // Writes `name { @type = ... }`. *encoded stays false when the Any has no
+  // body this port can show, and the caller writes its plain fields.
+  Status TryEncodeAny(const FieldDescriptor* fd, const Message& any, int level, bool* encoded);
+  Status WriteLiteralMessage(const Message& sub);
 
-  void EncodeScalar(const Message& msg, const FieldDescriptor* fd, int idx);
   // For repeated fields: index into element idx; for non-repeated: idx=-1.
   void EncodeScalarValue(const Message& msg, const FieldDescriptor* fd, int idx);
 
   void EmitString(std::string_view s);
   void EmitBytes(std::string_view raw);
+  void EmitFloat(double v, bool is_float);
 
   const MarshalOptions& opts_;
   std::string& out_;
-  std::unordered_set<std::string> top_level_nulls_;
-  std::unordered_set<std::string> nested_nulls_;
-  const google::protobuf::FieldDescriptor* null_mask_fd_ = nullptr;
-  bool at_top_level_ = true;
+  std::unordered_set<std::string> null_set_;
+  bool track_nulls_ = false;
+  std::string path_prefix_;
+  const FieldDescriptor* null_mask_fd_ = nullptr;
   // Key field to omit from the NEXT EncodeMessage call: the entry name of
   // a keyed-block entry already carries its value (draft -01 §3.13).
   const FieldDescriptor* skip_key_fd_ = nullptr;
@@ -109,6 +130,53 @@ bool SecretHasMetadata(const Message& secret) {
     }
   }
   return false;
+}
+
+// Nullable is whether null can bind to fd (the decoder's CheckNullable). A
+// field the set names that cannot is written as if it were not named.
+bool Nullable(const FieldDescriptor* fd) {
+  return fd->has_presence() && !fd->is_repeated() && !fd->is_required();
+}
+
+// IsLiteralMessage reports whether sub is written as one literal. A Secret
+// is only without metadata, which the literal would drop.
+bool IsLiteralMessage(const Message& sub) {
+  const auto* d = sub.GetDescriptor();
+  if (IsSecret(d)) return !SecretHasMetadata(sub);
+  return IsTimestamp(d) || IsDuration(d) || WrapperInnerCppType(d) != -1 || IsBigInt(d) ||
+         IsDecimal(d) || IsBigFloat(d);
+}
+
+// MapKeyText is how a key is written and what entries sort by: bare where
+// identifier-safe, and quoted as strconv.Quote does otherwise.
+std::string MapKeyText(const Message& entry, const FieldDescriptor* key_fd) {
+  const Reflection* r = entry.GetReflection();
+  switch (key_fd->cpp_type()) {
+    case FieldDescriptor::CPPTYPE_STRING: {
+      std::string scratch;
+      const std::string& k = r->GetStringReference(entry, key_fd, &scratch);
+      return IsIdentifierSafeEntryName(k) ? k : detail::GoQuote(k);
+    }
+    case FieldDescriptor::CPPTYPE_INT32:
+      return std::to_string(r->GetInt32(entry, key_fd));
+    case FieldDescriptor::CPPTYPE_INT64:
+      return std::to_string(r->GetInt64(entry, key_fd));
+    case FieldDescriptor::CPPTYPE_UINT32:
+      return std::to_string(r->GetUInt32(entry, key_fd));
+    case FieldDescriptor::CPPTYPE_UINT64:
+      return std::to_string(r->GetUInt64(entry, key_fd));
+    default:
+      return r->GetBool(entry, key_fd) ? "true" : "false";
+  }
+}
+
+// MapKeyPath is a key as it appears in a path, `by_key["k"]`.
+std::string MapKeyPath(const Message& entry, const FieldDescriptor* key_fd) {
+  const Reflection* r = entry.GetReflection();
+  if (key_fd->cpp_type() == FieldDescriptor::CPPTYPE_STRING) {
+    return "[" + detail::GoQuote(r->GetString(entry, key_fd)) + "]";
+  }
+  return "[" + MapKeyText(entry, key_fd) + "]";
 }
 
 // KeyedFormEligible reports whether every element of the repeated field
@@ -170,6 +238,51 @@ void Encoder::EmitBytes(std::string_view raw) {
   out_ += '"';
 }
 
+// EmitFloat writes what strconv.AppendFloat(v, 'g', -1, bits) does: the
+// shortest digits that read back as v, positional for exponents from -4 to 5
+// and otherwise d.ddde±XX, with at least two exponent digits.
+void Encoder::EmitFloat(double v, bool is_float) {
+  if (std::isinf(v)) {
+    out_ += v > 0 ? "inf" : "-inf";
+    return;
+  }
+  if (std::isnan(v)) {
+    out_ += "nan";
+    return;
+  }
+  char buf[64];
+  auto r = is_float
+               ? std::to_chars(
+                     buf, buf + sizeof(buf), static_cast<float>(v), std::chars_format::scientific)
+               : std::to_chars(buf, buf + sizeof(buf), v, std::chars_format::scientific);
+  std::string_view sci(buf, static_cast<size_t>(r.ptr - buf));
+  if (sci.front() == '-') {
+    out_ += '-';
+    sci.remove_prefix(1);
+  }
+  const size_t e = sci.find('e');
+  std::string digits(sci.substr(0, e));
+  digits.erase(std::remove(digits.begin(), digits.end(), '.'), digits.end());
+  int exp = 0;
+  std::from_chars(sci.data() + e + (sci[e + 1] == '+' ? 2 : 1), sci.data() + sci.size(), exp);
+  if (exp < -4 || exp >= 6) {
+    out_ += sci;
+    return;
+  }
+  if (exp < 0) {
+    out_ += "0.";
+    out_.append(static_cast<size_t>(-exp - 1), '0');
+    out_ += digits;
+  } else if (static_cast<size_t>(exp) + 1 >= digits.size()) {
+    out_ += digits;
+    out_.append(static_cast<size_t>(exp) + 1 - digits.size(), '0');
+  } else {
+    out_.append(digits, 0, static_cast<size_t>(exp) + 1);
+    out_ += '.';
+    out_.append(digits, static_cast<size_t>(exp) + 1);
+  }
+}
+
 void Encoder::EncodeScalarValue(const Message& msg, const FieldDescriptor* fd, int idx) {
   const Reflection* r = msg.GetReflection();
   bool repeated = idx >= 0;
@@ -201,33 +314,21 @@ void Encoder::EncodeScalarValue(const Message& msg, const FieldDescriptor* fd, i
     case FieldDescriptor::CPPTYPE_UINT64:
       out_ += std::to_string(repeated ? r->GetRepeatedUInt64(msg, fd, idx) : r->GetUInt64(msg, fd));
       break;
-    case FieldDescriptor::CPPTYPE_FLOAT: {
-      // %.9g: round-trip-safe minimum for IEEE 754 binary32. fewer digits
-      // would silently drop precision, which the comprehensive
-      // PXF↔binary↔PXF tests caught.
-      char buf[32];
-      std::snprintf(
-          buf,
-          sizeof(buf),
-          "%.9g",
-          static_cast<double>(repeated ? r->GetRepeatedFloat(msg, fd, idx) : r->GetFloat(msg, fd)));
-      out_ += buf;
+    case FieldDescriptor::CPPTYPE_FLOAT:
+      EmitFloat(repeated ? r->GetRepeatedFloat(msg, fd, idx) : r->GetFloat(msg, fd), true);
       break;
-    }
-    case FieldDescriptor::CPPTYPE_DOUBLE: {
-      // %.17g: round-trip-safe minimum for IEEE 754 binary64.
-      char buf[32];
-      std::snprintf(buf,
-                    sizeof(buf),
-                    "%.17g",
-                    repeated ? r->GetRepeatedDouble(msg, fd, idx) : r->GetDouble(msg, fd));
-      out_ += buf;
+    case FieldDescriptor::CPPTYPE_DOUBLE:
+      EmitFloat(repeated ? r->GetRepeatedDouble(msg, fd, idx) : r->GetDouble(msg, fd), false);
       break;
-    }
     case FieldDescriptor::CPPTYPE_ENUM: {
-      const auto* ev = repeated ? r->GetRepeatedEnum(msg, fd, idx) : r->GetEnum(msg, fd);
-      auto name_sv = ev->name();
-      out_.append(name_sv.data(), name_sv.size());
+      // An open enum can hold a number with no name.
+      const int n = repeated ? r->GetRepeatedEnumValue(msg, fd, idx) : r->GetEnumValue(msg, fd);
+      const auto* ev = fd->enum_type()->FindValueByNumber(n);
+      if (ev != nullptr) {
+        out_.append(ev->name().data(), ev->name().size());
+      } else {
+        out_ += std::to_string(n);
+      }
       break;
     }
     case FieldDescriptor::CPPTYPE_MESSAGE:
@@ -236,42 +337,8 @@ void Encoder::EncodeScalarValue(const Message& msg, const FieldDescriptor* fd, i
   }
 }
 
-Status Encoder::EncodeMessageValue(const Message& sub, int level) {
+Status Encoder::WriteLiteralMessage(const Message& sub) {
   const auto* d = sub.GetDescriptor();
-  // google.protobuf.Any sugar: emit `{ @type = "..." inner_fields }`
-  // when the resolver can find the inner type.
-  if (IsAny(d) && opts_.type_resolver != nullptr) {
-    std::string type_url, value;
-    {
-      std::string scratch;
-      type_url = std::string(
-          sub.GetReflection()->GetStringReference(sub, d->FindFieldByName("type_url"), &scratch));
-      value = std::string(
-          sub.GetReflection()->GetStringReference(sub, d->FindFieldByName("value"), &scratch));
-    }
-    if (!type_url.empty()) {
-      const auto* inner_desc = opts_.type_resolver->FindMessageByURL(type_url);
-      if (inner_desc) {
-        google::protobuf::DynamicMessageFactory factory(inner_desc->file()->pool());
-        std::unique_ptr<Message> inner(factory.GetPrototype(inner_desc)->New());
-        if (inner->ParseFromString(value)) {
-          out_ += "{\n";
-          Indent(level + 1);
-          out_ += "@type = ";
-          EmitString(type_url);
-          out_ += "\n";
-          // Encode inner fields at level+1 by delegating to a fresh encoder
-          // run on the inner message.
-          Status st = EncodeMessage(*inner, level + 1);
-          if (!st.ok()) return st;
-          Indent(level);
-          out_ += "}";
-          return Status::OK();
-        }
-      }
-    }
-    // Fall through to generic block emission if the resolver failed.
-  }
   if (IsTimestamp(d)) {
     int64_t s;
     int32_t n;
@@ -286,32 +353,66 @@ Status Encoder::EncodeMessageValue(const Message& sub, int level) {
     out_ += detail::FormatDuration(s, n);
     return Status::OK();
   }
-  // Wrapper sugar — emit just the inner value.
-  if (WrapperInnerCppType(d) != -1) {
-    const FieldDescriptor* inner = d->FindFieldByName("value");
-    EncodeScalarValue(sub, inner, /*idx=*/-1);
-    return Status::OK();
-  }
-  if (IsBigInt(d) || IsDecimal(d) || IsBigFloat(d)) {
-    auto literal = IsBigInt(d)    ? ReadBigIntAsString(sub)
-                   : IsDecimal(d) ? ReadDecimalAsString(sub)
-                                  : ReadBigFloatAsString(sub);
-    if (!literal.ok()) return literal.status();
-    out_ += *literal;
-    return Status::OK();
-  }
-  // A Secret with no metadata is its value: the block form would only add
-  // noise, and with metadata the scalar form would lose it.
-  if (IsSecret(d) && !SecretHasMetadata(sub)) {
+  if (WrapperInnerCppType(d) != -1 || IsSecret(d)) {
     EncodeScalarValue(sub, d->FindFieldByName("value"), /*idx=*/-1);
     return Status::OK();
   }
-  // Generic message — open block, recurse, close.
-  out_ += "{\n";
-  Status st = EncodeMessage(sub, level + 1);
+  auto literal = IsBigInt(d)    ? ReadBigIntAsString(sub)
+                 : IsDecimal(d) ? ReadDecimalAsString(sub)
+                                : ReadBigFloatAsString(sub);
+  if (!literal.ok()) return literal.status();
+  out_ += *literal;
+  return Status::OK();
+}
+
+Status Encoder::TryEncodeAny(const FieldDescriptor* fd,
+                             const Message& any,
+                             int level,
+                             bool* encoded) {
+  const auto* d = any.GetDescriptor();
+  const std::string type_url = any.GetReflection()->GetString(any, d->FindFieldByName("type_url"));
+  if (type_url.empty()) return Status::OK();
+  const auto* inner_desc = opts_.type_resolver->FindMessageByURL(type_url);
+  if (inner_desc == nullptr) return Status::OK();
+  pb::DynamicMessageFactory factory(inner_desc->file()->pool());
+  std::unique_ptr<Message> inner(factory.GetPrototype(inner_desc)->New());
+  if (!inner->ParseFromString(any.GetReflection()->GetString(any, d->FindFieldByName("value")))) {
+    return Status::OK();
+  }
+  WriteBlockOpen(level, fd->name());
+  Indent(level + 1);
+  out_ += "@type = ";
+  EmitString(type_url);
+  out_ += "\n";
+  std::string saved = Enter(fd->name());
+  Status st = EncodeMessage(*inner, level + 1);
+  path_prefix_ = std::move(saved);
   if (!st.ok()) return st;
   Indent(level);
-  out_ += "}";
+  out_ += "}\n";
+  *encoded = true;
+  return Status::OK();
+}
+
+Status Encoder::EncodeMessageField(const FieldDescriptor* fd, const Message& sub, int level) {
+  if (IsLiteralMessage(sub)) {
+    WriteFieldPrefix(level, fd->name());
+    if (Status st = WriteLiteralMessage(sub); !st.ok()) return st;
+    out_ += "\n";
+    return Status::OK();
+  }
+  if (IsAny(fd->message_type()) && opts_.type_resolver != nullptr) {
+    bool encoded = false;
+    if (Status st = TryEncodeAny(fd, sub, level, &encoded); !st.ok()) return st;
+    if (encoded) return Status::OK();
+  }
+  WriteBlockOpen(level, fd->name());
+  std::string saved = Enter(fd->name());
+  Status st = EncodeMessage(sub, level + 1);
+  path_prefix_ = std::move(saved);
+  if (!st.ok()) return st;
+  Indent(level);
+  out_ += "}\n";
   return Status::OK();
 }
 
@@ -325,9 +426,7 @@ Status Encoder::EncodeKeyedList(const Message& msg,
                                 int level) {
   const Reflection* r = msg.GetReflection();
   int n = r->FieldSize(msg, fd);
-  Indent(level);
-  out_.append(fd->name().data(), fd->name().size());
-  out_ += " {\n";
+  WriteBlockOpen(level, fd->name());
   for (int i = 0; i < n; ++i) {
     const Message& sub = r->GetRepeatedMessage(msg, fd, i);
     std::string scratch;
@@ -340,7 +439,9 @@ Status Encoder::EncodeKeyedList(const Message& msg,
     }
     out_ += " {\n";
     skip_key_fd_ = key_fd;
+    std::string saved = Enter(fd->name(), "[" + std::to_string(i) + "]");
     Status st = EncodeMessage(sub, level + 2);
+    path_prefix_ = std::move(saved);
     if (!st.ok()) return st;
     Indent(level + 1);
     out_ += "}\n";
@@ -360,25 +461,30 @@ Status Encoder::EncodeListField(const Message& msg, const FieldDescriptor* fd, i
     if (KeyedFormEligible(msg, fd, key_fd)) return EncodeKeyedList(msg, fd, key_fd, level);
   }
   WriteFieldPrefix(level, fd->name());
-  out_ += "[";
-  if (fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
-    out_ += "\n";
-    for (int i = 0; i < n; ++i) {
-      Indent(level + 1);
+  out_ += "[\n";
+  for (int i = 0; i < n; ++i) {
+    Indent(level + 1);
+    if (fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
       const Message& sub = r->GetRepeatedMessage(msg, fd, i);
-      Status st = EncodeMessageValue(sub, level + 1);
-      if (!st.ok()) return st;
-      out_ += "\n";
-    }
-    Indent(level);
-    out_ += "]\n";
-  } else {
-    for (int i = 0; i < n; ++i) {
-      if (i) out_ += ", ";
+      if (IsLiteralMessage(sub)) {
+        if (Status st = WriteLiteralMessage(sub); !st.ok()) return st;
+      } else {
+        out_ += "{\n";
+        std::string saved = Enter(fd->name(), "[" + std::to_string(i) + "]");
+        Status st = EncodeMessage(sub, level + 2);
+        path_prefix_ = std::move(saved);
+        if (!st.ok()) return st;
+        Indent(level + 1);
+        out_ += '}';
+      }
+    } else {
       EncodeScalarValue(msg, fd, i);
     }
-    out_ += "]\n";
+    if (i < n - 1) out_ += ',';
+    out_ += '\n';
   }
+  Indent(level);
+  out_ += "]\n";
   return Status::OK();
 }
 
@@ -390,79 +496,34 @@ Status Encoder::EncodeMapField(const Message& msg, const FieldDescriptor* fd, in
   const FieldDescriptor* key_fd = fd->message_type()->map_key();
   const FieldDescriptor* val_fd = fd->message_type()->map_value();
 
-  // Collect entries to emit in sorted order for stable output.
-  std::vector<int> indices(n);
-  for (int i = 0; i < n; ++i) indices[i] = i;
-  std::sort(indices.begin(), indices.end(), [&](int a, int b) {
-    const Message& ea = r->GetRepeatedMessage(msg, fd, a);
-    const Message& eb = r->GetRepeatedMessage(msg, fd, b);
-    const Reflection* er = ea.GetReflection();
-    switch (key_fd->cpp_type()) {
-      case FieldDescriptor::CPPTYPE_STRING: {
-        std::string s_a, s_b;
-        return er->GetStringReference(ea, key_fd, &s_a) < er->GetStringReference(eb, key_fd, &s_b);
-      }
-      case FieldDescriptor::CPPTYPE_INT32:
-        return er->GetInt32(ea, key_fd) < er->GetInt32(eb, key_fd);
-      case FieldDescriptor::CPPTYPE_INT64:
-        return er->GetInt64(ea, key_fd) < er->GetInt64(eb, key_fd);
-      case FieldDescriptor::CPPTYPE_UINT32:
-        return er->GetUInt32(ea, key_fd) < er->GetUInt32(eb, key_fd);
-      case FieldDescriptor::CPPTYPE_UINT64:
-        return er->GetUInt64(ea, key_fd) < er->GetUInt64(eb, key_fd);
-      case FieldDescriptor::CPPTYPE_BOOL:
-        return !er->GetBool(ea, key_fd) && er->GetBool(eb, key_fd);
-      default:
-        return false;
-    }
-  });
+  // Entries sort by their written key, as text: 10 comes before 9.
+  std::vector<std::pair<std::string, int>> entries;
+  entries.reserve(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    entries.emplace_back(MapKeyText(r->GetRepeatedMessage(msg, fd, i), key_fd), i);
+  }
+  std::sort(entries.begin(), entries.end());
 
-  for (int i : indices) {
-    Indent(level + 1);
+  for (const auto& [key, i] : entries) {
     const Message& entry = r->GetRepeatedMessage(msg, fd, i);
     const Reflection* er = entry.GetReflection();
-    // Key.
-    switch (key_fd->cpp_type()) {
-      case FieldDescriptor::CPPTYPE_STRING: {
-        std::string scratch;
-        // Bare only when identifier-safe: "true", "null" and "123" bare
-        // would denote a bool key, no key, and an integer key (draft -01
-        // § Entries and Keys; protowire#306).
-        const std::string& k = er->GetStringReference(entry, key_fd, &scratch);
-        if (IsIdentifierSafe(k)) {
-          out_ += k;
-        } else {
-          EmitString(k);
-        }
-        break;
-      }
-      case FieldDescriptor::CPPTYPE_INT32:
-        out_ += std::to_string(er->GetInt32(entry, key_fd));
-        break;
-      case FieldDescriptor::CPPTYPE_INT64:
-        out_ += std::to_string(er->GetInt64(entry, key_fd));
-        break;
-      case FieldDescriptor::CPPTYPE_UINT32:
-        out_ += std::to_string(er->GetUInt32(entry, key_fd));
-        break;
-      case FieldDescriptor::CPPTYPE_UINT64:
-        out_ += std::to_string(er->GetUInt64(entry, key_fd));
-        break;
-      case FieldDescriptor::CPPTYPE_BOOL:
-        out_ += er->GetBool(entry, key_fd) ? "true" : "false";
-        break;
-      default:
-        return Status::Error("unsupported map key kind on encode");
-    }
+    Indent(level + 1);
+    out_ += key;
     out_ += ": ";
-    if (val_fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
-      const Message& sub = er->GetMessage(entry, val_fd);
-      Status st = EncodeMessageValue(sub, level + 1);
-      if (!st.ok()) return st;
-    } else {
+    if (val_fd->cpp_type() != FieldDescriptor::CPPTYPE_MESSAGE) {
       EncodeScalarValue(entry, val_fd, /*idx=*/-1);
+    } else if (const Message& sub = er->GetMessage(entry, val_fd); IsLiteralMessage(sub)) {
+      if (Status st = WriteLiteralMessage(sub); !st.ok()) return st;
+    } else {
+      out_ += "{\n";
+      std::string saved = Enter(fd->name(), MapKeyPath(entry, key_fd));
+      Status st = EncodeMessage(sub, level + 2);
+      path_prefix_ = std::move(saved);
+      if (!st.ok()) return st;
+      Indent(level + 1);
+      out_ += '}';
     }
-    out_ += "\n";
+    out_ += '\n';
   }
   Indent(level);
   out_ += "}\n";
@@ -475,54 +536,13 @@ Status Encoder::EncodeField(const Message& msg, const FieldDescriptor* fd, int l
     if (r->FieldSize(msg, fd) == 0 && !opts_.emit_defaults) return Status::OK();
     return fd->is_map() ? EncodeMapField(msg, fd, level) : EncodeListField(msg, fd, level);
   }
-  if (!opts_.emit_defaults && !r->HasField(msg, fd) &&
-      fd->cpp_type() != FieldDescriptor::CPPTYPE_MESSAGE) {
-    // Proto3 scalar zero — skip.
-    bool is_zero = false;
-    switch (fd->cpp_type()) {
-      case FieldDescriptor::CPPTYPE_STRING: {
-        std::string s;
-        is_zero = r->GetStringReference(msg, fd, &s).empty();
-        break;
-      }
-      case FieldDescriptor::CPPTYPE_BOOL:
-        is_zero = !r->GetBool(msg, fd);
-        break;
-      case FieldDescriptor::CPPTYPE_INT32:
-        is_zero = r->GetInt32(msg, fd) == 0;
-        break;
-      case FieldDescriptor::CPPTYPE_INT64:
-        is_zero = r->GetInt64(msg, fd) == 0;
-        break;
-      case FieldDescriptor::CPPTYPE_UINT32:
-        is_zero = r->GetUInt32(msg, fd) == 0;
-        break;
-      case FieldDescriptor::CPPTYPE_UINT64:
-        is_zero = r->GetUInt64(msg, fd) == 0;
-        break;
-      case FieldDescriptor::CPPTYPE_FLOAT:
-        is_zero = r->GetFloat(msg, fd) == 0;
-        break;
-      case FieldDescriptor::CPPTYPE_DOUBLE:
-        is_zero = r->GetDouble(msg, fd) == 0;
-        break;
-      case FieldDescriptor::CPPTYPE_ENUM:
-        is_zero = r->GetEnumValue(msg, fd) == 0;
-        break;
-      default:
-        break;
-    }
-    if (is_zero) return Status::OK();
-  }
   if (fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
-    if (!opts_.emit_defaults && !r->HasField(msg, fd)) return Status::OK();
-    WriteFieldPrefix(level, fd->name());
-    const Message& sub = r->GetMessage(msg, fd);
-    Status st = EncodeMessageValue(sub, level);
-    if (!st.ok()) return st;
-    out_ += "\n";
-    return Status::OK();
+    // Unset stays unwritten under emit_defaults too: a message that holds its
+    // own type would otherwise never end.
+    if (!r->HasField(msg, fd)) return Status::OK();
+    return EncodeMessageField(fd, r->GetMessage(msg, fd), level);
   }
+  if (!opts_.emit_defaults && !r->HasField(msg, fd)) return Status::OK();
   WriteFieldPrefix(level, fd->name());
   EncodeScalarValue(msg, fd, /*idx=*/-1);
   out_ += "\n";
@@ -531,7 +551,6 @@ Status Encoder::EncodeField(const Message& msg, const FieldDescriptor* fd, int l
 
 Status Encoder::EncodeMessage(const Message& msg, int level) {
   const auto* desc = msg.GetDescriptor();
-  bool was_top = at_top_level_;
   // A pending skip_key_fd_ applies to exactly this body: the entry name of
   // a keyed-block entry already carries the key field's value, so the
   // field is not additionally emitted inside the block. Consume it so
@@ -541,18 +560,15 @@ Status Encoder::EncodeMessage(const Message& msg, int level) {
   for (int i = 0; i < desc->field_count(); ++i) {
     const FieldDescriptor* fd = desc->field(i);
     if (skip_key != nullptr && fd == skip_key) continue;
-    if (was_top && null_mask_fd_ && fd == null_mask_fd_) {
-      continue;  // skip the _null FieldMask itself
-    }
-    if (was_top && top_level_nulls_.count(std::string(fd->name())) > 0) {
+    // Level 0 is the root: a field of this number in a body is data.
+    if (level == 0 && null_mask_fd_ != nullptr && fd->number() == null_mask_fd_->number()) continue;
+    if (track_nulls_ && Nullable(fd) &&
+        null_set_.count(path_prefix_ + std::string(fd->name())) > 0) {
       WriteFieldPrefix(level, fd->name());
       out_ += "null\n";
       continue;
     }
-    at_top_level_ = false;
-    Status st = EncodeField(msg, fd, level);
-    at_top_level_ = was_top;
-    if (!st.ok()) return st;
+    if (Status st = EncodeField(msg, fd, level); !st.ok()) return st;
   }
   return Status::OK();
 }
@@ -568,9 +584,12 @@ StatusOr<std::string> Marshal(const Message& msg, MarshalOptions opts) {
     out += "\n\n";
   }
   Encoder enc(opts, out);
-  if (auto* null_mask = FindNullMaskField(msg.GetDescriptor())) {
-    enc.SetNullMaskFd(null_mask);
+  const FieldDescriptor* null_mask = FindNullMaskField(msg.GetDescriptor());
+  enc.SetNullMaskFd(null_mask);
+  if (null_mask != nullptr && msg.GetReflection()->HasField(msg, null_mask)) {
     enc.SetNullPaths(ReadNullPaths(msg, null_mask));
+  } else if (opts.null_fields != nullptr) {
+    enc.SetNullPaths(opts.null_fields->NullFields());
   }
   Status st = enc.EncodeMessage(msg, 0);
   if (!st.ok()) return st;

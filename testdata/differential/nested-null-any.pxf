@@ -1,0 +1,2 @@
+@type diff.v1.Root
+any { @type = "diff.v1.Leaf" label = null text = "t" }

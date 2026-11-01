@@ -57,6 +57,7 @@ endfunction()
 # --- Foundation -----------------------------------------------------------
 add_library(protowire_detail STATIC
   src/detail/base64.cc
+  src/detail/go_quote.cc
   src/detail/rfc3339.cc
   src/detail/duration.cc
   src/detail/status.cc)
@@ -211,6 +212,7 @@ if(TARGET protowire_pxf AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cmd/check_decode/
   find_library(PROTOWIRE_PROTOC_LIB protoc)
   if(PROTOWIRE_PROTOC_LIB)
     add_subdirectory(cmd/check_decode)
+    add_subdirectory(cmd/pxf_diff)
   else()
     message(STATUS "libprotoc not found — skipping cmd/check_decode (HARDENING corpus harness)")
   endif()

@@ -1,0 +1,10 @@
+add_executable(pxf_diff main.cc)
+set_target_properties(pxf_diff PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+find_package(Protobuf REQUIRED)
+find_library(PROTOC_LIB protoc)
+if(NOT PROTOC_LIB)
+  message(FATAL_ERROR "libprotoc not found — install libprotoc-dev (or equivalent)")
+endif()
+target_compile_definitions(pxf_diff PRIVATE WKT_PROTO_DIR="${Protobuf_INCLUDE_DIR}")
+target_link_libraries(pxf_diff PRIVATE protowire_pxf ${PROTOC_LIB} protobuf::libprotobuf)

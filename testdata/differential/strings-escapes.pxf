@@ -1,0 +1,4 @@
+@type diff.v1.Root
+text = "a\"b\\c\nd\te\rf\x01\x7f é ​ 😀"
+strs = ["", " ", "\a\b\f\v", "#x", "\u0085", " "]
+blob = b"AAECAwQ="

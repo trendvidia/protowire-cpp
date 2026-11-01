@@ -9,6 +9,8 @@
 
 namespace protowire::pxf {
 
+class Result;
+
 // Resolves Any type URLs to message descriptors. Plug in by deriving from
 // this interface and passing the instance via UnmarshalOptions / MarshalOptions.
 class TypeResolver {
@@ -63,6 +65,9 @@ struct MarshalOptions {
   bool emit_defaults = false;
   std::string type_url;  // emit @type directive if non-empty
   TypeResolver* type_resolver = nullptr;
+  // Fields to write as `field = null`, for a message with no _null mask set.
+  // The Result must outlive the call.
+  const Result* null_fields = nullptr;
 };
 
 }  // namespace protowire::pxf
