@@ -301,10 +301,12 @@ class BodyWriter {
   explicit BodyWriter(const DatasetRow& row) : row_(row) { body_.push_back('\n'); }
 
   void Cell(const std::string& name, int col) {
+    const auto& cell = row_.cells[col];
+    if (!cell.has_value()) return;  // callers pass non-empty cells
     const size_t start = body_.size();
     body_.append(name);
     body_.append(" = ");
-    body_.append(FormatValue(*row_.cells[col]));
+    body_.append(FormatValue(*cell));
     body_.push_back('\n');
     const int lines = static_cast<int>(std::count(body_.begin() + start, body_.end(), '\n'));
     spans_.push_back(CellSpan{col, line_, line_ + lines - 1});
