@@ -1635,7 +1635,15 @@ Status ApplyMessageDefault(Message* msg, const FieldDescriptor* fd, std::string_
 // `msg`'s `fd` slot. Mirrors protowire-go applyDefault — handles every scalar
 // kind plus enum, bytes, and the well-known message types in
 // ApplyMessageDefault above.
+//
+// ValidateFile rejects what this rejects (CheckDefaultPlacement), but
+// skip_validate bypasses that, and a scalar setter on a repeated or map field
+// aborts in libprotobuf.
 Status ApplyDefault(Message* msg, const FieldDescriptor* fd, std::string_view def) {
+  if (fd->is_repeated()) {
+    return Status::Error("default values not supported on repeated or map field \"" +
+                         std::string(fd->name()) + "\"");
+  }
   const Reflection* r = msg->GetReflection();
   switch (fd->cpp_type()) {
     case FieldDescriptor::CPPTYPE_STRING: {

@@ -37,6 +37,11 @@ bool IsBigInt(const google::protobuf::Descriptor* d);
 bool IsDecimal(const google::protobuf::Descriptor* d);
 bool IsBigFloat(const google::protobuf::Descriptor* d);
 
+// IsDefaultable reports a message type one PXF literal can denote, which is
+// the set a (pxf.default) is valid on: Timestamp, Duration, the wrappers and
+// the big numbers.
+bool IsDefaultable(const google::protobuf::Descriptor* d);
+
 // Set/read helpers for the byte-magnitude pxf.BigInt / pxf.Decimal /
 // pxf.BigFloat schemas. The string form is a bare numeric literal as it
 // appears in PXF text — these helpers parse/format it.

@@ -40,9 +40,20 @@ enum class ViolationKind : uint8_t {
   // rejects a document where the field is absent, and the second treats it
   // as supplied.
   kRequiredOption,
+  // A (pxf.required) on a member of a oneof, which "Oneof Members" forbids:
+  // it would make every other arm undecodable. Also kRequiredOption above.
+  //
   // A default that cannot be used: an @default that reduces to no single
-  // literal, or (pxf.default) and @default carrying different values.
+  // literal; (pxf.default) and @default carrying different values; one on a
+  // repeated, map or group field, or on a message type with no literal
+  // ("Default Placement"); or on more than one member of a oneof ("Oneof
+  // Members").
   kDefaultOption,
+  // An option at an extension number protowire retired when it moved to its
+  // registered block (STABILITY.md promise 3). The descriptor predates that
+  // move and must be recompiled. Checked only in a file that imports one of
+  // protowire's annotation files, since other projects use these numbers.
+  kRetiredNumber,
 };
 
 const char* ViolationKindName(ViolationKind k);
@@ -52,12 +63,14 @@ const char* ViolationKindName(ViolationKind k);
 struct Violation {
   std::string file;     // .proto file path the offending element is declared in
   std::string element;  // fully-qualified protobuf name (e.g. "trades.v1.Side.null")
-  // Bare reserved identifier, the (pxf.key) value for kKeyOption, or the
-  // (pxf.default) literal for kRequiredOption beside a default.
+  // Bare reserved identifier, the (pxf.key) value for kKeyOption, the
+  // (pxf.default) literal for kDefaultOption or for kRequiredOption beside a
+  // default, the oneof's bare name for kRequiredOption on a oneof member, or
+  // the number for kRetiredNumber.
   std::string name;
   ViolationKind kind = ViolationKind::kField;
-  // Human-readable explanation; set for kKeyOption, kRequiredOption and
-  // kDefaultOption.
+  // Human-readable explanation; set for kKeyOption, kRequiredOption,
+  // kDefaultOption and kRetiredNumber.
   std::string detail;
   // The offending annotation was written @required / @default, so ToString
   // quotes that rather than an option the file does not contain.
@@ -72,11 +85,14 @@ struct Violation {
 // ValidateDescriptor walks the file containing `desc` together with its
 // transitive imports, and returns every bind-time violation in that
 // closure: reserved-name collisions among messages, oneofs, and enum
-// values; invalid (pxf.key) placements (draft -01 §3.13); and
-// (pxf.required) with (pxf.default) on one field (draft -01
-// §annotation-extensions, "Required and Default"). (pxf.required) = false
-// demands nothing, so a default beside it stands. The returned vector is
-// sorted by declaring file path and then by element fully-qualified name,
+// values; invalid (pxf.key) placements (draft -01 §3.13); invalid default
+// placements (draft -01 §annotation-extensions, "Default Placement"); the
+// two rules of "Oneof Members", that at most one member of a oneof carries
+// a default and that none carries (pxf.required); (pxf.required) with
+// (pxf.default) on one field ("Required and Default"); and options at
+// retired extension numbers. (pxf.required) = false demands nothing, so a
+// default beside it stands. The annotation rules apply to both spellings.
+// The returned vector is sorted by declaring file path and then by element fully-qualified name,
 // for stable output. An empty vector means the schema is conformant.
 //
 // Scope is the import closure, per draft -01 § Scope of Bind-Time
