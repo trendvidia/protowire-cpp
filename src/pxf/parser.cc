@@ -30,7 +30,7 @@ class Parser {
   void Advance();
   std::vector<Comment> FlushComments();
 
-  StatusOr<EntryPtr> ParseEntry(bool allow_map_entry);
+  StatusOr<EntryPtr> ParseEntry(bool allow_map_entry, bool allow_type_entry);
   StatusOr<ValuePtr> ParseValue();
   StatusOr<ValuePtr> ParseList();
   StatusOr<ValuePtr> ParseBlockVal();
@@ -165,24 +165,35 @@ StatusOr<Document> Parser::ParseDocument() {
     // Top-level: only field_entry is allowed. The document represents a
     // proto message, never a map<K,V>; map_entry (`:` form) is reserved
     // for the inside of a '{ ... }' block. See docs/grammar.ebnf -> document.
-    auto e = ParseEntry(/*allow_map_entry=*/false);
+    auto e = ParseEntry(/*allow_map_entry=*/false, /*allow_type_entry=*/false);
     if (!e.ok()) return e.status();
     doc.entries.push_back(std::move(e).consume());
   }
   return doc;
 }
 
-StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry) {
+StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry, bool allow_type_entry) {
   auto leading = FlushComments();
   Position pos = current_.pos;
-  // Accept the @type directive inside a block as an Assignment whose key is
-  // the literal "@type". Decoders that care (e.g. Any sugar) recognise it.
+  // The type entry of an Any block (draft -01 "Any Blocks"): `@type = "<url>"`
+  // as a block's first entry. A parser has no schema, so it accepts one in
+  // any block; a decoder rejects it where the block is not an Any. It is an
+  // Assignment whose key is the literal "@type".
   if (current_.kind == TokenKind::kAtType) {
+    if (!allow_type_entry) {
+      return Status::Error(pos.line, pos.column, "@type must be the first entry of a block");
+    }
     Advance();
     if (current_.kind != TokenKind::kEquals) {
       return Status::Error(current_.pos.line, current_.pos.column, "expected '=' after @type");
     }
     Advance();
+    if (current_.kind != TokenKind::kString) {
+      return Status::Error(current_.pos.line,
+                           current_.pos.column,
+                           std::string("expected string type URL after @type =, got ") +
+                               TokenKindName(current_.kind));
+    }
     auto v = ParseValue();
     if (!v.ok()) return v.status();
     auto a = std::make_unique<Assignment>();
@@ -410,7 +421,7 @@ StatusOr<std::vector<EntryPtr>> Parser::ParseBody() {
   while (current_.kind != TokenKind::kRBrace && current_.kind != TokenKind::kEOF) {
     // Inside a '{ ... }' block both forms are accepted; the schema layer
     // disambiguates submessage vs map<K,V>.
-    auto e = ParseEntry(/*allow_map_entry=*/true);
+    auto e = ParseEntry(/*allow_map_entry=*/true, /*allow_type_entry=*/out.empty());
     if (!e.ok()) return e.status();
     out.push_back(std::move(e).consume());
   }
