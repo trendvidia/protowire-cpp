@@ -410,11 +410,11 @@ const char* ViolationKindName(ViolationKind k) {
     case ViolationKind::kEnumValue:
       return "enum value";
     case ViolationKind::kKeyOption:
-      return "(pxf.key) placement";
+      return "keyed field option";
     case ViolationKind::kRequiredOption:
-      return "(pxf.required) placement";
+      return "required field option";
     case ViolationKind::kDefaultOption:
-      return "(pxf.default) placement";
+      return "default field option";
     case ViolationKind::kRetiredNumber:
       return "retired option number";
   }
@@ -423,7 +423,7 @@ const char* ViolationKindName(ViolationKind k) {
 
 std::string Violation::ToString() const {
   if (kind == ViolationKind::kKeyOption) {
-    return file + ": field \"" + element + "\" carries (pxf.key) = \"" + name + "\": " + detail +
+    return file + ": field \"" + element + "\": invalid (pxf.key) = \"" + name + "\": " + detail +
            " (draft -01 §3.13)";
   }
   if (kind == ViolationKind::kRequiredOption) {

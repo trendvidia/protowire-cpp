@@ -25,6 +25,8 @@ format changes.
 - **`ValidateFile` has the rest of the bind-time rules** (draft -01 §annotation-extensions). These are now violations, in the `(pxf.*)` and `@` spellings alike: a default on a repeated, map or group field, or on a message type with no literal; a default on more than one member of a oneof; `(pxf.required)` on a oneof member. **A schema breaking one of these now fails every decode that does not set `skip_validate`.**
 - **An option at a retired extension number is diagnosed** (STABILITY.md promise 3), as the new `ViolationKind::kRetiredNumber`. A descriptor compiled before protowire v1.12.0 lost its `(pxf.required)` and `(pxf.default)` silently; it now fails to bind and must be recompiled. The check runs only in a file importing protowire's annotations, on the Options kind each number was allocated on.
 - **`UnmarshalFull` with `skip_validate` no longer aborts on a default on a repeated or map field.** It returns an error.
+- **A bool default is exactly `true` or `false`** (protowire-go#90). Any other spelling silently became `false`; it now fails the decode. **A schema with `(pxf.default) = "True"` now fails `UnmarshalFull`.**
+- **`ViolationKindName` and `Violation::ToString` use protowire-go's text:** `keyed field option`, `default field option`, `required field option`, and `invalid (pxf.key) = "..."`.
 
 ### Changed
 

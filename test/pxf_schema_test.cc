@@ -279,7 +279,7 @@ TEST_F(PxfSchema, ViolationKindNameRendersExpectedLabels) {
   EXPECT_STREQ(ViolationKindName(ViolationKind::kField), "message field");
   EXPECT_STREQ(ViolationKindName(ViolationKind::kOneof), "oneof");
   EXPECT_STREQ(ViolationKindName(ViolationKind::kEnumValue), "enum value");
-  EXPECT_STREQ(ViolationKindName(ViolationKind::kRequiredOption), "(pxf.required) placement");
+  EXPECT_STREQ(ViolationKindName(ViolationKind::kRequiredOption), "required field option");
 }
 
 // ---- Unmarshal-time integration (the decode gate) ------------------------
