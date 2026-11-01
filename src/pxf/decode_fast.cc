@@ -1214,6 +1214,10 @@ Status DirectDecoder::DecodeKeyedBlockBody(Message* msg,
     sub->GetReflection()->SetString(sub, key_fd, name);
     keyed_elem_ = KeyedElem{std::string(fd->name()), std::string(key_fd->name()), name, true};
     std::string saved = EnterElement(fd, result_ ? IndexSuffix(r->FieldSize(*msg, fd) - 1) : "");
+    // The entry name supplies the key field, so the post-decode pass, which
+    // reads presence only, must not treat it as absent: a default would
+    // replace the name.
+    if (result_) result_->MarkPresent(path_prefix_ + std::string(key_fd->name()));
     Status st = DecodeFields(sub, /*in_block=*/true);
     LeaveElement(std::move(saved));
     if (!st.ok()) return st;

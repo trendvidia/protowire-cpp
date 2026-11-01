@@ -45,6 +45,9 @@ message P {
   map<int32, Item> by_num = 6;
   string label = 7;
   repeated KeyedDefault kd = 8 [(pxf.key) = "name"];
+  repeated KeyedRequired kr = 9 [(pxf.key) = "name"];
+  repeated KeyedOneof ko = 10 [(pxf.key) = "name"];
+  repeated KeyedNests kn = 11 [(pxf.key) = "name"];
   google.protobuf.FieldMask _null = 15;
 }
 
@@ -72,6 +75,22 @@ message Leaf {
 
 message KeyedDefault {
   string name = 1 [(pxf.default) = "key-dflt"];
+}
+
+message KeyedRequired {
+  string name = 1 [(pxf.required) = true];
+}
+
+message KeyedOneof {
+  oneof pick {
+    string name = 1;
+    string other = 2 [(pxf.default) = "other-dflt"];
+  }
+}
+
+message KeyedNests {
+  string name = 1;
+  repeated KeyedDefault inner = 2 [(pxf.key) = "name"];
 }
 
 // Required at the root, with an element holding a field of the same name.
@@ -163,6 +182,9 @@ std::string Str(const pb::Message& m, const char* field) {
 }
 bool Set(const pb::Message& m, const char* field) {
   return m.GetReflection()->HasField(m, m.GetDescriptor()->FindFieldByName(field));
+}
+std::string IndexText(int i) {
+  return "[" + std::to_string(i) + "]";
 }
 // OnlyMapValue is the value of a map holding one entry.
 const pb::Message& OnlyMapValue(const pb::Message& m, const char* field) {
@@ -335,14 +357,89 @@ TEST_F(ElementDefaults, AnAnyBodyPacksTheSameEveryTime) {
   }
 }
 
-// Matches protowire-go, the reference for every port: the entry name does
-// not count as supplying the key field, so the field's default replaces it.
-// That looks wrong, and is filed on protowire-go. Change this with Go.
-TEST_F(ElementDefaults, KeyDefaultReplacesTheEntryNameAsGoDoes) {
+// An entry name populates the element's key field (draft -01 §3.13), so it
+// counts as the document supplying that field. The pass reads presence only:
+// without the mark, a default on the key replaced the name, a required key was
+// reported absent, and a default on a oneof sibling of the key cleared it.
+// Mirrors keyed_entry_name_presence_test.go in protowire-go (#214 there).
+TEST_F(ElementDefaults, EntryNameSuppliesTheKeyField) {
+  struct Case {
+    const char* doc;
+    const char* field;
+    int index;
+    const char* want;
+  };
+  const std::vector<Case> cases = {
+      {"kd { alpha {} }\n", "kd", 0, "alpha"},
+      {"kd { \"not ident\" {} }\n", "kd", 0, "not ident"},
+      {"kd { alpha = {} }\n", "kd", 0, "alpha"},
+      {"kd = { alpha {} }\n", "kd", 0, "alpha"},
+      {"kd { a {} alpha {} }\n", "kd", 1, "alpha"},
+      {"kd { alpha { name = \"alpha\" } }\n", "kd", 0, "alpha"},
+      {"kr { alpha {} }\n", "kr", 0, "alpha"},
+      {"ko { alpha {} }\n", "ko", 0, "alpha"},
+  };
+  for (const auto& c : cases) {
+    SCOPED_TRACE(c.doc);
+    auto m = New();
+    auto r = pxf::UnmarshalFull(c.doc, m.get(), opts_);
+    ASSERT_TRUE(r.ok()) << r.status().ToString();
+    EXPECT_EQ(Str(Elem(*m, c.field, c.index), "name"), c.want);
+    EXPECT_TRUE(r->IsSet(std::string(c.field) + IndexText(c.index) + ".name"));
+  }
+}
+
+TEST_F(ElementDefaults, EntryNameInANestedKeyedField) {
   auto m = New();
-  auto r = pxf::UnmarshalFull("kd { alpha {} }\n", m.get(), opts_);
+  auto r = pxf::UnmarshalFull("kn { a { inner { alpha {} } } }\n", m.get(), opts_);
+  ASSERT_TRUE(r.ok()) << r.status().ToString();
+  EXPECT_EQ(Str(Elem(Elem(*m, "kn", 0), "inner", 0), "name"), "alpha");
+  EXPECT_TRUE(r->IsSet("kn[0].inner[0].name"));
+}
+
+// The default still fills an element the anonymous form leaves keyless: only
+// an entry name counts as supplying the key.
+TEST_F(ElementDefaults, AnonymousKeyedElementTakesTheDefault) {
+  auto m = New();
+  auto r = pxf::UnmarshalFull("kd = [{}]\n", m.get(), opts_);
   ASSERT_TRUE(r.ok()) << r.status().ToString();
   EXPECT_EQ(Str(Elem(*m, "kd", 0), "name"), "key-dflt");
+
+  auto required = New();
+  r = pxf::UnmarshalFull("kr = [{}]\n", required.get(), opts_);
+  ASSERT_FALSE(r.ok());
+  EXPECT_NE(r.status().message().find("required field \"kr[0].name\" is absent"), std::string::npos)
+      << r.status().ToString();
+}
+
+// The other members of the key's oneof see the key as chosen.
+TEST_F(ElementDefaults, EntryNameKeepsAOneofSiblingsDefaultOff) {
+  auto m = New();
+  auto r = pxf::UnmarshalFull("ko { alpha {} }\n", m.get(), opts_);
+  ASSERT_TRUE(r.ok()) << r.status().ToString();
+  EXPECT_TRUE(Set(Elem(*m, "ko", 0), "name"));
+  EXPECT_FALSE(Set(Elem(*m, "ko", 0), "other"));
+}
+
+// An Any body records its fields under the Any's path.
+TEST_F(ElementDefaults, EntryNameInAnAnyBody) {
+  auto m = New();
+  auto r = pxf::UnmarshalFull(
+      "payload { @type = \"elemdefaults.v1.KeyedNests\" inner { alpha {} } }\n", m.get(), opts_);
+  ASSERT_TRUE(r.ok()) << r.status().ToString();
+  auto inner = Unpack(Sub(*m, "payload"), "KeyedNests");
+  EXPECT_EQ(Str(Elem(*inner, "inner", 0), "name"), "alpha");
+}
+
+// A dataset cell takes the same decoder.
+TEST_F(ElementDefaults, EntryNameInADatasetCell) {
+  std::istringstream in("@dataset elemdefaults.v1.P (kd)\n({ alpha {} })\n");
+  auto reader = pxf::DatasetReader::Create(&in, opts_);
+  ASSERT_TRUE(reader.ok()) << reader.status().ToString();
+  auto m = New();
+  auto st = (*reader)->Scan(m.get());
+  ASSERT_TRUE(st.ok()) << st.ToString();
+  EXPECT_EQ(Str(Elem(*m, "kd", 0), "name"), "alpha");
 }
 
 TEST_F(ElementDefaults, ElementFieldsDoNotMarkTheParent) {
