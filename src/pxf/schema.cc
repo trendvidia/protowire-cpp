@@ -9,6 +9,7 @@
 
 #include <google/protobuf/descriptor.h>
 
+#include "parser_internal.h"
 #include "protowire/pxf/annotations.h"
 
 namespace protowire::pxf {
@@ -214,6 +215,17 @@ std::vector<Violation> ValidateFile(const pb::FileDescriptor* fd) {
     return a.element < b.element;
   });
   return out;
+}
+
+Status CheckDescriptorSchema(const pb::Descriptor* desc) {
+  auto vs = ValidateDescriptor(desc);
+  if (vs.empty()) return Status::OK();
+  std::string msg = "PXF schema violations:\n  ";
+  for (size_t i = 0; i < vs.size(); ++i) {
+    if (i != 0) msg.append("\n  ");
+    msg.append(vs[i].ToString());
+  }
+  return Status::Error(0, 0, msg);
 }
 
 bool IsFutureReservedDirective(std::string_view name) {

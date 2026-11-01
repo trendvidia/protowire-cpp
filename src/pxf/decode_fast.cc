@@ -42,6 +42,7 @@
 #include <google/protobuf/dynamic_message.h>
 #include <google/protobuf/message.h>
 
+#include "parser_internal.h"
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
 #include "protowire/detail/rfc3339.h"
@@ -251,100 +252,14 @@ class DirectDecoder {
     return k;
   }
 
-  // ParseScalarCellValue consumes one scalar token at current_ and
-  // builds the corresponding ValuePtr. Mirrors the scalar branches of
-  // the AST parser's ParseValue. Used by @dataset row parsing in
-  // ConsumeDirectives — list / block / unparseable cell tokens are
-  // already rejected by the caller, so this only handles scalar shapes.
-  StatusOr<ValuePtr> ParseScalarCellValue() {
-    Position pos = current_.pos;
-    switch (current_.kind) {
-      case TokenKind::kString: {
-        auto v = std::make_unique<StringVal>();
-        v->pos = pos;
-        v->value = std::string(current_.value);
-        Advance();
-        return ValuePtr(std::move(v));
-      }
-      case TokenKind::kInt: {
-        auto v = std::make_unique<IntVal>();
-        v->pos = pos;
-        v->raw = std::string(current_.value);
-        Advance();
-        return ValuePtr(std::move(v));
-      }
-      case TokenKind::kFloat: {
-        auto v = std::make_unique<FloatVal>();
-        v->pos = pos;
-        v->raw = std::string(current_.value);
-        Advance();
-        return ValuePtr(std::move(v));
-      }
-      case TokenKind::kBool: {
-        auto v = std::make_unique<BoolVal>();
-        v->pos = pos;
-        v->value = (current_.value == "true");
-        Advance();
-        return ValuePtr(std::move(v));
-      }
-      case TokenKind::kBytes: {
-        auto v = std::make_unique<BytesVal>();
-        v->pos = pos;
-        auto decoded = detail::Base64DecodeStd(current_.value);
-        if (decoded.has_value()) v->value = std::move(*decoded);
-        Advance();
-        return ValuePtr(std::move(v));
-      }
-      case TokenKind::kTimestamp: {
-        auto v = std::make_unique<TimestampVal>();
-        v->pos = pos;
-        v->raw = std::string(current_.value);
-        if (auto t = detail::ParseRFC3339(current_.value); t.has_value()) {
-          v->seconds = t->seconds;
-          v->nanos = t->nanos;
-        }
-        Advance();
-        return ValuePtr(std::move(v));
-      }
-      case TokenKind::kDuration: {
-        auto v = std::make_unique<DurationVal>();
-        v->pos = pos;
-        v->raw = std::string(current_.value);
-        if (auto d = detail::ParseDuration(current_.value); d.has_value()) {
-          v->seconds = d->seconds;
-          v->nanos = d->nanos;
-        }
-        Advance();
-        return ValuePtr(std::move(v));
-      }
-      case TokenKind::kNull: {
-        auto v = std::make_unique<NullVal>();
-        v->pos = pos;
-        Advance();
-        return ValuePtr(std::move(v));
-      }
-      case TokenKind::kIdent: {
-        auto v = std::make_unique<IdentVal>();
-        v->pos = pos;
-        v->name = std::string(current_.value);
-        Advance();
-        return ValuePtr(std::move(v));
-      }
-      default:
-        return Status::Error(
-            pos.line,
-            pos.column,
-            std::string("unsupported @dataset cell value: ") + TokenKindName(current_.kind));
-    }
-  }
-
   // ConsumeDirectives drains any leading `@type` / `@<name>` / `@dataset`
   // directives, leaving current_ at the first body token. When
   // result_ != nullptr (UnmarshalFull path), populates
   // Result::Directives() and Result::Datasets() with parsed Directive /
   // DatasetDirective entries; when result_ == nullptr (Unmarshal path),
   // performs the same syntactic walk for validation but discards the
-  // contents — no AST allocation occurs.
+  // contents. A @dataset goes through the AST parser either way: a cell
+  // may hold any value, and the rows are AST by the Result contract.
   //
   // Enforces the standalone constraint (draft §3.4.4): a document
   // containing any @dataset directive MUST NOT also carry @type or
@@ -421,95 +336,13 @@ class DirectDecoder {
           return PosError(current_.pos,
                           "@dataset directive cannot coexist with @type (draft §3.4.4)");
         }
-        DatasetDirective tbl;
-        tbl.pos = current_.pos;
         if (!has_table) {
           first_table_pos = current_.pos;
           has_table = true;
         }
-        Advance();  // consume @dataset
-        // Optional row message type; MAY be omitted when an anonymous
-        // @proto precedes (draft §3.4.4 Anonymous binding).
-        if (current_.kind == TokenKind::kIdent) {
-          tbl.type = std::string(current_.value);
-          Advance();
-        }
-        if (current_.kind != TokenKind::kLParen) {
-          return PosError(current_.pos, "expected '(' to start @dataset column list");
-        }
-        Advance();
-        if (current_.kind != TokenKind::kIdent) {
-          return PosError(current_.pos,
-                          "@dataset column list must contain at least one field name");
-        }
-        for (;;) {
-          if (current_.kind != TokenKind::kIdent) {
-            return PosError(current_.pos, "expected column field name");
-          }
-          // v1: dotted column paths are reserved for a future revision.
-          for (char c : current_.value) {
-            if (c == '.') {
-              return PosError(
-                  current_.pos,
-                  "@dataset column has dotted path; not supported in v1 (draft §3.4.4)");
-            }
-          }
-          tbl.columns.emplace_back(current_.value);
-          Advance();
-          if (current_.kind == TokenKind::kComma) {
-            Advance();
-            continue;
-          }
-          if (current_.kind == TokenKind::kRParen) break;
-          return PosError(current_.pos, "expected ',' or ')' in @dataset column list");
-        }
-        Advance();  // consume )
-        const int n_cols = static_cast<int>(tbl.columns.size());
-        // Zero or more rows; each cell is a single scalar token (or empty).
-        while (current_.kind == TokenKind::kLParen) {
-          DatasetRow row;
-          row.pos = current_.pos;
-          row.cells.reserve(n_cols);
-          Advance();  // (
-          // First cell.
-          if (current_.kind == TokenKind::kComma || current_.kind == TokenKind::kRParen) {
-            row.cells.emplace_back(std::nullopt);  // absent
-          } else if (current_.kind == TokenKind::kLBracket || current_.kind == TokenKind::kLBrace) {
-            return PosError(current_.pos,
-                            "@dataset cells cannot contain list/block values in v1 (draft §3.4.4)");
-          } else {
-            auto v = ParseScalarCellValue();
-            if (!v.ok()) return v.status();
-            row.cells.emplace_back(std::move(v).consume());
-          }
-          while (current_.kind == TokenKind::kComma) {
-            Advance();
-            if (current_.kind == TokenKind::kComma || current_.kind == TokenKind::kRParen) {
-              row.cells.emplace_back(std::nullopt);  // absent
-            } else if (current_.kind == TokenKind::kLBracket ||
-                       current_.kind == TokenKind::kLBrace) {
-              return PosError(
-                  current_.pos,
-                  "@dataset cells cannot contain list/block values in v1 (draft §3.4.4)");
-            } else {
-              auto v = ParseScalarCellValue();
-              if (!v.ok()) return v.status();
-              row.cells.emplace_back(std::move(v).consume());
-            }
-          }
-          if (current_.kind != TokenKind::kRParen) {
-            return PosError(current_.pos, "expected ',' or ')' in @dataset row");
-          }
-          const int n_cells = static_cast<int>(row.cells.size());
-          if (n_cells != n_cols) {
-            return PosError(row.pos,
-                            std::string("@dataset row has ") + std::to_string(n_cells) +
-                                " cells, expected " + std::to_string(n_cols) + " (column count)");
-          }
-          Advance();  // consume )
-          tbl.rows.push_back(std::move(row));
-        }
-        if (result_ != nullptr) result_->AddTable(std::move(tbl));
+        auto tbl = ParseDatasetAt(&lex_, &current_, lim_.max_depth);
+        if (!tbl.ok()) return tbl.status();
+        if (result_ != nullptr) result_->AddTable(std::move(tbl).consume());
       } else if (current_.kind == TokenKind::kAtProto) {
         ProtoDirective pd;
         pd.pos = current_.pos;
@@ -1900,20 +1733,11 @@ Status PostDecode(Message* msg,
 
 namespace {
 
-// CheckSchema runs the PXF schema's bind-time checks on the descriptor
-// of `msg`. Returns a Status with the joined violation
-// list on conflict, OK otherwise. Skipped when opts.skip_validate is
-// true.
+// CheckSchema runs the PXF schema's bind-time checks on the descriptor of
+// `msg`, unless opts.skip_validate is set.
 Status CheckSchema(const Message* msg, const UnmarshalOptions& opts) {
   if (opts.skip_validate) return Status::OK();
-  auto vs = ValidateDescriptor(msg->GetDescriptor());
-  if (vs.empty()) return Status::OK();
-  std::string msg_str = "PXF schema violations:\n  ";
-  for (size_t i = 0; i < vs.size(); ++i) {
-    if (i != 0) msg_str.append("\n  ");
-    msg_str.append(vs[i].ToString());
-  }
-  return Status::Error(0, 0, msg_str);
+  return CheckDescriptorSchema(msg->GetDescriptor());
 }
 
 }  // namespace

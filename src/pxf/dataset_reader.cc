@@ -2,16 +2,19 @@
 // Copyright (c) 2026 TrendVidia, LLC.
 #include "protowire/pxf/dataset_reader.h"
 
+#include <algorithm>
 #include <cstring>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
-#include <variant>
 #include <vector>
 
-#include "protowire/detail/base64.h"
+#include "dataset_paths.h"
+#include "parser_internal.h"
+#include "protowire/limits.h"
 #include "protowire/pxf.h"  // Unmarshal, UnmarshalOptions
+#include "protowire/pxf/format.h"
 #include "protowire/pxf/parser.h"
 
 namespace protowire::pxf {
@@ -273,61 +276,163 @@ void FindNextRow(std::string_view input,
 
 // ---- BindRow helpers ------------------------------------------------------
 
-// Append a single cell value as PXF text. v1 cells are scalar-shaped
-// (no list, no block), so we only handle the leaf-value variants — list
-// and block AST nodes are unreachable because the parser rejects them
-// at row parse time.
-Status AppendCellValue(std::string& out, const ValuePtr& cell) {
-  return std::visit(
-      [&out](const auto& p) -> Status {
-        using T = std::decay_t<decltype(*p)>;
-        if constexpr (std::is_same_v<T, StringVal>) {
-          // Re-quote with escapes for `"`, `\` and LF, which a simple
-          // string cannot hold raw. Other shapes round-trip verbatim
-          // because the lexer accepts UTF-8 in strings.
-          out.push_back('"');
-          for (char c : p->value) {
-            if (c == '\n') {
-              out.append("\\n");
-              continue;
-            }
-            if (c == '"' || c == '\\') out.push_back('\\');
-            out.push_back(c);
-          }
-          out.push_back('"');
-          return Status::OK();
-        } else if constexpr (std::is_same_v<T, IntVal>) {
-          out.append(p->raw);
-          return Status::OK();
-        } else if constexpr (std::is_same_v<T, FloatVal>) {
-          out.append(p->raw);
-          return Status::OK();
-        } else if constexpr (std::is_same_v<T, BoolVal>) {
-          out.append(p->value ? "true" : "false");
-          return Status::OK();
-        } else if constexpr (std::is_same_v<T, BytesVal>) {
-          out.append("b\"");
-          out.append(detail::Base64EncodeStd(p->value));
-          out.push_back('"');
-          return Status::OK();
-        } else if constexpr (std::is_same_v<T, NullVal>) {
-          out.append("null");
-          return Status::OK();
-        } else if constexpr (std::is_same_v<T, IdentVal>) {
-          out.append(p->name);
-          return Status::OK();
-        } else if constexpr (std::is_same_v<T, TimestampVal>) {
-          out.append(p->raw);
-          return Status::OK();
-        } else if constexpr (std::is_same_v<T, DurationVal>) {
-          out.append(p->raw);
-          return Status::OK();
-        } else {
-          return Status::Error(
-              "pxf: BindRow: unexpected cell value type (v1 @dataset cells are scalar-shaped)");
-        }
-      },
-      cell);
+// BodyNode is one level of the block tree a dotted row body is written
+// from. col is the column of a cell, or -1 for a block.
+struct BodyNode {
+  std::string name;
+  int col = -1;
+  std::vector<std::unique_ptr<BodyNode>> children;
+};
+
+// CellSpan is the lines of the body one column's entry takes.
+struct CellSpan {
+  int col;
+  int first;
+  int last;
+};
+
+// BodyWriter writes a row as a PXF body, recording the lines each column's
+// entry takes so that a decode error can name the column. line_ is the
+// number of the next line to be written, and the body opens with an empty
+// line, so a decoder error without a position (1:1 or none) falls in no
+// column.
+class BodyWriter {
+ public:
+  explicit BodyWriter(const DatasetRow& row) : row_(row) { body_.push_back('\n'); }
+
+  void Cell(const std::string& name, int col) {
+    const auto& cell = row_.cells[col];
+    if (!cell.has_value()) return;  // callers pass non-empty cells
+    const size_t start = body_.size();
+    body_.append(name);
+    body_.append(" = ");
+    body_.append(FormatValue(*cell));
+    body_.push_back('\n');
+    const int lines = static_cast<int>(std::count(body_.begin() + start, body_.end(), '\n'));
+    spans_.push_back(CellSpan{col, line_, line_ + lines - 1});
+    line_ += lines;
+  }
+
+  void Children(const BodyNode& n) {
+    for (const auto& ch : n.children) {
+      if (ch->col >= 0) {
+        Cell(ch->name, ch->col);
+        continue;
+      }
+      // An error on the block's own lines (a second oneof member, say) is
+      // laid at the first column in it. Its span comes after its cells',
+      // so a cell's wins.
+      const int first = line_;
+      body_.append(ch->name);
+      body_.append(" {\n");
+      ++line_;
+      Children(*ch);
+      body_.append("}\n");
+      spans_.push_back(CellSpan{FirstColumn(*ch), first, line_});
+      ++line_;
+    }
+  }
+
+  const std::string& body() const { return body_; }
+  const std::vector<CellSpan>& spans() const { return spans_; }
+
+ private:
+  static int FirstColumn(const BodyNode& n) {
+    const BodyNode* at = &n;
+    while (at->col < 0) at = at->children.front().get();
+    return at->col;
+  }
+
+  const DatasetRow& row_;
+  std::string body_;
+  int line_ = 2;
+  std::vector<CellSpan> spans_;
+};
+
+// WriteRowBody renders the row's non-empty cells. Cells that share a path
+// prefix go in one block, and a prefix with no non-empty cell writes no
+// block, so its sub-message stays absent (draft §3.4.4). Per-cell blocks
+// would reject two columns that reach the same oneof member.
+void WriteRowBody(const std::vector<std::string>& columns, const DatasetRow& row, BodyWriter* w) {
+  const bool dotted = std::any_of(columns.begin(), columns.end(), [](const std::string& c) {
+    return c.find('.') != std::string::npos;
+  });
+  if (!dotted) {
+    for (size_t i = 0; i < columns.size(); ++i) {
+      if (row.cells[i].has_value()) w->Cell(columns[i], static_cast<int>(i));
+    }
+    return;
+  }
+  BodyNode root;
+  for (size_t i = 0; i < columns.size(); ++i) {
+    if (!row.cells[i].has_value()) continue;
+    BodyNode* n = &root;
+    std::string_view rest = columns[i];
+    for (size_t dot = rest.find('.'); dot != std::string_view::npos; dot = rest.find('.')) {
+      const std::string_view seg = rest.substr(0, dot);
+      BodyNode* next = nullptr;
+      for (const auto& ch : n->children) {
+        if (ch->col < 0 && ch->name == seg) next = ch.get();
+      }
+      if (next == nullptr) {
+        n->children.push_back(std::make_unique<BodyNode>());
+        next = n->children.back().get();
+        next->name = std::string(seg);
+      }
+      n = next;
+      rest.remove_prefix(dot + 1);
+    }
+    auto leaf = std::make_unique<BodyNode>();
+    leaf->name = std::string(rest);
+    leaf->col = static_cast<int>(i);
+    n->children.push_back(std::move(leaf));
+  }
+  w->Children(root);
+}
+
+// HeaderError reports a broken column rule at the row being bound, as a
+// decode error is reported. A row built by hand has no position to give.
+Status HeaderError(std::string msg, Position pos) {
+  if (pos.line > 0) return Status::Error(pos.line, pos.column, std::move(msg));
+  return Status::Error("pxf: " + msg);
+}
+
+// AtRow moves a decode error to the row it came from, and names the column
+// whose entry it fell in. The decoder read a synthetic body, so its
+// positions are lines of that body. A hand-built row has no position to
+// give and keeps the body's, counted without the empty first line.
+Status AtRow(const Status& st,
+             Position pos,
+             const std::vector<std::string>& columns,
+             const std::vector<CellSpan>& spans) {
+  const auto at = st.position();
+  std::string msg = st.message();
+  if (at.has_value()) {
+    for (const CellSpan& sp : spans) {
+      if (at->first >= sp.first && at->first <= sp.last) {
+        msg = "column " + columns[sp.col] + ": " + msg;
+        break;
+      }
+    }
+  }
+  if (pos.line > 0) return Status::Error(pos.line, pos.column, std::move(msg));
+  if (at.has_value()) return Status::Error(at->first - 1, at->second, std::move(msg));
+  return Status::Error(std::move(msg));
+}
+
+// BindCheckedRow binds a row whose columns are known to suit msg's type.
+// UnmarshalFull rather than Unmarshal because its post-decode pass is what
+// gives an empty cell the field's (pxf.default), rejects it for
+// (pxf.required), and lets a null cell satisfy required (draft §3.4.4).
+Status BindCheckedRow(google::protobuf::Message* msg,
+                      const std::vector<std::string>& columns,
+                      const DatasetRow& row,
+                      const UnmarshalOptions& opts) {
+  BodyWriter w(row);
+  WriteRowBody(columns, row, &w);
+  auto r = UnmarshalFull(w.body(), msg, opts);
+  if (r.ok()) return Status::OK();
+  return AtRow(r.status(), row.pos, columns, w.spans());
 }
 
 }  // namespace
@@ -335,9 +440,15 @@ Status AppendCellValue(std::string& out, const ValuePtr& cell) {
 // ---- DatasetReader public API -----------------------------------------------
 
 StatusOr<std::unique_ptr<DatasetReader>> DatasetReader::Create(std::istream* src) {
+  return Create(src, UnmarshalOptions{});
+}
+
+StatusOr<std::unique_ptr<DatasetReader>> DatasetReader::Create(std::istream* src,
+                                                               UnmarshalOptions opts) {
   if (src == nullptr) return Status::Error("pxf: DatasetReader: null istream");
   auto tr = std::unique_ptr<DatasetReader>(new DatasetReader());
   tr->src_ = src;
+  tr->opts_ = opts;
   if (Status s = tr->ReadHeader(); !s.ok()) return s;
   return tr;
 }
@@ -358,31 +469,18 @@ Status DatasetReader::Next(DatasetRow* out) {
     }
     if (found) {
       std::string_view row_bytes(pending_.data() + start, end - start + 1);
-      // Parse the row via the AST parser. We wrap it in a synthetic
-      // `@dataset T (col0,col1,...) <row>` so the existing parser
-      // accepts it and arity-checks against our column count.
-      std::string synthetic;
-      synthetic.reserve(row_bytes.size() + 32 + columns_.size() * 8);
-      synthetic.append("@dataset _.Row (");
-      for (size_t i = 0; i < columns_.size(); ++i) {
-        if (i != 0) synthetic.push_back(',');
-        synthetic.append(columns_[i]);
-      }
-      synthetic.append(")\n");
-      synthetic.append(row_bytes.data(), row_bytes.size());
-      auto doc = Parse(synthetic);
+      auto parsed =
+          ParseDatasetRow(row_bytes,
+                          static_cast<int>(columns_.size()),
+                          opts_.max_nesting_depth > 0 ? opts_.max_nesting_depth : kMaxNestingDepth);
       // Advance past the consumed bytes whether parse succeeded or not
       // — on failure we don't want to retry the same bad row forever.
       pending_.erase(0, static_cast<size_t>(end) + 1);
-      if (!doc.ok()) {
-        err_ = doc.status();
+      if (!parsed.ok()) {
+        err_ = parsed.status();
         return err_;
       }
-      if (doc->datasets.empty() || doc->datasets[0].rows.empty()) {
-        err_ = Status::Error("pxf: DatasetReader: synthetic row parse produced no row");
-        return err_;
-      }
-      *out = std::move(doc->datasets[0].rows[0]);
+      *out = std::move(parsed).consume();
       return Status::OK();
     }
     if (done) {
@@ -404,7 +502,27 @@ Status DatasetReader::Scan(google::protobuf::Message* msg) {
   DatasetRow row;
   if (Status s = Next(&row); !s.ok()) return s;
   if (finished_) return Status::OK();
-  return BindRow(msg, columns_, row);
+  if (row.cells.size() != columns_.size()) {
+    return Status::Error(std::string("pxf: BindRow: ") + std::to_string(columns_.size()) +
+                         " columns vs " + std::to_string(row.cells.size()) + " cells");
+  }
+  // The schema and the column paths depend on msg's type and the header,
+  // never on the row, so they are checked once per type. A reader remembers
+  // one type, which is the usual case, and a caller alternating types pays
+  // only for what it does.
+  const auto* desc = msg->GetDescriptor();
+  if (desc != checked_type_) {
+    if (!opts_.skip_validate) {
+      if (Status s = CheckDescriptorSchema(desc); !s.ok()) return s;
+    }
+    if (std::string path_err = CheckColumnPaths(desc, columns_); !path_err.empty()) {
+      return HeaderError(std::move(path_err), row.pos);
+    }
+    checked_type_ = desc;
+  }
+  UnmarshalOptions opts = opts_;
+  opts.skip_validate = true;
+  return BindCheckedRow(msg, columns_, row, opts);
 }
 
 std::unique_ptr<std::istream> DatasetReader::Tail() {
@@ -468,28 +586,21 @@ Status DatasetReader::ReadHeader() {
 Status BindRow(google::protobuf::Message* msg,
                const std::vector<std::string>& columns,
                const DatasetRow& row) {
+  return BindRow(msg, columns, row, UnmarshalOptions{});
+}
+
+Status BindRow(google::protobuf::Message* msg,
+               const std::vector<std::string>& columns,
+               const DatasetRow& row,
+               UnmarshalOptions opts) {
   if (columns.size() != row.cells.size()) {
     return Status::Error(std::string("pxf: BindRow: ") + std::to_string(columns.size()) +
                          " columns vs " + std::to_string(row.cells.size()) + " cells");
   }
-  // Render the row as a synthetic PXF body: one `<column> = <value>`
-  // entry per non-nullopt cell. Empty cells stay absent (the decoder
-  // applies pxf.default / pxf.required as if the field weren't named).
-  std::string body;
-  for (size_t i = 0; i < columns.size(); ++i) {
-    const auto& cell = row.cells[i];
-    if (!cell.has_value()) continue;
-    body.append(columns[i]);
-    body.append(" = ");
-    if (Status s = AppendCellValue(body, *cell); !s.ok()) return s;
-    body.push_back('\n');
+  if (std::string path_err = CheckColumnPaths(msg->GetDescriptor(), columns); !path_err.empty()) {
+    return HeaderError(std::move(path_err), row.pos);
   }
-  // SkipValidate avoids re-running the reserved-name check per row —
-  // DatasetReader::Create / the materializing UnmarshalFull already
-  // validated the descriptor once at bind time.
-  UnmarshalOptions opts;
-  opts.skip_validate = true;
-  return Unmarshal(body, msg, opts);
+  return BindCheckedRow(msg, columns, row, opts);
 }
 
 }  // namespace protowire::pxf

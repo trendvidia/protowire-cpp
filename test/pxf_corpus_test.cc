@@ -29,6 +29,8 @@
 
 #include <google/protobuf/compiler/importer.h>
 #include <google/protobuf/dynamic_message.h>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 
 namespace {
 
@@ -330,10 +332,10 @@ const std::map<std::string, DatasetFixture>& DatasetVerdicts() {
   static const auto* table = new std::map<std::string, DatasetFixture>{
       {"empty-rows.pxf", {true}},
       {"rows-end-at-directive.pxf", {true}},
-      {"list-cell.pxf", {true, "#41"}},
-      {"block-cell.pxf", {true, "#41"}},
-      {"nested-cells.pxf", {true, "#41"}},
-      {"cell-framing.pxf", {true, "#41"}},
+      {"list-cell.pxf", {true}},
+      {"block-cell.pxf", {true}},
+      {"nested-cells.pxf", {true}},
+      {"cell-framing.pxf", {true}},
       {"arity-long.pxf", {false}},
       {"arity-short.pxf", {false}},
       {"junk-between-rows.pxf", {false}},
@@ -345,12 +347,12 @@ const std::map<std::string, DatasetFixture>& DatasetVerdicts() {
       {"string-newline-in-cell.pxf", {false}},
       {"null-on-scalar-cell.pxf", {false}},
       {"null-on-optional-cell.pxf", {true}},
-      {"dotted-column.pxf", {true, "#43"}},
-      {"dotted-grouping.pxf", {true, "#43"}},
-      {"dotted-null-leaf.pxf", {true, "#43"}},
-      {"dotted-oneof.pxf", {true, "#43"}},
-      {"dotted-required.pxf", {true, "#43"}},
-      {"dotted-with-value-cells.pxf", {true, "#43"}},
+      {"dotted-column.pxf", {true}},
+      {"dotted-grouping.pxf", {true}},
+      {"dotted-null-leaf.pxf", {true}},
+      {"dotted-oneof.pxf", {true}},
+      {"dotted-required.pxf", {true}},
+      {"dotted-with-value-cells.pxf", {true}},
       {"dotted-oneof-two-members.pxf", {false}},
       {"dotted-through-repeated.pxf", {false}},
       {"dotted-through-map.pxf", {false}},
@@ -367,9 +369,9 @@ const std::map<std::string, DatasetFixture>& DatasetVerdicts() {
       {"dotted-into-bignum.pxf", {false}},
       {"dotted-overlap-deep.pxf", {false}},
       {"dotted-bad-header-empty-row.pxf", {false}},
-      {"dotted-into-secret.pxf", {true, "#43"}},
-      {"dotted-into-any.pxf", {true, "#43"}},
-      {"dotted-bad-header-no-rows.pxf", {true, "#43"}},
+      {"dotted-into-secret.pxf", {true}},
+      {"dotted-into-any.pxf", {true}},
+      {"dotted-bad-header-no-rows.pxf", {true}},
   };
   return *table;
 }
@@ -444,6 +446,165 @@ TEST(PxfCorpus, Dataset) {
     EXPECT_EQ(materialized.ok(), it->second.accept) << materialized.ToString();
   }
   EXPECT_EQ(seen.size(), DatasetVerdicts().size());
+}
+
+// Deterministic bytes, so two messages compare whatever their map order.
+std::string Bytes(const pbuf::Message& m) {
+  std::string out;
+  pbuf::io::StringOutputStream raw(&out);
+  pbuf::io::CodedOutputStream coded(&raw);
+  coded.SetSerializationDeterministic(true);
+  m.SerializeToCodedStream(&coded);
+  return out;
+}
+
+// A verdict says a row bound, not what it bound to. Each row here must
+// bind to the message of the body it stands for, as the fixture's own
+// comment states, on both the materializing and the streaming path.
+TEST(PxfCorpus, DatasetRowsBindToTheirBodies) {
+  struct Case {
+    const char* file;
+    const char* type;
+    std::vector<const char*> bodies;
+  };
+  const std::vector<Case> cases = {
+      {"list-cell.pxf",
+       "test.v1.AllTypes",
+       {R"(string_field = "row-1" repeated_string = ["alpha", "beta"])"}},
+      {"block-cell.pxf",
+       "test.v1.AllTypes",
+       {R"(string_field = "row-1" nested_field { name = "inner" value = 99 })"}},
+      {"nested-cells.pxf",
+       "test.v1.AllTypes",
+       {R"(string_field = "row-1" nested_field { name = "n1" value = 1 }
+           repeated_string = ["a", "b"] repeated_nested = [{ name = "x" }, { name = "y" value = 2 }]
+           string_map = { "k": "v" } int32_field = 1)",
+        R"(string_field = "row-2" nested_field {} repeated_string = [] int32_field = 2)",
+        R"(string_field = "row-3" int32_field = 3)",
+        R"(string_field = "row-4" nested_field = null int32_field = 4)"}},
+      {"dotted-grouping.pxf",
+       "dataset.v1.Event",
+       {R"(id = "r1" desc { energy = 0.5 tempo { min_bpm = 60 max_bpm = 120 } tags = ["x"] }
+           plain = 1)",
+        R"(id = "r2" desc { energy = 0.25 } plain = 2)",
+        R"(id = "r3" plain = 3)",
+        R"(id = "r4" desc { tempo { max_bpm = 9 } } plain = 4)"}},
+      {"dotted-oneof.pxf",
+       "dataset.v1.Event",
+       {R"(a { name = "x" n = 1 })", R"(b { name = "y" })"}},
+      {"dotted-required.pxf",
+       "dataset.v1.Event",
+       {R"(id = "absent")", R"(id = "set" req { n = 5 })"}},
+      {"dotted-null-leaf.pxf", "dataset.v1.Event", {R"(id = "n" desc { label = null })"}},
+      {"dotted-into-any.pxf",
+       "dataset.v1.Event",
+       {R"(id = "x" payload { type_url = "type.googleapis.com/dataset.v1.Pick" value = b"CgF4" })"}},
+      {"dotted-into-secret.pxf",
+       "dataset.v1.Event",
+       {R"(id = "x" pw { value = "s3cret" hint = "db password" })"}},
+  };
+  Schema schema("dataset", {"test.proto", "paths.proto"});
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.file);
+    const pbuf::Descriptor* d = schema.Find(c.type);
+    ASSERT_NE(d, nullptr);
+    std::string text = ReadFile(fs::path(TESTDATA_DIR) / "dataset" / c.file);
+    auto doc = pxf::Parse(text);
+    ASSERT_TRUE(doc.ok()) << doc.status().ToString();
+    ASSERT_EQ(doc->datasets[0].rows.size(), c.bodies.size());
+    std::istringstream in(text);
+    auto reader = pxf::DatasetReader::Create(&in);
+    ASSERT_TRUE(reader.ok()) << reader.status().ToString();
+    for (size_t i = 0; i < c.bodies.size(); ++i) {
+      SCOPED_TRACE(i);
+      auto want = schema.New(d);
+      auto r = pxf::UnmarshalFull(c.bodies[i], want.get());
+      ASSERT_TRUE(r.ok()) << r.status().ToString();
+      auto bound = schema.New(d);
+      Status st = pxf::BindRow(bound.get(), doc->datasets[0].columns, doc->datasets[0].rows[i]);
+      ASSERT_TRUE(st.ok()) << st.ToString();
+      EXPECT_EQ(Bytes(*bound), Bytes(*want)) << bound->ShortDebugString();
+      auto scanned = schema.New(d);
+      st = (*reader)->Scan(scanned.get());
+      ASSERT_TRUE(st.ok()) << st.ToString();
+      EXPECT_EQ(Bytes(*scanned), Bytes(*want)) << scanned->ShortDebugString();
+    }
+  }
+}
+
+// A row names its column when a value fails, and reports the row's own
+// line rather than a line of the synthetic body.
+TEST(PxfCorpus, DatasetBindErrorNamesColumnAtRow) {
+  Schema schema("dataset", {"test.proto"});
+  auto doc = pxf::Parse(
+      "@dataset test.v1.AllTypes (string_field, int32_field)\n(\"a\", 1)\n"
+      "(\"b\", \"bad\")\n");
+  ASSERT_TRUE(doc.ok()) << doc.status().ToString();
+  const auto& ds = doc->datasets[0];
+  auto msg = schema.New(schema.Find("test.v1.AllTypes"));
+  Status st = pxf::BindRow(msg.get(), ds.columns, ds.rows[1]);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("column int32_field"), std::string::npos) << st.ToString();
+  ASSERT_TRUE(st.position().has_value());
+  EXPECT_EQ(st.position()->first, 3);
+}
+
+// Every entry point refuses a schema the spec refuses at bind time. Scan
+// checks once per type; BindRow on every call unless told otherwise.
+TEST(PxfCorpus, DatasetBindChecksTheSchema) {
+  struct Case {
+    const char* rule;
+    const char* field;
+  };
+  const std::vector<Case> cases = {
+      {"reserved name", "string null = 2;"},
+      {"pxf.key placement", "string k = 2 [(pxf.key) = \"name\"];"},
+      {"required with default", "string r = 2 [(pxf.required) = true, (pxf.default) = \"x\"];"},
+  };
+  int n = 0;
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.rule);
+    const std::string name = "bad" + std::to_string(++n) + ".proto";
+    {
+      std::ofstream out(fs::path(protowire_test::FixtureDir()) / name);
+      out << "syntax = \"proto3\";\npackage bad" << n << ";\nimport \"pxf/annotations.proto\";\n"
+          << "message Row {\n  string id = 1;\n  " << c.field << "\n}\n";
+    }
+    pbuf::compiler::DiskSourceTree tree;
+    tree.MapPath("", WKT_PROTO_DIR);
+    tree.MapPath("", PROTO_DIR);
+    tree.MapPath("", protowire_test::FixtureDir());
+    CollectErrors errors;
+    pbuf::compiler::Importer importer(&tree, &errors);
+    ASSERT_NE(importer.Import(name), nullptr) << errors.last_;
+    pbuf::DynamicMessageFactory factory(importer.pool());
+    const pbuf::Descriptor* d =
+        importer.pool()->FindMessageTypeByName("bad" + std::to_string(n) + ".Row");
+    auto fresh = [&] { return std::unique_ptr<pbuf::Message>(factory.GetPrototype(d)->New()); };
+
+    const std::string text = "@dataset x.Row (id)\n(\"a\")\n(\"b\")\n";
+    auto doc = pxf::Parse(text);
+    ASSERT_TRUE(doc.ok()) << doc.status().ToString();
+    const auto& ds = doc->datasets[0];
+
+    Status bound = pxf::BindRow(fresh().get(), ds.columns, ds.rows[0]);
+    EXPECT_FALSE(bound.ok());
+    EXPECT_NE(bound.message().find("PXF schema violations"), std::string::npos) << bound.ToString();
+
+    std::istringstream in(text);
+    auto reader = pxf::DatasetReader::Create(&in);
+    ASSERT_TRUE(reader.ok()) << reader.status().ToString();
+    Status scanned = (*reader)->Scan(fresh().get());
+    EXPECT_FALSE(scanned.ok());
+    EXPECT_NE(scanned.message().find("PXF schema violations"), std::string::npos)
+        << scanned.ToString();
+
+    pxf::UnmarshalOptions skip;
+    skip.skip_validate = true;
+    Status unchecked = pxf::BindRow(fresh().get(), ds.columns, ds.rows[0], skip);
+    EXPECT_EQ(unchecked.message().find("PXF schema violations"), std::string::npos)
+        << unchecked.ToString();
+  }
 }
 
 }  // namespace
