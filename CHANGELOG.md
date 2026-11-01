@@ -14,14 +14,15 @@ format changes.
 ### Fixed
 
 - **`null` binds only to a field with explicit presence** (protowire#339, #379, #380). On a proto3 scalar without `optional`, a proto2 `required` field, or a repeated or map field it is now rejected, in a `@dataset` cell too. Such a field has no unset state, so `null` read back as its zero value. **This rejects documents that were accepted before:** declare the field `optional`, or as a wrapper type.
-- **A raw line feed in a simple string is rejected** (protowire#350), by `Parse` and the decoder, in a `@dataset` cell too. `BindRow` writes a line feed in a cell's string as `\n`, so a cell holding the escape still binds.
 
+- **A raw line feed in a simple string is rejected** (protowire#350), by `Parse` and the decoder, in a `@dataset` cell too. `BindRow` writes a line feed in a cell's string as `\n`, so a cell holding the escape still binds.
 - **A singular field or a map key bound twice in one message body is rejected** (protowire#347, #396). A second scalar replaced the first and two blocks merged; now each is an error, whatever the values. **This rejects documents that were accepted before.** A repeated map key also stayed in the message, so a `DynamicMessage` serialized both entries. Map keys compare as values of the key type, so `1:` and `"1":` on an int-keyed map are one key. Repeated fields still concatenate, a map bound twice with distinct keys still merges, and each message body is its own scope.
 
 ### Added
 
 - **`proto/pxf/secret.proto`,** the canonical `pxf.Secret` schema, which this port's copy of `proto/` lacked. The `testdata/dataset` fixtures import it.
 - **`testdata/{blocks,duplicates,nulls,strings,dataset}`** and `test/pxf_corpus_test.cc`, which runs them through both decoders, `Parse`, `BindRow` and `DatasetReader`. `testdata/blocks` needed no code change: a `,` or `;` between the entries of a block was already rejected (protowire#312).
+## [1.2.1] — 2026-11-01
 
 ### Changed
 
