@@ -282,10 +282,15 @@ Status AppendCellValue(std::string& out, const ValuePtr& cell) {
       [&out](const auto& p) -> Status {
         using T = std::decay_t<decltype(*p)>;
         if constexpr (std::is_same_v<T, StringVal>) {
-          // Re-quote with escapes for `"` and `\`. Other shapes round-
-          // trip verbatim because the lexer accepts UTF-8 in strings.
+          // Re-quote with escapes for `"`, `\` and LF, which a simple
+          // string cannot hold raw. Other shapes round-trip verbatim
+          // because the lexer accepts UTF-8 in strings.
           out.push_back('"');
           for (char c : p->value) {
+            if (c == '\n') {
+              out.append("\\n");
+              continue;
+            }
             if (c == '"' || c == '\\') out.push_back('\\');
             out.push_back(c);
           }

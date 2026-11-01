@@ -548,6 +548,26 @@ class DirectDecoder {
   }
   void Ascend() { --depth_; }
 
+  // CheckNullable enforces the null rule (draft -01 § Booleans, Null, and
+  // Identifier Values): null leaves a field unset, so it binds only where
+  // unset is a state the field has. A proto3 scalar without `optional`
+  // would read back as its zero value, and a proto2 `required` field left
+  // unset makes the message invalid in protobuf binary.
+  Status CheckNullable(const FieldDescriptor* fd, Position pos) {
+    auto refuse = [&](const char* kind, const char* why) {
+      return PosError(pos,
+                      std::string("null is not allowed on ") + kind + " field \"" +
+                          std::string(fd->name()) + "\"" + why);
+    };
+    if (fd->is_map()) return refuse("map", "");
+    if (fd->is_repeated()) return refuse("repeated", "");
+    if (fd->is_required()) return refuse("required", ": it must be set");
+    if (!fd->has_presence()) {
+      return refuse("scalar", ": declare it optional, or as a wrapper type, to make it nullable");
+    }
+    return Status::OK();
+  }
+
   // CheckRepeatedCount refuses the next element of a repeated or map
   // field once it holds max_repeated elements (HARDENING.md
   // MaxRepeatedCount), before the element is allocated.
@@ -715,6 +735,7 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
 
         // null literal: track and continue without setting any field value.
         if (current_.kind == TokenKind::kNull) {
+          if (Status s = CheckNullable(fd, current_.pos); !s.ok()) return s;
           if (result_) {
             std::string path = path_prefix_ + std::string(fd->name());
             result_->MarkNull(path);

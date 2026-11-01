@@ -40,9 +40,9 @@ package nulltest.v1;
 import "google/protobuf/field_mask.proto";
 
 message Cfg {
-  string name  = 1;
-  string email = 2;
-  string role  = 3;
+  optional string name  = 1;
+  optional string email = 2;
+  optional string role  = 3;
   google.protobuf.FieldMask _null = 15;
 }
 )";

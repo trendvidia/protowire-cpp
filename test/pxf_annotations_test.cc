@@ -40,8 +40,8 @@ import "google/protobuf/duration.proto";
 import "google/protobuf/wrappers.proto";
 
 message Cfg {
-  string name     = 1 [(pxf.required) = true];
-  string role     = 2 [(pxf.default) = "viewer"];
+  optional string name = 1 [(pxf.required) = true];
+  optional string role = 2 [(pxf.default) = "viewer"];
   int32  priority = 3 [(pxf.default) = "5"];
   bool   enabled  = 4 [(pxf.default) = "true"];
 

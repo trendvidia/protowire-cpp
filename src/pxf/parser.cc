@@ -359,6 +359,9 @@ StatusOr<ValuePtr> Parser::ParseValue() {
       return ParseList();
     case TokenKind::kLBrace:
       return ParseBlockVal();
+    case TokenKind::kIllegal:
+      // The lexer's own diagnostic beats a generic "got ILLEGAL".
+      return Status::Error(pos.line, pos.column, std::string(current_.value));
     default:
       return Status::Error(
           pos.line, pos.column, std::string("expected value, got ") + TokenKindName(current_.kind));
