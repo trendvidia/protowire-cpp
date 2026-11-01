@@ -23,10 +23,12 @@
 
 #include "protowire/pxf.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -131,14 +133,42 @@ class BodyScope {
   }
 
   // BindKey records one key of map field fd, as a value of the key type.
+  // A message rarely has more than a map or two and a map rarely has many
+  // keys, so both are scanned while short, which measured faster than a
+  // hash node per key. A long map moves to a set, so that an adversarial
+  // one stays linear.
   bool BindKey(const FieldDescriptor* fd, std::string key) {
-    return map_keys_[fd].insert(std::move(key)).second;
+    MapKeys* keys = nullptr;
+    for (MapKeys& m : maps_) {
+      if (m.fd == fd) keys = &m;
+    }
+    if (keys == nullptr) {
+      maps_.emplace_back();
+      keys = &maps_.back();
+      keys->fd = fd;
+    }
+    if (keys->large != nullptr) return keys->large->insert(std::move(key)).second;
+    if (std::find(keys->small.begin(), keys->small.end(), key) != keys->small.end()) return false;
+    keys->small.push_back(std::move(key));
+    if (keys->small.size() > kScanLimit) {
+      keys->large = std::make_unique<std::unordered_set<std::string>>(
+          std::make_move_iterator(keys->small.begin()), std::make_move_iterator(keys->small.end()));
+      keys->small.clear();
+    }
+    return true;
   }
 
  private:
+  static constexpr size_t kScanLimit = 16;
+  struct MapKeys {
+    const FieldDescriptor* fd = nullptr;
+    std::vector<std::string> small;
+    std::unique_ptr<std::unordered_set<std::string>> large;
+  };
+
   uint64_t low_ = 0;  // most messages have under 64 fields, so no allocation
   std::vector<bool> high_;
-  std::unordered_map<const FieldDescriptor*, std::unordered_set<std::string>> map_keys_;
+  std::vector<MapKeys> maps_;
 };
 
 // MapKeyText renders the key an entry ended up with, so that two spellings
