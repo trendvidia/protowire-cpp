@@ -6,6 +6,7 @@
 // and the sugar of the well-known types, Any, the big numbers and pxf.Secret.
 // Mirrors protowire-go's encode.go, which fixes the text byte for byte.
 
+#include "encode_internal.h"
 #include "protowire/pxf.h"
 #include "protowire/pxf/annotations.h"
 #include "protowire/pxf/keyed.h"
@@ -43,17 +44,25 @@ class Encoder {
  public:
   Encoder(const MarshalOptions& opts, std::string& out) : opts_(opts), out_(out) {}
 
-  // SetNullPaths names the fields written as `field = null`, by the path
+  // SetNullSet names the fields written as `field = null`, by the path
   // UnmarshalFull records them under. Paths are only built once there is a
-  // set to look them up in.
-  void SetNullPaths(const std::vector<std::string>& paths) {
-    null_set_.insert(paths.begin(), paths.end());
-    track_nulls_ = true;
-  }
+  // set to look them up in. The set must outlive the encoder.
+  void SetNullSet(const NullSet* set) { null_set_ = set; }
 
   void SetNullMaskFd(const FieldDescriptor* fd) { null_mask_fd_ = fd; }
 
+  // SetCellBodies is for a @dataset value cell: an unset annotated field
+  // follows CellUnset.
+  void SetCellBodies() { cell_bodies_ = true; }
+
   Status EncodeMessage(const Message& msg, int level);
+  Status EncodeListField(const Message& msg, const FieldDescriptor* fd, int level);
+  Status EncodeMapField(const Message& msg, const FieldDescriptor* fd, int level);
+  Status EncodeMessageField(const FieldDescriptor* fd, const Message& sub, int level);
+  Status WriteLiteralMessage(const Message& sub);
+
+  // For repeated fields: index into element idx; for non-repeated: idx=-1.
+  void EncodeScalarValue(const Message& msg, const FieldDescriptor* fd, int idx);
 
  private:
   void Indent(int level) {
@@ -77,7 +86,7 @@ class Encoder {
   // found where it was recorded. It returns the path to restore.
   std::string Enter(std::string_view name, const std::string& suffix = "") {
     std::string saved = path_prefix_;
-    if (track_nulls_) {
+    if (null_set_ != nullptr) {
       path_prefix_.append(name.data(), name.size());
       path_prefix_ += suffix;
       path_prefix_ += '.';
@@ -86,20 +95,13 @@ class Encoder {
   }
 
   Status EncodeField(const Message& msg, const FieldDescriptor* fd, int level);
-  Status EncodeListField(const Message& msg, const FieldDescriptor* fd, int level);
   Status EncodeKeyedList(const Message& msg,
                          const FieldDescriptor* fd,
                          const FieldDescriptor* key_fd,
                          int level);
-  Status EncodeMapField(const Message& msg, const FieldDescriptor* fd, int level);
-  Status EncodeMessageField(const FieldDescriptor* fd, const Message& sub, int level);
   // Writes `name { @type = ... }`. *encoded stays false when the Any has no
   // body this port can show, and the caller writes its plain fields.
   Status TryEncodeAny(const FieldDescriptor* fd, const Message& any, int level, bool* encoded);
-  Status WriteLiteralMessage(const Message& sub);
-
-  // For repeated fields: index into element idx; for non-repeated: idx=-1.
-  void EncodeScalarValue(const Message& msg, const FieldDescriptor* fd, int idx);
 
   void EmitString(std::string_view s);
   void EmitBytes(std::string_view raw);
@@ -107,8 +109,8 @@ class Encoder {
 
   const MarshalOptions& opts_;
   std::string& out_;
-  std::unordered_set<std::string> null_set_;
-  bool track_nulls_ = false;
+  const NullSet* null_set_ = nullptr;
+  bool cell_bodies_ = false;
   std::string path_prefix_;
   const FieldDescriptor* null_mask_fd_ = nullptr;
   // Key field to omit from the NEXT EncodeMessage call: the entry name of
@@ -128,21 +130,6 @@ bool SecretHasMetadata(const Message& secret) {
     }
   }
   return false;
-}
-
-// Nullable is whether null can bind to fd (the decoder's CheckNullable). A
-// field the set names that cannot is written as if it were not named.
-bool Nullable(const FieldDescriptor* fd) {
-  return fd->has_presence() && !fd->is_repeated() && !fd->is_required();
-}
-
-// IsLiteralMessage reports whether sub is written as one literal. A Secret
-// is only without metadata, which the literal would drop.
-bool IsLiteralMessage(const Message& sub) {
-  const auto* d = sub.GetDescriptor();
-  if (IsSecret(d)) return !SecretHasMetadata(sub);
-  return IsTimestamp(d) || IsDuration(d) || WrapperInnerCppType(d) != -1 || IsBigInt(d) ||
-         IsDecimal(d) || IsBigFloat(d);
 }
 
 // MapKeyText is how a key is written and what entries sort by: bare where
@@ -560,10 +547,27 @@ Status Encoder::EncodeMessage(const Message& msg, int level) {
     if (skip_key != nullptr && fd == skip_key) continue;
     // Level 0 is the root: a field of this number in a body is data.
     if (level == 0 && null_mask_fd_ != nullptr && fd->number() == null_mask_fd_->number()) continue;
-    if (track_nulls_ && Nullable(fd) &&
-        null_set_.count(path_prefix_ + std::string(fd->name())) > 0) {
+    if (null_set_ != nullptr && Nullable(fd) &&
+        null_set_->count(path_prefix_ + std::string(fd->name())) > 0) {
       WriteFieldPrefix(level, fd->name());
       out_ += "null\n";
+      continue;
+    }
+    if (cell_bodies_ && !fd->is_repeated() && !msg.GetReflection()->HasField(msg, fd)) {
+      bool write = false;
+      bool null = false;
+      if (Status st = CellUnset(msg, fd, path_prefix_ + std::string(fd->name()), &write, &null);
+          !st.ok()) {
+        return st;
+      }
+      if (null) {
+        WriteFieldPrefix(level, fd->name());
+        out_ += "null\n";
+      } else if (write) {  // the zero value, written out
+        WriteFieldPrefix(level, fd->name());
+        EncodeScalarValue(msg, fd, /*idx=*/-1);
+        out_ += '\n';
+      }
       continue;
     }
     if (Status st = EncodeField(msg, fd, level); !st.ok()) return st;
@@ -571,7 +575,72 @@ Status Encoder::EncodeMessage(const Message& msg, int level) {
   return Status::OK();
 }
 
+// CellOptions is how a cell is encoded: at no indent, so that each newline
+// separates tokens, and with no resolver, so that an Any is its plain fields.
+MarshalOptions CellOptions() {
+  MarshalOptions opts;
+  opts.indent.clear();
+  return opts;
+}
+
 }  // namespace
+
+bool Nullable(const FieldDescriptor* fd) {
+  return fd->has_presence() && !fd->is_repeated() && !fd->is_required();
+}
+
+bool IsLiteralMessage(const Message& sub) {
+  const auto* d = sub.GetDescriptor();
+  if (IsSecret(d)) return !SecretHasMetadata(sub);
+  return IsTimestamp(d) || IsDuration(d) || WrapperInnerCppType(d) != -1 || IsBigInt(d) ||
+         IsDecimal(d) || IsBigFloat(d);
+}
+
+void WriteCellScalar(const Message& msg, const FieldDescriptor* fd, std::string* out) {
+  const MarshalOptions opts = CellOptions();
+  Encoder(opts, *out).EncodeScalarValue(msg, fd, /*idx=*/-1);
+}
+
+Status WriteCellLiteral(const Message& sub, std::string* out) {
+  const MarshalOptions opts = CellOptions();
+  return Encoder(opts, *out).WriteLiteralMessage(sub);
+}
+
+// The field is encoded as Marshal encodes it at no indent, the field name
+// that leads it is cut, and its newlines become spaces. That is safe because
+// Marshal never writes a raw newline inside a token (strings escape it, bytes
+// are base64), so every newline it writes separates tokens.
+Status WriteValueCell(const Message& msg,
+                      const FieldDescriptor* fd,
+                      const NullSet* null_set,
+                      std::string* out) {
+  const MarshalOptions opts = CellOptions();
+  std::string tmp;
+  Encoder inner(opts, tmp);
+  inner.SetNullSet(null_set);
+  inner.SetCellBodies();
+  Status st;
+  if (fd->is_map()) {
+    st = inner.EncodeMapField(msg, fd, 0);
+  } else if (fd->is_repeated()) {
+    st = inner.EncodeListField(msg, fd, 0);
+  } else {
+    st = inner.EncodeMessageField(fd, msg.GetReflection()->GetMessage(msg, fd), 0);
+  }
+  if (!st.ok()) return st;
+  std::string_view text = tmp;
+  const auto trim_prefix = [&text](std::string_view prefix) {
+    if (text.substr(0, prefix.size()) == prefix) text.remove_prefix(prefix.size());
+  };
+  trim_prefix(fd->name());
+  trim_prefix(" = ");
+  trim_prefix(" ");
+  if (!text.empty() && text.back() == '\n') text.remove_suffix(1);
+  const size_t start = out->size();
+  out->append(text);
+  std::replace(out->begin() + static_cast<std::ptrdiff_t>(start), out->end(), '\n', ' ');
+  return Status::OK();
+}
 
 StatusOr<std::string> Marshal(const Message& msg, MarshalOptions opts) {
   if (opts.indent.empty()) opts.indent = "  ";
@@ -584,10 +653,13 @@ StatusOr<std::string> Marshal(const Message& msg, MarshalOptions opts) {
   Encoder enc(opts, out);
   const FieldDescriptor* null_mask = FindNullMaskField(msg.GetDescriptor());
   enc.SetNullMaskFd(null_mask);
+  NullSet nulls;
   if (null_mask != nullptr && msg.GetReflection()->HasField(msg, null_mask)) {
-    enc.SetNullPaths(ReadNullPaths(msg, null_mask));
+    for (auto& path : ReadNullPaths(msg, null_mask)) nulls.insert(std::move(path));
+    enc.SetNullSet(&nulls);
   } else if (opts.null_fields != nullptr) {
-    enc.SetNullPaths(opts.null_fields->NullFields());
+    for (auto& path : opts.null_fields->NullFields()) nulls.insert(std::move(path));
+    enc.SetNullSet(&nulls);
   }
   Status st = enc.EncodeMessage(msg, 0);
   if (!st.ok()) return st;

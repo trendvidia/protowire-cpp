@@ -202,13 +202,26 @@ void RunDatasets(Schema& s, const pxf::Document& doc) {
     for (size_t i = 0; i < cols.size(); ++i) joined += (i ? ", " : "") + cols[i];
     std::cout << "dataset: " << ds.type << " (" << joined << ")\n";
     if (d == nullptr) continue;
+    std::string header;
+    if (Status st = pxf::AppendDatasetHeader(&header, d, ds.columns); st.ok()) {
+      PrintText("header", header);
+    } else {
+      PrintText("header", st);
+    }
     pxf::UnmarshalOptions opts;
     opts.type_resolver = &s;
     for (size_t i = 0; i < ds.rows.size(); ++i) {
       auto m = s.New(d);
       Status st = pxf::BindRow(m.get(), ds.columns, ds.rows[i], opts);
       std::cout << "row " << i << ": " << Text(st) << "\n";
-      if (st.ok()) std::cout << "bytes: " << BytesOf(*m) << "\n";
+      if (!st.ok()) continue;
+      std::cout << "bytes: " << BytesOf(*m) << "\n";
+      std::string row;
+      if (Status written = pxf::AppendDatasetRow(&row, *m, ds.columns); written.ok()) {
+        PrintText("written", row);
+      } else {
+        PrintText("written", written);
+      }
     }
   }
 }

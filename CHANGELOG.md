@@ -60,6 +60,7 @@ number says nothing about any other port. See the Releases section of
 
 - **`UnmarshalOptions::on_secret_field`,** a hook that receives each `pxf.Secret` value in place of the message. As in protowire-go's `OnSecretField`.
 - **`UnmarshalOptions::skip_post_decode`,** for a caller that runs its own required and default pass.
+- **`AppendDatasetHeader` and `AppendDatasetRow` write `@dataset` tables** (#78). A cell holds what `Marshal` writes for the field, on one line, and an empty cell reads back as the unset field or the row is refused. On error `dst` is unchanged. Text and errors match protowire-go, and a column error now quotes the name as `strconv.Quote` does.
 - **`MarshalOptions::null_fields`,** a `Result` whose nulls `Marshal` writes, for a message with no `_null` mask. As in protowire-go.
 - **`scripts/go_differential.sh` runs protowire-go and this port over the spec's fixtures and `testdata/differential`,** and fails on any difference in verdict, error text, presence, bytes or output.
 - **`pxf.Secret` sugar.** `pw = "x"` binds to `value`, in a singular field, a list element, a map value and a `@dataset` cell. `Marshal` writes that form when `hint` and `fingerprint` are empty, and the block form otherwise. **Output text changes for such a Secret.** `IsSecret` is new in `wellknown.h`.

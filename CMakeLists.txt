@@ -84,7 +84,7 @@ _pwx_existing_sources(_pxf_srcs
   src/pxf/lexer.cc src/pxf/ast.cc src/pxf/parser.cc src/pxf/decode_fast.cc
   src/pxf/encode.cc src/pxf/format.cc src/pxf/wellknown.cc
   src/pxf/annotations.cc src/pxf/result.cc src/pxf/options.cc src/pxf/schema.cc
-  src/pxf/bigfloat.cc src/pxf/carrier.cc src/pxf/dataset_reader.cc src/pxf/dataset_paths.cc src/pxf/go_wire.cc src/pxf/keyed.cc)
+  src/pxf/bigfloat.cc src/pxf/carrier.cc src/pxf/dataset_reader.cc src/pxf/dataset_paths.cc src/pxf/dataset_writer.cc src/pxf/go_wire.cc src/pxf/keyed.cc)
 _pwx_existing_sources(_sbe_srcs
   src/sbe/annotations.cc src/sbe/template.cc src/sbe/codec.cc
   src/sbe/marshal.cc src/sbe/unmarshal.cc src/sbe/view.cc

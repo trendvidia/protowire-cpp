@@ -24,6 +24,7 @@
 
 #include "protowire/detail/status.h"
 #include "protowire/pxf/dataset_reader.h"  // DatasetReader, BindRow
+#include "protowire/pxf/dataset_writer.h"  // AppendDatasetHeader, AppendDatasetRow
 #include "protowire/pxf/keyed.h"           // CanonicalizeKeyed
 #include "protowire/pxf/options.h"
 #include "protowire/pxf/parser.h"  // Document, Parse
