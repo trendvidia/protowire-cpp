@@ -335,13 +335,18 @@ bool SplitLiteral(std::string_view s, Literal* out) {
     bool neg = false;
     if (i < s.size() && (s[i] == '+' || s[i] == '-')) neg = s[i++] == '-';
     const size_t exp_start = i;
-    constexpr int64_t kSaturated = int64_t{1} << 60;
+    constexpr int64_t kSaturated = int64_t{1} << 55;
     int64_t e = 0;
     for (; i < s.size() && IsDigit(s[i]); ++i) {
-      if (e < kSaturated) e = e * 10 + (s[i] - '0');
+      if (e < kSaturated) {
+        e = e * 10 + (s[i] - '0');
+      } else {
+        e = kSaturated * 10;  // stays put: no further digit can overflow it
+        break;
+      }
     }
+    while (i < s.size() && IsDigit(s[i])) ++i;
     if (i == exp_start) return false;
-    e = std::min(e, kSaturated);
     exp10 += neg ? -e : e;
   }
   if (i != s.size()) return false;
