@@ -613,19 +613,16 @@ class DirectDecoder {
   // would read back as its zero value, and a proto2 `required` field left
   // unset makes the message invalid in protobuf binary.
   Status CheckNullable(const FieldDescriptor* fd, Position pos) {
-    const std::string name(fd->name());
-    if (fd->is_map()) return PosError(pos, "null is not allowed on map field \"" + name + "\"");
-    if (fd->is_repeated()) {
-      return PosError(pos, "null is not allowed on repeated field \"" + name + "\"");
-    }
-    if (fd->is_required()) {
+    auto refuse = [&](const char* kind, const char* why) {
       return PosError(pos,
-                      "null is not allowed on required field \"" + name + "\": it must be set");
-    }
+                      std::string("null is not allowed on ") + kind + " field \"" +
+                          std::string(fd->name()) + "\"" + why);
+    };
+    if (fd->is_map()) return refuse("map", "");
+    if (fd->is_repeated()) return refuse("repeated", "");
+    if (fd->is_required()) return refuse("required", ": it must be set");
     if (!fd->has_presence()) {
-      return PosError(pos,
-                      "null is not allowed on scalar field \"" + name +
-                          "\": declare it optional, or as a wrapper type, to make it nullable");
+      return refuse("scalar", ": declare it optional, or as a wrapper type, to make it nullable");
     }
     return Status::OK();
   }
