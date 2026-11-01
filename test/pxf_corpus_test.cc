@@ -203,6 +203,25 @@ TEST(PxfCorpus, Duplicates) {
   RunDecoderCorpus("duplicates", {"duplicates.proto"}, ParseVerdict::kAccepts);
 }
 
+// A map's keys are scanned while short and move to a set when long; a
+// repeated key has to be caught on both sides of that line.
+TEST(PxfCorpus, MapKeyBoundTwiceInALongMap) {
+  Schema schema("duplicates", {"duplicates.proto"});
+  const pbuf::Descriptor* d = schema.Find("dup.v1.Holder");
+  for (int n : {1, 15, 16, 17, 18, 100}) {
+    SCOPED_TRACE(n);
+    std::string entries;
+    for (int i = 0; i < n; ++i) entries += "k" + std::to_string(i) + ": \"v\"\n";
+    auto ok = schema.New(d);
+    EXPECT_TRUE(pxf::Unmarshal("labels = {\n" + entries + "}\n", ok.get()).ok());
+    for (int dup : {0, n - 1}) {
+      auto bad = schema.New(d);
+      std::string again = "k" + std::to_string(dup) + ": \"w\"\n";
+      EXPECT_FALSE(pxf::Unmarshal("labels = {\n" + entries + again + "}\n", bad.get()).ok());
+    }
+  }
+}
+
 // BodyScope keeps the first 64 field indexes in a word and the rest in a
 // vector; the rule has to hold on both sides of that line.
 TEST(PxfCorpus, BoundTwicePastTheSixtyFourthField) {
