@@ -37,6 +37,12 @@ bool IsBigInt(const google::protobuf::Descriptor* d);
 bool IsDecimal(const google::protobuf::Descriptor* d);
 bool IsBigFloat(const google::protobuf::Descriptor* d);
 
+// IsSecret reports a pxf.Secret. It has a scalar form, `pw = "x"`, which
+// binds to `value`, and Marshal writes that form when `hint` and
+// `fingerprint` are both empty. A message of this name without a string
+// `value` is an ordinary message.
+bool IsSecret(const google::protobuf::Descriptor* d);
+
 // IsDefaultable reports a message type one PXF literal can denote, which is
 // the set a (pxf.default) is valid on: Timestamp, Duration, the wrappers and
 // the big numbers.

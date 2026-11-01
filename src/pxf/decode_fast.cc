@@ -431,6 +431,7 @@ class DirectDecoder {
   Status DecodeFields(Message* msg, bool in_block);
   Status DecodeFieldsBody(Message* msg, bool in_block);
   Status DecodeFieldValue(Message* msg, const FieldDescriptor* fd, BodyScope* scope);
+  Status DecodeLiteral(Message* sub, const FieldDescriptor* fd, bool* bound);
   Status DecodeMsgValue(Message* msg, const FieldDescriptor* fd);
   Status DecodeListInline(Message* msg, const FieldDescriptor* fd);
   Status DecodeMapInline(Message* msg, const FieldDescriptor* fd, BodyScope* scope);
@@ -558,6 +559,25 @@ class DirectDecoder {
   Status IllegalError() {
     if (current_.kind != TokenKind::kIllegal) return Status::OK();
     return PosError(current_.pos, std::string(current_.value));
+  }
+
+  // MsgValueForms names the value forms a message type admits, for the
+  // error when the token matched none of them. Every message takes a block,
+  // so "'{'" is the floor. DecodeLiteral's forms need naming here. Wrappers
+  // never reach this: any other token goes to their inner scalar.
+  static const char* MsgValueForms(const Descriptor* d) {
+    if (IsTimestamp(d)) return "a timestamp literal or '{'";
+    if (IsDuration(d)) return "a duration literal or '{'";
+    if (IsBigInt(d)) return "an integer literal or '{'";
+    if (IsDecimal(d) || IsBigFloat(d)) return "a numeric literal or '{'";
+    if (IsSecret(d)) return "a string literal or '{'";
+    return "'{'";
+  }
+
+  // TokenErrMsg describes the current token for "expected X, got Y".
+  std::string TokenErrMsg() const {
+    if (current_.kind == TokenKind::kIllegal) return std::string(current_.value);
+    return std::string(TokenKindName(current_.kind)) + " (\"" + std::string(current_.value) + "\")";
   }
 
   // Skipping for unknown fields.
@@ -802,64 +822,80 @@ Status DirectDecoder::DecodeFieldValue(Message* msg, const FieldDescriptor* fd, 
   return SetScalar(msg, fd);
 }
 
-Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
-  const Descriptor* d = fd->message_type();
-  Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
-
-  // Timestamp / Duration shortcut tokens.
-  if (IsTimestamp(d) && current_.kind == TokenKind::kTimestamp) {
+// DecodeLiteral binds the current token to sub when it is a literal of
+// sub's type, the sugar every message position accepts: a singular field, a
+// list element and a map value. *bound stays false when it is not one, and
+// the caller then expects a block.
+Status DirectDecoder::DecodeLiteral(Message* sub, const FieldDescriptor* fd, bool* bound) {
+  const Descriptor* d = sub->GetDescriptor();
+  const TokenKind kind = current_.kind;
+  *bound = true;
+  if (IsTimestamp(d) && kind == TokenKind::kTimestamp) {
     auto t = detail::ParseRFC3339(current_.value);
-    if (!t.has_value()) {
-      return PosError(current_.pos, "invalid timestamp");
-    }
+    if (!t.has_value()) return PosError(current_.pos, "invalid timestamp");
     SetTimestampFields(sub, t->seconds, t->nanos);
     Advance();
     return Status::OK();
   }
-  if (IsDuration(d) && current_.kind == TokenKind::kDuration) {
+  if (IsDuration(d) && kind == TokenKind::kDuration) {
     auto dur = detail::ParseDuration(current_.value);
-    if (!dur.has_value()) {
-      return PosError(current_.pos, "invalid duration");
-    }
+    if (!dur.has_value()) return PosError(current_.pos, "invalid duration");
     SetDurationFields(sub, dur->seconds, dur->nanos);
     Advance();
     return Status::OK();
   }
-  if (!IsBigFloat(d)) {
-    if (Status s = CheckNoPrecision(fd); !s.ok()) return s;
+  if (IsBigFloat(d) && (kind == TokenKind::kInt || kind == TokenKind::kFloat)) {
+    return SetBigFloat(sub);
   }
+  if (Status s = CheckNoPrecision(fd); !s.ok()) return s;
   // Wrapper sugar: bare scalar → wrapper.value.
-  if (WrapperInnerCppType(d) != -1 && current_.kind != TokenKind::kLBrace) {
+  if (WrapperInnerCppType(d) != -1 && kind != TokenKind::kLBrace) {
     const FieldDescriptor* inner = d->FindFieldByName("value");
     if (!inner) return PosError(current_.pos, "wrapper missing 'value' field");
     return SetScalar(sub, inner);
   }
+  // pxf.Secret sugar: a string → secret.value.
+  if (IsSecret(d) && kind == TokenKind::kString) {
+    return SetScalar(sub, d->FindFieldByName("value"));
+  }
   // Big-number sugar. The digit cap runs before the literal reaches the
   // arbitrary-precision parser.
-  if ((IsBigInt(d) || IsDecimal(d)) &&
-      (current_.kind == TokenKind::kInt || current_.kind == TokenKind::kFloat)) {
+  const bool is_int = kind == TokenKind::kInt;
+  const bool is_number = is_int || kind == TokenKind::kFloat;
+  if ((IsBigInt(d) && is_int) || (IsDecimal(d) && is_number)) {
     if (Status s = CheckDigits(current_.value, current_.pos); !s.ok()) return s;
-  }
-  if (IsBigInt(d) && current_.kind == TokenKind::kInt) {
-    if (!SetBigIntFromString(sub, current_.value)) {
-      return PosError(current_.pos, "invalid pxf.BigInt: " + std::string(current_.value));
+    const bool ok = IsBigInt(d) ? SetBigIntFromString(sub, current_.value)
+                                : SetDecimalFromString(sub, current_.value);
+    if (!ok) {
+      return PosError(current_.pos,
+                      std::string("invalid ") + (IsBigInt(d) ? "pxf.BigInt" : "pxf.Decimal") +
+                          ": " + std::string(current_.value));
     }
     Advance();
     return Status::OK();
   }
-  if (IsDecimal(d) && (current_.kind == TokenKind::kInt || current_.kind == TokenKind::kFloat)) {
-    if (!SetDecimalFromString(sub, current_.value)) {
-      return PosError(current_.pos, "invalid pxf.Decimal: " + std::string(current_.value));
+  *bound = false;
+  return Status::OK();
+}
+
+Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
+  const Descriptor* d = fd->message_type();
+  Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
+
+  bool bound = false;
+  if (Status s = DecodeLiteral(sub, fd, &bound); !s.ok()) return s;
+  if (bound) {
+    // A block marks each field it binds, so the scalar form marks the one
+    // it stands for.
+    if (result_ && IsSecret(d)) {
+      result_->MarkPresent(path_prefix_ + std::string(fd->name()) + ".value");
     }
-    Advance();
     return Status::OK();
-  }
-  if (IsBigFloat(d) && (current_.kind == TokenKind::kInt || current_.kind == TokenKind::kFloat)) {
-    return SetBigFloat(sub);
   }
   if (current_.kind != TokenKind::kLBrace) {
     return PosError(current_.pos,
-                    "expected '{' for message field \"" + std::string(fd->name()) + "\"");
+                    std::string("expected ") + MsgValueForms(d) + " for message field \"" +
+                        std::string(fd->name()) + "\", got " + TokenErrMsg());
   }
   Advance();
   return DecodeBlockInto(sub, fd);
@@ -943,46 +979,14 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
     }
     if (fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
       const Descriptor* d = fd->message_type();
-      if (!IsBigFloat(d)) {
-        if (Status s = CheckNoPrecision(fd); !s.ok()) return s;
-      }
-      if ((IsBigInt(d) || IsDecimal(d)) &&
-          (current_.kind == TokenKind::kInt || current_.kind == TokenKind::kFloat)) {
-        if (Status s = CheckDigits(current_.value, current_.pos); !s.ok()) return s;
-      }
       Message* sub = msg->GetReflection()->AddMessage(msg, fd);
-      // Permit the same WKT/sugar tokens as scalar message fields.
-      if (IsTimestamp(d) && current_.kind == TokenKind::kTimestamp) {
-        auto t = detail::ParseRFC3339(current_.value);
-        if (!t.has_value()) return PosError(current_.pos, "invalid timestamp");
-        SetTimestampFields(sub, t->seconds, t->nanos);
-        Advance();
-      } else if (IsDuration(d) && current_.kind == TokenKind::kDuration) {
-        auto dur = detail::ParseDuration(current_.value);
-        if (!dur.has_value()) return PosError(current_.pos, "invalid duration");
-        SetDurationFields(sub, dur->seconds, dur->nanos);
-        Advance();
-      } else if (WrapperInnerCppType(d) != -1 && current_.kind != TokenKind::kLBrace) {
-        const FieldDescriptor* inner = d->FindFieldByName("value");
-        Status st = SetScalar(sub, inner);
-        if (!st.ok()) return st;
-      } else if (IsBigInt(d) && current_.kind == TokenKind::kInt) {
-        if (!SetBigIntFromString(sub, current_.value)) {
-          return PosError(current_.pos, "invalid BigInt");
-        }
-        Advance();
-      } else if (IsDecimal(d) &&
-                 (current_.kind == TokenKind::kInt || current_.kind == TokenKind::kFloat)) {
-        if (!SetDecimalFromString(sub, current_.value)) {
-          return PosError(current_.pos, "invalid Decimal");
-        }
-        Advance();
-      } else if (IsBigFloat(d) &&
-                 (current_.kind == TokenKind::kInt || current_.kind == TokenKind::kFloat)) {
-        if (Status s = SetBigFloat(sub); !s.ok()) return s;
-      } else {
+      bool bound = false;
+      if (Status s = DecodeLiteral(sub, fd, &bound); !s.ok()) return s;
+      if (!bound) {
         if (current_.kind != TokenKind::kLBrace) {
-          return PosError(current_.pos, "expected '{' for repeated message element");
+          return PosError(current_.pos,
+                          std::string("expected ") + MsgValueForms(d) +
+                              " for repeated message element, got " + TokenErrMsg());
         }
         Advance();
         if (const FieldDescriptor* key_fd = KeyField(fd)) {
@@ -1142,11 +1146,16 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd, B
           "map field \"" + std::string(fd->name()) + "\": key " + key_text + " is already set");
     }
     if (val_fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
+      Message* value = entry->GetReflection()->MutableMessage(entry, val_fd);
+      bool bound = false;
+      if (st = DecodeLiteral(value, fd, &bound); !st.ok()) return st;
+      if (bound) continue;
       if (current_.kind != TokenKind::kLBrace) {
-        return PosError(current_.pos, "expected '{' for map message value");
+        return PosError(current_.pos,
+                        std::string("expected ") + MsgValueForms(value->GetDescriptor()) +
+                            " for map message value, got " + TokenErrMsg());
       }
       Advance();
-      Message* value = entry->GetReflection()->MutableMessage(entry, val_fd);
       st = current_.kind == TokenKind::kAtType && IsAny(value->GetDescriptor())
                ? DecodeAnyInner(value)
                : DecodeFields(value, /*in_block=*/true);

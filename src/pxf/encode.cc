@@ -3,8 +3,8 @@
 // google::protobuf::Message → PXF text.
 //
 // Coverage matches the decoder: scalars, repeats, maps, nested messages,
-// well-known Timestamp/Duration/Wrapper sugar. Defers Any sugar, big-number
-// sugar, _null FieldMask emission.
+// and the sugar of the well-known types, Any, the big numbers and pxf.Secret.
+// Of the _null FieldMask, only top-level paths are written as `field = null`.
 
 #include "protowire/pxf.h"
 #include "protowire/pxf/annotations.h"
@@ -96,6 +96,20 @@ class Encoder {
   // a keyed-block entry already carries its value (draft -01 §3.13).
   const FieldDescriptor* skip_key_fd_ = nullptr;
 };
+
+// SecretHasMetadata reports a non-empty hint or fingerprint on a pxf.Secret.
+bool SecretHasMetadata(const Message& secret) {
+  const google::protobuf::Descriptor* d = secret.GetDescriptor();
+  const Reflection* r = secret.GetReflection();
+  for (const char* name : {"hint", "fingerprint"}) {
+    const FieldDescriptor* fd = d->FindFieldByName(name);
+    if (fd != nullptr && fd->type() == FieldDescriptor::TYPE_STRING && !fd->is_repeated() &&
+        !r->GetString(secret, fd).empty()) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // KeyedFormEligible reports whether every element of the repeated field
 // has a non-empty key value that is distinct within the collection — the
@@ -286,6 +300,12 @@ Status Encoder::EncodeMessageValue(const Message& sub, int level) {
     out_ += *literal;
     return Status::OK();
   }
+  // A Secret with no metadata is its value: the block form would only add
+  // noise, and with metadata the scalar form would lose it.
+  if (IsSecret(d) && !SecretHasMetadata(sub)) {
+    EncodeScalarValue(sub, d->FindFieldByName("value"), /*idx=*/-1);
+    return Status::OK();
+  }
   // Generic message — open block, recurse, close.
   out_ += "{\n";
   Status st = EncodeMessage(sub, level + 1);
@@ -451,10 +471,9 @@ Status Encoder::EncodeMapField(const Message& msg, const FieldDescriptor* fd, in
 
 Status Encoder::EncodeField(const Message& msg, const FieldDescriptor* fd, int level) {
   const Reflection* r = msg.GetReflection();
-  if (fd->is_map()) return EncodeMapField(msg, fd, level);
-  if (fd->is_repeated()) {
+  if (fd->is_repeated()) {  // true of a map field too
     if (r->FieldSize(msg, fd) == 0 && !opts_.emit_defaults) return Status::OK();
-    return EncodeListField(msg, fd, level);
+    return fd->is_map() ? EncodeMapField(msg, fd, level) : EncodeListField(msg, fd, level);
   }
   if (!opts_.emit_defaults && !r->HasField(msg, fd) &&
       fd->cpp_type() != FieldDescriptor::CPPTYPE_MESSAGE) {
