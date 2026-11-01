@@ -3,8 +3,8 @@
 // google::protobuf::Message → PXF text.
 //
 // Coverage matches the decoder: scalars, repeats, maps, nested messages,
-// well-known Timestamp/Duration/Wrapper sugar. Defers Any sugar, big-number
-// sugar, _null FieldMask emission.
+// and the sugar of the well-known types, Any, the big numbers and pxf.Secret.
+// Of the _null FieldMask, only top-level paths are written as `field = null`.
 
 #include "protowire/pxf.h"
 #include "protowire/pxf/annotations.h"
@@ -96,6 +96,19 @@ class Encoder {
   // a keyed-block entry already carries its value (draft -01 §3.13).
   const FieldDescriptor* skip_key_fd_ = nullptr;
 };
+
+// SecretHasMetadata reports a non-empty hint or fingerprint on a pxf.Secret.
+// Any other non-empty field counts too: a scalar could not carry it.
+bool SecretHasMetadata(const Message& secret) {
+  const google::protobuf::Descriptor* d = secret.GetDescriptor();
+  const Reflection* r = secret.GetReflection();
+  for (int i = 0; i < d->field_count(); ++i) {
+    const FieldDescriptor* fd = d->field(i);
+    if (fd->name() == "value") continue;
+    if (fd->is_repeated() ? r->FieldSize(secret, fd) > 0 : r->HasField(secret, fd)) return true;
+  }
+  return false;
+}
 
 // KeyedFormEligible reports whether every element of the repeated field
 // has a non-empty key value that is distinct within the collection — the
@@ -284,6 +297,12 @@ Status Encoder::EncodeMessageValue(const Message& sub, int level) {
                                   : ReadBigFloatAsString(sub);
     if (!literal.ok()) return literal.status();
     out_ += *literal;
+    return Status::OK();
+  }
+  // A Secret with no metadata is its value: the block form would only add
+  // noise, and with metadata the scalar form would lose it.
+  if (IsSecret(d) && !SecretHasMetadata(sub)) {
+    EncodeScalarValue(sub, d->FindFieldByName("value"), /*idx=*/-1);
     return Status::OK();
   }
   // Generic message — open block, recurse, close.

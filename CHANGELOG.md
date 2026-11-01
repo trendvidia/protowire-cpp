@@ -24,8 +24,9 @@ format changes.
 - **`@required` and `@default` are honoured** (protowire-go#81). They lower to the annotation carrier at extension 1327, which this port never read, so a schema migrated to that spelling bound with no enforcement and no diagnostic. `IsRequired`, `GetDefault`, `UnmarshalFull` and the bind-time checks now see both spellings. `(pxf.default)` and `@default` with different values on one field, or an `@default` that reduces to no single literal, is the new violation `ViolationKind::kDefaultOption`. **A schema in that spelling now gets the enforcement it declared.** protowire-python inherits this.
 - **`ValidateFile` has the rest of the bind-time rules** (draft -01 §annotation-extensions). These are now violations, in the `(pxf.*)` and `@` spellings alike: a default on a repeated, map or group field, or on a message type with no literal; a default on more than one member of a oneof; `(pxf.required)` on a oneof member. **A schema breaking one of these now fails every decode that does not set `skip_validate`.**
 - **An option at a retired extension number is diagnosed** (STABILITY.md promise 3), as the new `ViolationKind::kRetiredNumber`. A descriptor compiled before protowire v1.12.0 lost its `(pxf.required)` and `(pxf.default)` silently; it now fails to bind and must be recompiled. The check runs only in a file importing protowire's annotations, on the Options kind each number was allocated on.
-- **`Marshal` leaves out an empty map,** unless `emit_defaults` is set. It wrote `name = {\n}`, which read back as present, so a required map was satisfied by nothing. **Output text changes for a message with an empty map.**
 - **`UnmarshalFull` with `skip_validate` no longer aborts on a default on a repeated or map field.** It returns an error.
+- **`Marshal` leaves out an empty map,** unless `emit_defaults` is set. It wrote `name = {\n}`, which read back as present, so a required map was satisfied by nothing. **Output text changes for a message with an empty map.**
+- **A map value takes the literal forms** (a timestamp, duration, wrapper or big number). Only a block was accepted, so a map of these failed to read back what `Marshal` wrote.
 
 ### Changed
 
@@ -37,6 +38,7 @@ format changes.
 
 ### Added
 
+- **`pxf.Secret` sugar.** `pw = "x"` binds to `value`, in a singular field, a list element, a map value and a `@dataset` cell. `Marshal` writes that form when `hint` and `fingerprint` are empty, and the block form otherwise. **Output text changes for such a Secret.** `IsSecret` is new in `wellknown.h`.
 - **`proto/pxf/secret.proto`,** the canonical `pxf.Secret` schema, which this port's copy of `proto/` lacked. The `testdata/dataset` fixtures import it.
 - **`testdata/{any,bigfloat,blocks,duplicates,nulls,strings,dataset}`** and `test/pxf_corpus_test.cc`, which runs them through both decoders, `Parse`, `BindRow` and `DatasetReader`. `testdata/blocks` needed no code change: a `,` or `;` between the entries of a block was already rejected (protowire#312).
 - **`@dataset` value cells** (protowire#341, v1.13). A cell holds any value, and `c = <value>` in a body means the same, so a list or block cell is accepted. `{}` is a present empty message.

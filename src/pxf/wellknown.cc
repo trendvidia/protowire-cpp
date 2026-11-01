@@ -78,6 +78,13 @@ bool IsBigFloat(const pb::Descriptor* d) {
   return d && d->full_name() == "pxf.BigFloat";
 }
 
+bool IsSecret(const pb::Descriptor* d) {
+  if (d == nullptr || d->full_name() != "pxf.Secret") return false;
+  const pb::FieldDescriptor* value = d->FindFieldByName("value");
+  return value != nullptr && value->type() == pb::FieldDescriptor::TYPE_STRING &&
+         !value->is_repeated();
+}
+
 bool IsDefaultable(const pb::Descriptor* d) {
   return IsTimestamp(d) || IsDuration(d) || WrapperInnerCppType(d) != -1 || IsBigInt(d) ||
          IsDecimal(d) || IsBigFloat(d);
