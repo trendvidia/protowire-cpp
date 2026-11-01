@@ -39,8 +39,11 @@
 
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/dynamic_message.h>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/message.h>
 
+#include "carrier.h"
 #include "parser_internal.h"
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
@@ -172,9 +175,58 @@ class BodyScope {
   std::vector<MapKeys> maps_;
 };
 
+// QuoteKey quotes a string as protowire-go's strconv.Quote does, so the ports
+// name one map key alike. The difference left: strconv.Quote also escapes
+// non-printable runes above ASCII, which takes Unicode tables.
+std::string QuoteKey(const std::string& key) {
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string out = "\"";
+  for (unsigned char c : key) {
+    switch (c) {
+      case '"':
+        out += "\\\"";
+        break;
+      case '\\':
+        out += "\\\\";
+        break;
+      case '\a':
+        out += "\\a";
+        break;
+      case '\b':
+        out += "\\b";
+        break;
+      case '\f':
+        out += "\\f";
+        break;
+      case '\n':
+        out += "\\n";
+        break;
+      case '\r':
+        out += "\\r";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
+      case '\v':
+        out += "\\v";
+        break;
+      default:
+        if (c < 0x20 || c == 0x7f) {
+          out += "\\x";
+          out += kHex[c >> 4];
+          out += kHex[c & 0xF];
+        } else {
+          out += static_cast<char>(c);
+        }
+    }
+  }
+  out += '"';
+  return out;
+}
+
 // MapKeyText renders the key an entry ended up with, so that two spellings
-// of one value (`1` and `"1"` on an int-keyed map) compare equal, and
-// quotes a string for the error message.
+// of one value (`1` and `"1"` on an int-keyed map) compare equal. It is also
+// how a key appears in an error message and a presence path, `by_key["k"]`.
 std::string MapKeyText(const Message& entry, const FieldDescriptor* key_fd) {
   const Reflection* r = entry.GetReflection();
   switch (key_fd->cpp_type()) {
@@ -189,9 +241,45 @@ std::string MapKeyText(const Message& entry, const FieldDescriptor* key_fd) {
     case FieldDescriptor::CPPTYPE_BOOL:
       return r->GetBool(entry, key_fd) ? "true" : "false";
     default:
-      return "\"" + r->GetString(entry, key_fd) + "\"";
+      return QuoteKey(r->GetString(entry, key_fd));
   }
 }
+
+// IndexSuffix is the path suffix of a list element, `[i]`.
+std::string IndexSuffix(int i) {
+  return "[" + std::to_string(i) + "]";
+}
+
+// PostDecoder is the pass after a document is decoded: it checks required
+// fields and applies defaults in every message body the document wrote. A
+// body's fields are recorded under its own path (`items[0].label`,
+// `by_key["k"].label`), so its required and default rules look at it alone.
+//
+// What it learns of a descriptor lasts for one decode. A longer memo could
+// outlive the descriptor, which C++ can free.
+class PostDecoder {
+ public:
+  explicit PostDecoder(const Result* result) : result_(result) {}
+  Status Run(Message* msg, const FieldDescriptor* null_mask_fd, const std::string& prefix);
+
+ private:
+  // PlanField is what the pass needs of one field before it looks at the
+  // document. `body` is the message type the field holds, directly or as a
+  // list element or map value.
+  struct PlanField {
+    bool required = false;
+    std::optional<std::string> def;
+    const Descriptor* body = nullptr;
+  };
+  const std::vector<PlanField>& Plan(const Descriptor* desc);
+  bool Reaches(const Descriptor* desc);
+  bool OneofChosen(const FieldDescriptor* fd, const std::string& prefix) const;
+  Status RunBodies(Message* msg, const FieldDescriptor* fd, const std::string& path);
+
+  const Result* result_;
+  std::unordered_map<const Descriptor*, std::vector<PlanField>> plans_;
+  std::unordered_map<const Descriptor*, bool> reaches_;
+};
 
 class DirectDecoder {
  public:
@@ -204,6 +292,7 @@ class DirectDecoder {
       : lex_(input),
         root_(root),
         result_(result),
+        post_(result),
         resolver_(resolver),
         discard_unknown_(discard_unknown),
         lim_(lim) {
@@ -226,6 +315,12 @@ class DirectDecoder {
     Advance();
     if (auto s = ConsumeDirectives(); !s.ok()) return s;
     return DecodeFields(root_, /*in_block=*/false);
+  }
+
+  // RunPostDecode is the post-decode pass over the root. Any bodies took it
+  // as they were decoded, since they are packed to bytes by now.
+  Status RunPostDecode(const FieldDescriptor* null_mask_fd) {
+    return post_.Run(root_, null_mask_fd, "");
   }
 
  private:
@@ -466,6 +561,25 @@ class DirectDecoder {
   }
   void Ascend() { --depth_; }
 
+  // EnterElement extends the path by `name<suffix>.` for the body of a list
+  // element or map value, and returns the path for LeaveElement to restore.
+  // Without it, a field in an element would mark the parent's path, where it
+  // could satisfy a required field or keep a default off.
+  std::string EnterElement(const FieldDescriptor* fd, const std::string& suffix) {
+    std::string saved = path_prefix_;
+    ++elem_depth_;
+    if (result_) {
+      path_prefix_ += std::string(fd->name());
+      path_prefix_ += suffix;
+      path_prefix_ += '.';
+    }
+    return saved;
+  }
+  void LeaveElement(std::string saved) {
+    path_prefix_ = std::move(saved);
+    --elem_depth_;
+  }
+
   // CheckBindOnce rejects a second binding of a singular field. Repeated
   // fields concatenate, and a map field's bindings merge key by key.
   Status CheckBindOnce(const FieldDescriptor* fd, Position pos, BodyScope* scope) {
@@ -577,7 +691,8 @@ class DirectDecoder {
   // TokenErrMsg describes the current token for "expected X, got Y".
   std::string TokenErrMsg() const {
     if (current_.kind == TokenKind::kIllegal) return std::string(current_.value);
-    return std::string(TokenKindName(current_.kind)) + " (\"" + std::string(current_.value) + "\")";
+    return std::string(TokenKindName(current_.kind)) + " (" +
+           QuoteKey(std::string(current_.value)) + ")";
   }
 
   // Skipping for unknown fields.
@@ -623,12 +738,16 @@ class DirectDecoder {
   Token current_;
   Message* root_ = nullptr;
   Result* result_ = nullptr;
+  PostDecoder post_;
   const FieldDescriptor* null_mask_fd_ = nullptr;
   TypeResolver* resolver_ = nullptr;
   bool discard_unknown_ = false;
   Limits lim_;
   int depth_ = 0;
   std::string path_prefix_;
+  // List elements and map values entered. A FieldMask path names fields, so
+  // a null inside one has no place in the root's _null mask.
+  int elem_depth_ = 0;
   // Context for the next DecodeFields call: it decodes one element of a
   // keyed repeated field. Consumed on entry so nested bodies don't
   // inherit it.
@@ -707,7 +826,7 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
           if (result_) {
             std::string path = path_prefix_ + std::string(fd->name());
             result_->MarkNull(path);
-            if (null_mask_fd_) {
+            if (null_mask_fd_ && elem_depth_ == 0) {
               AppendNullPath(root_, null_mask_fd_, path);
             }
           }
@@ -906,50 +1025,58 @@ Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
 // opens with a type entry is a body of the type it names (draft -01 "Any
 // Blocks"); without one it is the Any's own fields.
 Status DirectDecoder::DecodeBlockInto(Message* sub, const FieldDescriptor* fd) {
-  if (current_.kind == TokenKind::kAtType && IsAny(sub->GetDescriptor())) {
-    return DecodeAnyInner(sub);
-  }
   std::string saved = path_prefix_;
   path_prefix_ += std::string(fd->name());
   path_prefix_ += '.';
-  Status st = DecodeFields(sub, /*in_block=*/true);
+  Status st = current_.kind == TokenKind::kAtType && IsAny(sub->GetDescriptor())
+                  ? DecodeAnyInner(sub)
+                  : DecodeFields(sub, /*in_block=*/true);
   path_prefix_ = std::move(saved);
   return st;
 }
 
-// On entry current_ is the @type of an Any block's type entry, and the
-// block's '{' has been consumed.
+// On entry current_ is the @type of an Any block's type entry, the block's
+// '{' has been consumed, and the path is the Any's own.
 Status DirectDecoder::DecodeAnyInner(Message* any_msg) {
-  if (resolver_ == nullptr) {
-    return PosError(current_.pos,
-                    "a google.protobuf.Any type entry needs UnmarshalOptions::type_resolver");
-  }
   Advance();
   if (current_.kind != TokenKind::kEquals) {
-    return PosError(current_.pos, "expected '=' after @type");
+    return PosError(current_.pos, "expected '=' after @type, got " + TokenErrMsg());
   }
   Advance();
   if (current_.kind != TokenKind::kString) {
-    return PosError(current_.pos, "expected string type URL after @type =");
+    return PosError(current_.pos, "expected a string type URL after @type =, got " + TokenErrMsg());
   }
   std::string type_url(current_.value);
+  const Position url_pos = current_.pos;
   Advance();
+  if (resolver_ == nullptr) {
+    return PosError(url_pos,
+                    "cannot resolve Any type " + QuoteKey(type_url) +
+                        ": no TypeResolver (UnmarshalOptions::type_resolver)");
+  }
 
   const Descriptor* inner_desc = resolver_->FindMessageByURL(type_url);
   if (!inner_desc) {
-    return PosError(current_.pos, "cannot resolve Any type \"" + type_url + "\"");
+    return PosError(url_pos, "cannot resolve Any type " + QuoteKey(type_url));
   }
   pb::DynamicMessageFactory factory(inner_desc->file()->pool());
   std::unique_ptr<Message> inner(factory.GetPrototype(inner_desc)->New());
-  // The inner body is another message: its fields are not paths of the
-  // root, so they must not mark presence or nulls there.
-  Result* saved_result = std::exchange(result_, nullptr);
+  // The body's fields are recorded under the Any's path, as `payload.code`.
+  // It is packed to bytes below, out of the root pass's reach, so it takes
+  // the post-decode pass here.
   Status st = DecodeFields(inner.get(), /*in_block=*/true);
-  result_ = saved_result;
+  if (st.ok() && result_) st = post_.Run(inner.get(), nullptr, path_prefix_);
   if (!st.ok()) return st;
+  // Deterministic, so one document always packs to the same bytes: map
+  // entries have no fixed order otherwise.
   std::string packed;
-  if (!inner->SerializeToString(&packed)) {
-    return Status::Error("Any inner serialization failed");
+  {
+    pb::io::StringOutputStream stream(&packed);
+    pb::io::CodedOutputStream coded(&stream);
+    coded.SetSerializationDeterministic(true);
+    if (!inner->SerializeToCodedStream(&coded) || coded.HadError()) {
+      return Status::Error("cannot marshal Any inner message");
+    }
   }
   any_msg->GetReflection()->SetString(
       any_msg, any_msg->GetDescriptor()->FindFieldByName("type_url"), std::move(type_url));
@@ -992,9 +1119,12 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
         if (const FieldDescriptor* key_fd = KeyField(fd)) {
           keyed_elem_ = KeyedElem{std::string(fd->name()), std::string(key_fd->name()), "", false};
         }
+        const int index = msg->GetReflection()->FieldSize(*msg, fd) - 1;
+        std::string saved = EnterElement(fd, result_ ? IndexSuffix(index) : "");
         Status st = current_.kind == TokenKind::kAtType && IsAny(d)
                         ? DecodeAnyInner(sub)
                         : DecodeFields(sub, /*in_block=*/true);
+        LeaveElement(std::move(saved));
         if (!st.ok()) return st;
       }
     } else if (fd->cpp_type() == FieldDescriptor::CPPTYPE_ENUM) {
@@ -1083,7 +1213,14 @@ Status DirectDecoder::DecodeKeyedBlockBody(Message* msg,
     Message* sub = r->AddMessage(msg, fd);
     sub->GetReflection()->SetString(sub, key_fd, name);
     keyed_elem_ = KeyedElem{std::string(fd->name()), std::string(key_fd->name()), name, true};
-    if (Status s = DecodeFields(sub, /*in_block=*/true); !s.ok()) return s;
+    std::string saved = EnterElement(fd, result_ ? IndexSuffix(r->FieldSize(*msg, fd) - 1) : "");
+    // The entry name supplies the key field, so the post-decode pass, which
+    // reads presence only, must not treat it as absent: a default would
+    // replace the name.
+    if (result_) result_->MarkPresent(path_prefix_ + std::string(key_fd->name()));
+    Status st = DecodeFields(sub, /*in_block=*/true);
+    LeaveElement(std::move(saved));
+    if (!st.ok()) return st;
   }
 }
 
@@ -1156,9 +1293,11 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd, B
                             " for map message value, got " + TokenErrMsg());
       }
       Advance();
+      std::string saved = EnterElement(fd, "[" + key_text + "]");
       st = current_.kind == TokenKind::kAtType && IsAny(value->GetDescriptor())
                ? DecodeAnyInner(value)
                : DecodeFields(value, /*in_block=*/true);
+      LeaveElement(std::move(saved));
       if (!st.ok()) return st;
     } else if (val_fd->cpp_type() == FieldDescriptor::CPPTYPE_ENUM) {
       st = SetEnum(entry, val_fd, /*repeated=*/false);
@@ -1759,39 +1898,119 @@ Status ApplyDefault(Message* msg, const FieldDescriptor* fd, std::string_view de
   }
 }
 
-// PostDecode validates required fields and applies defaults, recursing into
-// nested messages that were present in the input. Mirrors postDecode in
-// protowire-go/encoding/pxf/decode_fast.go.
-Status PostDecode(Message* msg,
-                  const Result* result,
-                  const FieldDescriptor* null_mask_fd,
-                  std::string prefix) {
-  const auto* desc = msg->GetDescriptor();
+const std::vector<PostDecoder::PlanField>& PostDecoder::Plan(const Descriptor* desc) {
+  auto [it, inserted] = plans_.try_emplace(desc);
+  if (!inserted) return it->second;
+  std::vector<PlanField>& plan = it->second;
+  plan.resize(static_cast<size_t>(desc->field_count()));
   for (int i = 0; i < desc->field_count(); ++i) {
-    const auto* fd = desc->field(i);
-    if (null_mask_fd != nullptr && fd->number() == null_mask_fd->number()) {
-      continue;
-    }
-    std::string path = prefix + std::string(fd->name());
-    bool present = result->Has(path);
-    if (!present) {
-      if (IsRequired(fd)) {
-        return Status::Error("required field \"" + path + "\" is absent");
-      }
-      if (auto def = GetDefault(fd); def.has_value()) {
-        if (Status st = ApplyDefault(msg, fd, *def); !st.ok()) return st;
-      }
-      continue;
-    }
-    if (fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE && !fd->is_repeated() && !fd->is_map() &&
-        !result->IsNull(path) && msg->GetReflection()->HasField(*msg, fd)) {
-      Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
-      if (Status st = PostDecode(sub, result, /*null_mask_fd=*/nullptr, path + "."); !st.ok()) {
-        return st;
+    const FieldDescriptor* fd = desc->field(i);
+    FieldAnnotations a = ReadFieldAnnotations(fd);
+    plan[i].required = a.required;
+    plan[i].def = std::move(a.def);
+    const FieldDescriptor* held = fd->is_map() ? fd->message_type()->map_value() : fd;
+    if (held->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) plan[i].body = held->message_type();
+  }
+  return plan;
+}
+
+// Reaches reports whether a body of type desc, or any body it can hold,
+// carries a required or default field. Without any, the pass skips the whole
+// subtree, however many elements a document wrote. An Any is not followed:
+// its body took the pass when it was decoded.
+bool PostDecoder::Reaches(const Descriptor* desc) {
+  if (auto it = reaches_.find(desc); it != reaches_.end()) return it->second;
+  std::vector<const Descriptor*> seen = {desc};
+  for (size_t next = 0; next < seen.size(); ++next) {
+    for (const PlanField& f : Plan(seen[next])) {
+      if (f.required || f.def.has_value()) return reaches_[desc] = true;
+      if (f.body != nullptr && std::find(seen.begin(), seen.end(), f.body) == seen.end()) {
+        seen.push_back(f.body);
       }
     }
   }
+  // Nothing reachable from desc is annotated, so that holds for each of them.
+  for (const Descriptor* d : seen) reaches_[d] = false;
+  return false;
+}
+
+// OneofChosen reports whether the document supplied another member of fd's
+// oneof, in which case fd's default must not apply (draft -01
+// §annotation-extensions, "Oneof Members"): setting a member clears the rest,
+// so it would destroy the supplied value. This reads the document, not the
+// message, since a default applied earlier in this pass sets the oneof too. A
+// member bound to null counts as supplied.
+bool PostDecoder::OneofChosen(const FieldDescriptor* fd, const std::string& prefix) const {
+  const auto* oneof = fd->real_containing_oneof();
+  if (oneof == nullptr) return false;
+  for (int i = 0; i < oneof->field_count(); ++i) {
+    const FieldDescriptor* member = oneof->field(i);
+    if (member != fd && result_->Has(prefix + std::string(member->name()))) return true;
+  }
+  return false;
+}
+
+// Run checks msg's required fields and applies its defaults, then does the
+// same in the bodies the document wrote under it. Mirrors postDecode in
+// protowire-go/encoding/pxf/decode_fast.go.
+Status PostDecoder::Run(Message* msg,
+                        const FieldDescriptor* null_mask_fd,
+                        const std::string& prefix) {
+  const auto* desc = msg->GetDescriptor();
+  const std::vector<PlanField>& plan = Plan(desc);
+  for (int i = 0; i < desc->field_count(); ++i) {
+    const PlanField& p = plan[i];
+    const bool annotated = p.required || p.def.has_value();
+    const bool visit = p.body != nullptr && Reaches(p.body);
+    if (!annotated && !visit) continue;
+    const auto* fd = desc->field(i);
+    if (null_mask_fd != nullptr && fd->number() == null_mask_fd->number()) continue;
+    std::string path = prefix + std::string(fd->name());
+    if (!result_->Has(path)) {
+      if (p.required) return Status::Error(1, 1, "required field " + QuoteKey(path) + " is absent");
+      if (p.def.has_value() && !OneofChosen(fd, prefix)) {
+        if (Status st = ApplyDefault(msg, fd, *p.def); !st.ok()) return st;
+      }
+      continue;
+    }
+    if (visit && !result_->IsNull(path)) {
+      if (Status st = RunBodies(msg, fd, path); !st.ok()) return st;
+    }
+  }
   return Status::OK();
+}
+
+// RunBodies runs the pass on the bodies fd holds: the message itself, each
+// list element, or each map value. Map values go in path order, so the first
+// error is the same on every run.
+Status PostDecoder::RunBodies(Message* msg, const FieldDescriptor* fd, const std::string& path) {
+  const Reflection* r = msg->GetReflection();
+  if (fd->is_map()) {
+    const FieldDescriptor* key_fd = fd->message_type()->map_key();
+    const FieldDescriptor* val_fd = fd->message_type()->map_value();
+    std::vector<std::pair<std::string, Message*>> entries;
+    for (int i = 0; i < r->FieldSize(*msg, fd); ++i) {
+      Message* entry = r->MutableRepeatedMessage(msg, fd, i);
+      entries.emplace_back(path + "[" + MapKeyText(*entry, key_fd) + "].",
+                           entry->GetReflection()->MutableMessage(entry, val_fd));
+    }
+    std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+      return a.first < b.first;
+    });
+    for (auto& [body_path, body] : entries) {
+      if (Status st = Run(body, nullptr, body_path); !st.ok()) return st;
+    }
+    return Status::OK();
+  }
+  if (fd->is_repeated()) {
+    for (int i = 0; i < r->FieldSize(*msg, fd); ++i) {
+      Status st = Run(r->MutableRepeatedMessage(msg, fd, i), nullptr, path + IndexSuffix(i) + ".");
+      if (!st.ok()) return st;
+    }
+    return Status::OK();
+  }
+  if (!r->HasField(*msg, fd)) return Status::OK();
+  return Run(r->MutableMessage(msg, fd), nullptr, path + ".");
 }
 
 }  // namespace
@@ -1823,7 +2042,7 @@ StatusOr<Result> UnmarshalFull(std::string_view data, Message* msg, UnmarshalOpt
   Status st = d.Run();
   if (!st.ok()) return st;
   const auto* null_mask_fd = FindNullMaskField(msg->GetDescriptor());
-  if (Status pst = PostDecode(msg, &r, null_mask_fd, ""); !pst.ok()) return pst;
+  if (Status pst = d.RunPostDecode(null_mask_fd); !pst.ok()) return pst;
   return r;
 }
 

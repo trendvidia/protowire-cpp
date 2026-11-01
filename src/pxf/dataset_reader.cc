@@ -416,7 +416,9 @@ Status AtRow(const Status& st,
     }
   }
   if (pos.line > 0) return Status::Error(pos.line, pos.column, std::move(msg));
-  if (at.has_value()) return Status::Error(at->first - 1, at->second, std::move(msg));
+  if (at.has_value()) {
+    return Status::Error(at->first > 1 ? at->first - 1 : at->first, at->second, std::move(msg));
+  }
   return Status::Error(std::move(msg));
 }
 
