@@ -98,14 +98,15 @@ class Encoder {
 };
 
 // SecretHasMetadata reports a non-empty hint or fingerprint on a pxf.Secret.
-// Any other non-empty field counts too: a scalar could not carry it.
 bool SecretHasMetadata(const Message& secret) {
   const google::protobuf::Descriptor* d = secret.GetDescriptor();
   const Reflection* r = secret.GetReflection();
-  for (int i = 0; i < d->field_count(); ++i) {
-    const FieldDescriptor* fd = d->field(i);
-    if (fd->name() == "value") continue;
-    if (fd->is_repeated() ? r->FieldSize(secret, fd) > 0 : r->HasField(secret, fd)) return true;
+  for (const char* name : {"hint", "fingerprint"}) {
+    const FieldDescriptor* fd = d->FindFieldByName(name);
+    if (fd != nullptr && fd->type() == FieldDescriptor::TYPE_STRING && !fd->is_repeated() &&
+        !r->GetString(secret, fd).empty()) {
+      return true;
+    }
   }
   return false;
 }

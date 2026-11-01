@@ -660,6 +660,25 @@ class DirectDecoder {
     return PosError(current_.pos, std::string(current_.value));
   }
 
+  // MsgValueForms names the value forms a message type admits, for the
+  // error when the token matched none of them. Every message takes a block,
+  // so "'{'" is the floor. DecodeLiteral's forms need naming here. Wrappers
+  // never reach this: any other token goes to their inner scalar.
+  static const char* MsgValueForms(const Descriptor* d) {
+    if (IsTimestamp(d)) return "a timestamp literal or '{'";
+    if (IsDuration(d)) return "a duration literal or '{'";
+    if (IsBigInt(d)) return "an integer literal or '{'";
+    if (IsDecimal(d) || IsBigFloat(d)) return "a numeric literal or '{'";
+    if (IsSecret(d)) return "a string literal or '{'";
+    return "'{'";
+  }
+
+  // TokenErrMsg describes the current token for "expected X, got Y".
+  std::string TokenErrMsg() const {
+    if (current_.kind == TokenKind::kIllegal) return std::string(current_.value);
+    return std::string(TokenKindName(current_.kind)) + " (\"" + std::string(current_.value) + "\")";
+  }
+
   // Skipping for unknown fields.
   void SkipValue();
   void SkipBraced();
@@ -978,7 +997,8 @@ Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
   }
   if (current_.kind != TokenKind::kLBrace) {
     return PosError(current_.pos,
-                    "expected '{' for message field \"" + std::string(fd->name()) + "\"");
+                    std::string("expected ") + MsgValueForms(d) + " for message field \"" +
+                        std::string(fd->name()) + "\", got " + TokenErrMsg());
   }
   Advance();
   return DecodeBlockInto(sub, fd);
@@ -1068,7 +1088,9 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
       if (Status s = DecodeLiteral(sub, fd, &bound); !s.ok()) return s;
       if (!bound) {
         if (current_.kind != TokenKind::kLBrace) {
-          return PosError(current_.pos, "expected '{' for repeated message element");
+          return PosError(current_.pos,
+                          std::string("expected ") + MsgValueForms(d) +
+                              " for repeated message element, got " + TokenErrMsg());
         }
         Advance();
         if (const FieldDescriptor* key_fd = KeyField(fd)) {
@@ -1241,7 +1263,9 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd, B
       if (st = DecodeLiteral(value, fd, &bound); !st.ok()) return st;
       if (bound) continue;
       if (current_.kind != TokenKind::kLBrace) {
-        return PosError(current_.pos, "expected '{' for map message value");
+        return PosError(current_.pos,
+                        std::string("expected ") + MsgValueForms(value->GetDescriptor()) +
+                            " for map message value, got " + TokenErrMsg());
       }
       Advance();
       std::string saved = EnterElement(fd, "[" + key_text + "]");
@@ -1594,6 +1618,18 @@ void DirectDecoder::SkipBracketed() {
   }
 }
 
+// ParseBoolDefault reads a bool default. Anything but the two PXF literals
+// is an error: `def == "true"` turned "True" into false, with no diagnostic.
+Status ParseBoolDefault(std::string_view def, const FieldDescriptor* fd, bool* out) {
+  if (def == "true" || def == "false") {
+    *out = def == "true";
+    return Status::OK();
+  }
+  return Status::Error("invalid default bool \"" + std::string(def) + "\" for field \"" +
+                       std::string(fd->name()) +
+                       "\": a PXF bool literal is exactly \"true\" or \"false\", case-sensitive");
+}
+
 // ApplyMessageDefault handles defaults for well-known message types:
 // google.protobuf.Timestamp / Duration, the wrapper types (StringValue,
 // Int32Value, …), and pxf.BigInt / Decimal / BigFloat. Mirrors
@@ -1643,9 +1679,12 @@ Status ApplyMessageDefault(Message* msg, const FieldDescriptor* fd, std::string_
           sr->SetString(sub, value_fd, std::string(def));
         }
         return Status::OK();
-      case FieldDescriptor::CPPTYPE_BOOL:
-        sr->SetBool(sub, value_fd, def == "true");
+      case FieldDescriptor::CPPTYPE_BOOL: {
+        bool b = false;
+        if (Status st = ParseBoolDefault(def, fd, &b); !st.ok()) return st;
+        sr->SetBool(sub, value_fd, b);
         return Status::OK();
+      }
       case FieldDescriptor::CPPTYPE_INT32: {
         int32_t n;
         if (!ParseInteger(def, n))
@@ -1740,7 +1779,8 @@ Status ApplyMessageDefault(Message* msg, const FieldDescriptor* fd, std::string_
 // aborts in libprotobuf.
 Status ApplyDefault(Message* msg, const FieldDescriptor* fd, std::string_view def) {
   if (fd->is_repeated()) {
-    return Status::Error("default values not supported on repeated or map field \"" +
+    return Status::Error(std::string("default values not supported for ") +
+                         (fd->is_map() ? "map" : "repeated") + " field \"" +
                          std::string(fd->name()) + "\"");
   }
   const Reflection* r = msg->GetReflection();
@@ -1758,9 +1798,12 @@ Status ApplyDefault(Message* msg, const FieldDescriptor* fd, std::string_view de
       }
       return Status::OK();
     }
-    case FieldDescriptor::CPPTYPE_BOOL:
-      r->SetBool(msg, fd, def == "true");
+    case FieldDescriptor::CPPTYPE_BOOL: {
+      bool b = false;
+      if (Status st = ParseBoolDefault(def, fd, &b); !st.ok()) return st;
+      r->SetBool(msg, fd, b);
       return Status::OK();
+    }
     case FieldDescriptor::CPPTYPE_INT32: {
       int32_t n;
       if (!ParseInteger(def, n))

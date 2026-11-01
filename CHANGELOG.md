@@ -30,6 +30,8 @@ format changes.
 - **A field in a list element or map value no longer marks its parent's path.** `Result` recorded it at the parent's prefix, so an element's `x` could satisfy a required `x` beside the list. It is now `items[0].x`, or `by_key["k"].x`. A field in an Any body is `payload.x`. **Paths from `Result` change for these fields.**
 - **A oneof member's default no longer destroys the member the document chose** (draft -01 §annotation-extensions, "Oneof Members"). Applying it cleared the sibling, in a singular message as well as an element.
 - **A map value takes the literal forms** (a timestamp, duration, wrapper or big number). Only a block was accepted, so a map of these failed to read back what `Marshal` wrote.
+- **A bool default is exactly `true` or `false`** (protowire-go#90). Any other spelling silently became `false`; it now fails the decode. **A schema with `(pxf.default) = "True"` now fails `UnmarshalFull`.**
+- **`ViolationKindName` and `Violation::ToString` use protowire-go's text:** `keyed field option`, `default field option`, `required field option`, and `invalid (pxf.key) = "..."`.
 
 ### Changed
 
