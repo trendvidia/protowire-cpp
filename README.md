@@ -48,7 +48,7 @@ For projects that prefer a source-level dependency:
 include(FetchContent)
 FetchContent_Declare(protowire
   GIT_REPOSITORY https://github.com/trendvidia/protowire-cpp.git
-  GIT_TAG        v0.70.0)
+  GIT_TAG        v1.2.0)
 FetchContent_MakeAvailable(protowire)
 
 target_link_libraries(my_app PRIVATE protowire::pxf)

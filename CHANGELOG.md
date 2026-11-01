@@ -5,9 +5,9 @@ All notable changes to `protowire-cpp` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The version number is kept aligned with the rest of the `protowire-*`
-stack — releases bump in lockstep across language ports when the wire
-format changes.
+Each `protowire-*` repository has its own version line, so this version
+number says nothing about any other port. See the Releases section of
+`CONTRIBUTING.md`.
 
 ## [Unreleased]
 

@@ -111,9 +111,15 @@ pinning required, but ≥ 3.21 is the floor we test against.
 
 ## Releases
 
-This port releases in lockstep with the rest of the `protowire-*` stack.
-The version line is `0.70.x` for the first coordinated public release;
-ports that share a `0.70.x` minor implement the same wire contract.
+Each `protowire-*` repository has its own version line, as the
+[versioning policy](https://github.com/trendvidia/protowire/blob/main/ROADMAP.md#versioning-policy)
+in the spec repository says. A spec release does not imply a release
+here: this port tags a release when its own code changes, and its
+version follows [SemVer](https://semver.org/spec/v2.0.0.html).
+
+Two ports with the same version number do not necessarily implement the
+same wire contract. Each `CHANGELOG.md` entry names the spec change it
+picks up, as `protowire#N`.
 
 Cutting a release:
 
