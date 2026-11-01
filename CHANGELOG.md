@@ -27,6 +27,10 @@ format changes.
 
 - **`ReadBigFloatAsString` returns `StatusOr<std::string>`,** so it can refuse a value.
 
+### Removed
+
+- **`src/pxf/decode.cc`,** an AST decoder with no caller. `DecodeDocumentInto` was declared in no header, and it had none of the spec rules added to `decode_fast.cc`.
+
 ### Added
 
 - **`proto/pxf/secret.proto`,** the canonical `pxf.Secret` schema, which this port's copy of `proto/` lacked. The `testdata/dataset` fixtures import it.
