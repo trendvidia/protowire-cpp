@@ -113,13 +113,15 @@ const pbuf::Descriptor* TypeOf(const Schema& schema, const std::string& text) {
 
 // DecodeBothWays runs the two public decoders. They must agree, and the
 // returned status is theirs.
-Status DecodeBothWays(const Schema& schema, const std::string& text) {
+Status DecodeBothWays(const Schema& schema,
+                      const std::string& text,
+                      pxf::UnmarshalOptions opts = {}) {
   const pbuf::Descriptor* d = TypeOf(schema, text);
   if (d == nullptr) return Status::Error("fixture names no known @type");
   auto plain = schema.New(d);
-  Status a = pxf::Unmarshal(text, plain.get());
+  Status a = pxf::Unmarshal(text, plain.get(), opts);
   auto full = schema.New(d);
-  auto b = pxf::UnmarshalFull(text, full.get());
+  auto b = pxf::UnmarshalFull(text, full.get(), opts);
   EXPECT_EQ(a.ok(), b.ok()) << "Unmarshal: " << a.ToString()
                             << "\nUnmarshalFull: " << b.status().ToString();
   return a.ok() ? b.status() : a;
@@ -198,6 +200,53 @@ TEST(PxfCorpus, BoundTwicePastTheSixtyFourthField) {
     std::unique_ptr<pbuf::Message> b(factory.GetPrototype(d)->New());
     EXPECT_FALSE(pxf::Unmarshal(once + once, b.get()).ok());
   }
+}
+
+// Resolves a type URL to the message named after its last '/', as
+// testdata/any/README.md specifies.
+class LastSegmentResolver : public pxf::TypeResolver {
+ public:
+  explicit LastSegmentResolver(const Schema& schema) : schema_(schema) {}
+  const pbuf::Descriptor* FindMessageByURL(std::string_view url) override {
+    return schema_.Find(std::string(url.substr(url.rfind('/') + 1)));
+  }
+
+ private:
+  const Schema& schema_;
+};
+
+TEST(PxfCorpus, Any) {
+  // A parser cannot tell which blocks are Any, nor resolve a URL.
+  const std::set<std::string> parse_accepts = {"err-not-any.pxf", "err-unresolved.pxf"};
+  Schema schema("any", {"any.proto"});
+  LastSegmentResolver resolver(schema);
+  pxf::UnmarshalOptions opts;
+  opts.type_resolver = &resolver;
+  auto files = Fixtures("any");
+  ASSERT_EQ(files.size(), 11u);
+  for (const auto& path : files) {
+    SCOPED_TRACE(path.filename().string());
+    std::string text = ReadFile(path);
+    Status st = DecodeBothWays(schema, text, opts);
+    EXPECT_EQ(st.ok(), !IsReject(path)) << st.ToString();
+    auto doc = pxf::Parse(text);
+    const bool parses = !IsReject(path) || parse_accepts.count(path.filename().string()) > 0;
+    EXPECT_EQ(doc.ok(), parses) << doc.status().ToString();
+  }
+}
+
+// The fields inside an Any body belong to the packed message, so they say
+// nothing about whether a root field of the same name is present.
+TEST(PxfCorpus, AnyBodyDoesNotMarkRootPresence) {
+  Schema schema("any", {"any.proto"});
+  LastSegmentResolver resolver(schema);
+  pxf::UnmarshalOptions opts;
+  opts.type_resolver = &resolver;
+  auto msg = schema.New(schema.Find("any.v1.Holder"));
+  auto r = pxf::UnmarshalFull("payload { @type = \"any.v1.Leaf\" tag = \"t\" }\n", msg.get(), opts);
+  ASSERT_TRUE(r.ok()) << r.status().ToString();
+  EXPECT_TRUE(r->IsSet("payload"));
+  EXPECT_TRUE(r->IsAbsent("tag"));
 }
 
 // Every accept fixture in nulls/ binds null and nothing else: the message

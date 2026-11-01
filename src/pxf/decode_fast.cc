@@ -570,6 +570,7 @@ class DirectDecoder {
   Status DecodeMsgValue(Message* msg, const FieldDescriptor* fd);
   Status DecodeListInline(Message* msg, const FieldDescriptor* fd);
   Status DecodeMapInline(Message* msg, const FieldDescriptor* fd, BodyScope* scope);
+  Status DecodeBlockInto(Message* sub, const FieldDescriptor* fd);
   Status DecodeAnyInner(Message* any_msg);
 
   Status SetScalar(Message* msg, const FieldDescriptor* fd);
@@ -864,19 +865,7 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
         if (result_) {
           result_->MarkPresent(path_prefix_ + std::string(fd->name()));
         }
-        Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
-        // Any-block sugar: name { @type = "..." ... }
-        if (IsAny(sub->GetDescriptor()) && resolver_ != nullptr &&
-            current_.kind == TokenKind::kAtType) {
-          st = DecodeAnyInner(sub);
-          if (!st.ok()) return st;
-          break;
-        }
-        std::string saved = path_prefix_;
-        path_prefix_ += std::string(fd->name());
-        path_prefix_ += '.';
-        st = DecodeFields(sub, /*in_block=*/true);
-        path_prefix_ = std::move(saved);
+        st = DecodeBlockInto(msg->GetReflection()->MutableMessage(msg, fd), fd);
         if (!st.ok()) return st;
         break;
       }
@@ -986,16 +975,22 @@ Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
     Advance();
     return Status::OK();
   }
-  // Any with assignment-syntax sugar: name = { @type = "..." ... }
-  if (IsAny(d) && resolver_ != nullptr && current_.kind == TokenKind::kLBrace) {
-    Advance();  // consume {
-    return DecodeAnyInner(sub);
-  }
   if (current_.kind != TokenKind::kLBrace) {
     return PosError(current_.pos,
                     "expected '{' for message field \"" + std::string(fd->name()) + "\"");
   }
   Advance();
+  return DecodeBlockInto(sub, fd);
+}
+
+// DecodeBlockInto decodes the body of one singular message field; the
+// opening '{' has been consumed. A block bound to google.protobuf.Any that
+// opens with a type entry is a body of the type it names (draft -01 "Any
+// Blocks"); without one it is the Any's own fields.
+Status DirectDecoder::DecodeBlockInto(Message* sub, const FieldDescriptor* fd) {
+  if (current_.kind == TokenKind::kAtType && IsAny(sub->GetDescriptor())) {
+    return DecodeAnyInner(sub);
+  }
   std::string saved = path_prefix_;
   path_prefix_ += std::string(fd->name());
   path_prefix_ += '.';
@@ -1004,11 +999,12 @@ Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
   return st;
 }
 
-// Caller has already consumed the opening '{' (block syntax) or '=' '{' pair
-// (assignment syntax). On entry, current_ points at @type.
+// On entry current_ is the @type of an Any block's type entry, and the
+// block's '{' has been consumed.
 Status DirectDecoder::DecodeAnyInner(Message* any_msg) {
-  if (current_.kind != TokenKind::kAtType) {
-    return PosError(current_.pos, "Any field requires @type as first entry");
+  if (resolver_ == nullptr) {
+    return PosError(current_.pos,
+                    "a google.protobuf.Any type entry needs UnmarshalOptions::type_resolver");
   }
   Advance();
   if (current_.kind != TokenKind::kEquals) {
@@ -1027,7 +1023,11 @@ Status DirectDecoder::DecodeAnyInner(Message* any_msg) {
   }
   pb::DynamicMessageFactory factory(inner_desc->file()->pool());
   std::unique_ptr<Message> inner(factory.GetPrototype(inner_desc)->New());
+  // The inner body is another message: its fields are not paths of the
+  // root, so they must not mark presence or nulls there.
+  Result* saved_result = std::exchange(result_, nullptr);
   Status st = DecodeFields(inner.get(), /*in_block=*/true);
+  result_ = saved_result;
   if (!st.ok()) return st;
   std::string packed;
   if (!inner->SerializeToString(&packed)) {
@@ -1106,7 +1106,9 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
         if (const FieldDescriptor* key_fd = KeyField(fd)) {
           keyed_elem_ = KeyedElem{std::string(fd->name()), std::string(key_fd->name()), "", false};
         }
-        Status st = DecodeFields(sub, /*in_block=*/true);
+        Status st = current_.kind == TokenKind::kAtType && IsAny(d)
+                        ? DecodeAnyInner(sub)
+                        : DecodeFields(sub, /*in_block=*/true);
         if (!st.ok()) return st;
       }
     } else if (fd->cpp_type() == FieldDescriptor::CPPTYPE_ENUM) {
@@ -1256,8 +1258,10 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd, B
         return PosError(current_.pos, "expected '{' for map message value");
       }
       Advance();
-      st = DecodeFields(entry->GetReflection()->MutableMessage(entry, val_fd),
-                        /*in_block=*/true);
+      Message* value = entry->GetReflection()->MutableMessage(entry, val_fd);
+      st = current_.kind == TokenKind::kAtType && IsAny(value->GetDescriptor())
+               ? DecodeAnyInner(value)
+               : DecodeFields(value, /*in_block=*/true);
       if (!st.ok()) return st;
     } else if (val_fd->cpp_type() == FieldDescriptor::CPPTYPE_ENUM) {
       st = SetEnum(entry, val_fd, /*repeated=*/false);

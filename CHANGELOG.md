@@ -18,10 +18,12 @@ format changes.
 
 - **A singular field or a map key bound twice in one message body is rejected** (protowire#347, #396). A second scalar replaced the first and two blocks merged; now each is an error, whatever the values. **This rejects documents that were accepted before.** A repeated map key also stayed in the message, so a `DynamicMessage` serialized both entries. Map keys compare as values of the key type, so `1:` and `"1":` on an int-keyed map are one key. Repeated fields still concatenate, a map bound twice with distinct keys still merges, and each message body is its own scope.
 
+- **The type entry of a `google.protobuf.Any` block follows the spec** (protowire#354). `Parse` rejects `@type = ...` anywhere but as a block's first entry, and rejects a value that is not a string. The decoder now takes a type entry in a list element and a map value, not only a singular field. `name = { type_url = ... }` no longer fails: an Any block with no type entry is the Any's own fields. An Any body no longer marks a root field of the same name as present in `Result`.
+
 ### Added
 
 - **`proto/pxf/secret.proto`,** the canonical `pxf.Secret` schema, which this port's copy of `proto/` lacked. The `testdata/dataset` fixtures import it.
-- **`testdata/{blocks,duplicates,nulls,strings,dataset}`** and `test/pxf_corpus_test.cc`, which runs them through both decoders, `Parse`, `BindRow` and `DatasetReader`. `testdata/blocks` needed no code change: a `,` or `;` between the entries of a block was already rejected (protowire#312).
+- **`testdata/{any,blocks,duplicates,nulls,strings,dataset}`** and `test/pxf_corpus_test.cc`, which runs them through both decoders, `Parse`, `BindRow` and `DatasetReader`. `testdata/blocks` needed no code change: a `,` or `;` between the entries of a block was already rejected (protowire#312).
 
 ### Changed
 
