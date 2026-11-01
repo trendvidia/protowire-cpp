@@ -40,6 +40,9 @@ enum class ViolationKind : uint8_t {
   // rejects a document where the field is absent, and the second treats it
   // as supplied.
   kRequiredOption,
+  // A default that cannot be used: an @default that reduces to no single
+  // literal, or (pxf.default) and @default carrying different values.
+  kDefaultOption,
 };
 
 const char* ViolationKindName(ViolationKind k);
@@ -53,7 +56,12 @@ struct Violation {
   // (pxf.default) literal for kRequiredOption beside a default.
   std::string name;
   ViolationKind kind = ViolationKind::kField;
-  std::string detail;  // human-readable explanation; set for kKeyOption and kRequiredOption
+  // Human-readable explanation; set for kKeyOption, kRequiredOption and
+  // kDefaultOption.
+  std::string detail;
+  // The offending annotation was written @required / @default, so ToString
+  // quotes that rather than an option the file does not contain.
+  bool annotation_form = false;
 
   // One-line human-readable description, e.g.
   //   "trades.proto: message field \"trades.v1.X.null\" uses PXF-reserved name \"null\" (draft

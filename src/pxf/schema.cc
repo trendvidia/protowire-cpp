@@ -9,6 +9,7 @@
 
 #include <google/protobuf/descriptor.h>
 
+#include "carrier.h"
 #include "parser_internal.h"
 #include "protowire/pxf/annotations.h"
 
@@ -91,14 +92,27 @@ void WalkMessages(const std::string& path, const pb::Descriptor* md, std::vector
     if (auto key = KeyFieldName(f); key.has_value()) {
       CheckKeyOption(path, f, *key, out);
     }
-    if (auto def = GetDefault(f); IsRequired(f) && def.has_value()) {
+    const FieldAnnotations a = ReadFieldAnnotations(f);
+    if (!a.default_problem.empty()) {
       out->push_back(Violation{path,
                                std::string(f->full_name()),
-                               std::string(*def),
+                               "",
+                               ViolationKind::kDefaultOption,
+                               a.default_problem,
+                               a.default_from_carrier});
+    }
+    if (a.required && a.def.has_value()) {
+      const std::string required = a.required_from_carrier ? "@required" : "(pxf.required)";
+      const std::string def = a.default_from_carrier ? "@default" : "(pxf.default)";
+      out->push_back(Violation{path,
+                               std::string(f->full_name()),
+                               *a.def,
                                ViolationKind::kRequiredOption,
-                               "(pxf.required) and (pxf.default) are exclusive on one field: the "
-                               "first rejects a document where the field is absent, and the second "
-                               "treats it as supplied"});
+                               required + " and " + def +
+                                   " are exclusive on one field: the first rejects a document "
+                                   "where the field is absent, and the second treats it as "
+                                   "supplied",
+                               a.required_from_carrier});
     }
   }
   // Skip synthetic oneofs (those generated for proto3 optional fields).
@@ -135,6 +149,8 @@ const char* ViolationKindName(ViolationKind k) {
       return "(pxf.key) placement";
     case ViolationKind::kRequiredOption:
       return "(pxf.required) placement";
+    case ViolationKind::kDefaultOption:
+      return "(pxf.default) placement";
   }
   return "unknown";
 }
@@ -145,7 +161,13 @@ std::string Violation::ToString() const {
            " (draft -01 §3.13)";
   }
   if (kind == ViolationKind::kRequiredOption) {
-    return file + ": field \"" + element + "\": invalid (pxf.required): " + detail +
+    return file + ": field \"" + element + "\": invalid " +
+           (annotation_form ? "@required" : "(pxf.required)") + ": " + detail +
+           " (draft -01 §annotation-extensions)";
+  }
+  if (kind == ViolationKind::kDefaultOption) {
+    return file + ": field \"" + element + "\": invalid " +
+           (annotation_form ? "@default" : "(pxf.default)") + ": " + detail +
            " (draft -01 §annotation-extensions)";
   }
   return file + ": " + ViolationKindName(kind) + " \"" + element + "\" uses PXF-reserved name \"" +

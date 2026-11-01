@@ -24,6 +24,7 @@ format changes.
 - **A `BindRow` or `Scan` decode error names its column and reports the row's position,** not a line of the synthetic body.
 
 - **`pxf.BigFloat` text is exact, at any precision** (protowire#393, #406, #410). It went through a `double`, so `Marshal` wrote `inf` from exponent 1024 up, `0` from -1075 down, and misread a mantissa past 8 bytes. It now writes the digits the precision implies, then a suffix: `1.5p53`. A suffixed literal reads at that precision. An unsuffixed one reads at 256 bits, not 53. **Output text changes for every BigFloat, and so does the stored value of an unsuffixed literal.** A suffix on any other field is rejected, as are `p0` and a precision past `p13603`. `MaxNumericLiteralDigits` counts a BigFloat's mantissa digits only.
+- **`@required` and `@default` are honoured** (protowire-go#81). They lower to the annotation carrier at extension 1327, which this port never read, so a schema migrated to that spelling bound with no enforcement and no diagnostic. `IsRequired`, `GetDefault`, `UnmarshalFull` and the bind-time checks now see both spellings. `(pxf.default)` and `@default` with different values on one field, or an `@default` that reduces to no single literal, is the new violation `ViolationKind::kDefaultOption`. **A schema in that spelling now gets the enforcement it declared.** protowire-python inherits this.
 - **A `pxf.BigFloat` past `MaxBigFloatExponent` (16384) is refused** (protowire#281), reading or writing, before any work. `1e646456992` costs nothing to reject.
 
 ### Added

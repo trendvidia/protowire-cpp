@@ -9,12 +9,15 @@
 
 namespace protowire::pxf {
 
-// IsRequired returns true if the field has (pxf.required) = true.
+// IsRequired returns true if the field is required, in either spelling: the
+// option `[(pxf.required) = true]`, or the annotation `@required` carried at
+// extension 1327. Both are honoured; neither is synthesized from the other.
 bool IsRequired(const google::protobuf::FieldDescriptor* fd);
 
-// GetDefault returns the (pxf.default) string if the field has one set.
-// The returned string is the raw PXF literal as written in the .proto
-// (e.g. "42", "true", "viewer").
+// GetDefault returns the field's default if it has one, in either spelling:
+// the option `[(pxf.default) = "…"]`, or `@default(v)` carried at extension
+// 1327, whose typed argument is reduced to the same literal form. The
+// returned string is a raw PXF literal (e.g. "42", "true", "viewer").
 std::optional<std::string> GetDefault(const google::protobuf::FieldDescriptor* fd);
 
 // KeyFieldName returns the raw (pxf.key) annotation value if set — the
