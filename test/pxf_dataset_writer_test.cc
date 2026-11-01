@@ -533,6 +533,8 @@ class DatasetWriter : public ::testing::Test {
 
   // ExpectReadsBack reads table both ways, streaming (Scan) and materializing
   // (Parse + BindRow), and requires each row to equal msgs, in order.
+  using Msgs = std::vector<const pb::Message*>;
+
   void ExpectReadsBack(const pb::Descriptor* desc,
                        const std::string& table,
                        const std::vector<const pb::Message*>& msgs) {
@@ -715,7 +717,7 @@ TEST_F(DatasetWriter, OneofDefaults) {
   const std::string row2 = Row(*m2, cols);
   EXPECT_EQ(row2, "(, , false, \"\", )\n");
 
-  ExpectReadsBack(desc, Header(desc, cols) + row + row2, {m.get(), m2.get()});
+  ExpectReadsBack(desc, Header(desc, cols) + row + row2, Msgs{m.get(), m2.get()});
 
   // No member of "other" set: its defaulted member is a scalar, which no cell
   // holds unset (null is rejected on a scalar), so it is empty and reads back
@@ -737,7 +739,7 @@ TEST_F(DatasetWriter, OneofDefaults) {
   EXPECT_EQ(row5, "(null, 6)\n");
   MessagePtr want5 = New(desc);
   r->SetInt32(want5.get(), field("o_i"), 6);
-  ExpectReadsBack(desc, Header(desc, cols5) + row5, {want5.get()});
+  ExpectReadsBack(desc, Header(desc, cols5) + row5, Msgs{want5.get()});
 }
 
 // The reader parses rows with the bind-time schema checks skipped, so the
@@ -867,7 +869,7 @@ TEST_F(DatasetWriter, EmptyDefaultedCellsReadBackAsDefaults) {
   want->GetReflection()->SetString(want.get(), desc->FindFieldByName("o_s"), "other");
   // Defaulted fields outside the columns take their defaults too.
   MessagePtr full = WithDefaults(*want, cols);
-  ExpectReadsBack(desc, Header(desc, cols) + row, {full.get()});
+  ExpectReadsBack(desc, Header(desc, cols) + row, Msgs{full.get()});
 }
 
 TEST_F(DatasetWriter, Required) {
@@ -943,7 +945,7 @@ TEST_F(DatasetWriter, ValueCells) {
   EXPECT_EQ(row,
             "([ 1, 2, 3 ], { \"a b\": 1 c: 2 }, { }, [ { x = 1 }, { label = \"l,)\" } ], "
             "{ a { v = 1 } }, { k: { x = 2 } }, { value = \"pw\" hint = \"vault\" })\n");
-  ExpectReadsBack(desc, Header(desc, cols) + row, {WithDefaults(*m, cols).get()});
+  ExpectReadsBack(desc, Header(desc, cols) + row, Msgs{WithDefaults(*m, cols).get()});
 }
 
 // Inside a cell an unset annotated field follows the row's rules, and an
@@ -1068,7 +1070,7 @@ TEST_F(DatasetWriter, DottedRequired) {
   MessagePtr m = Parsed(desc, "child { n = 0 m = 2 }");
   const std::string row = Row(*m, cols);
   EXPECT_EQ(row, "(, 0, 2)\n");
-  ExpectReadsBack(desc, Header(desc, cols) + row, {m.get()});
+  ExpectReadsBack(desc, Header(desc, cols) + row, Msgs{m.get()});
 
   // The root's required child is not covered at all: every row fails.
   std::string out;
@@ -1087,7 +1089,7 @@ TEST_F(DatasetWriter, DottedIntoSecret) {
   for (const char* doc :
        {R"(sec { value = "pw" hint = "vault" })", R"(sec { value = "pw" })", R"(sec = "pw")", ""}) {
     MessagePtr m = Parsed(desc, std::string(doc) + " d_opt = 1 o_s = \"x\"");
-    ExpectReadsBack(desc, header + Row(*m, cols), {WithDefaults(*m, cols).get()});
+    ExpectReadsBack(desc, header + Row(*m, cols), Msgs{WithDefaults(*m, cols).get()});
   }
 }
 

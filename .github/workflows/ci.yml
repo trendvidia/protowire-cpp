@@ -156,7 +156,9 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: .deps/protowire-go/go.mod
+          # The release that generated src/detail/go_isprint.inc: strconv's
+          # Unicode tables follow the toolchain, not go.mod.
+          go-version: '1.27.x'
           cache: false
 
       - name: Install protobuf
