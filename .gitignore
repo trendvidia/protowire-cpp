@@ -17,3 +17,7 @@ _deps/
 *.a
 *.dylib
 *.so
+
+# Python bytecode from fixture generators
+__pycache__/
+*.pyc
