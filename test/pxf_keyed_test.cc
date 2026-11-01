@@ -232,6 +232,15 @@ TEST_F(Keyed, RejectFixtures) {
   for (const Case& c : {Case{"err-duplicate-key.pxf", "duplicate key \"greeting\""},
                         Case{"err-duplicate-key-spelling.pxf", "duplicate key \"greeting\""},
                         Case{"err-key-conflict.pxf", "conflicts with entry name \"greeting\""},
+                        Case{"err-key-null.pxf",
+                             "null on key field \"name\" conflicts with entry name \"alpha\" in "
+                             "keyed field \"tags\""},
+                        Case{"err-key-oneof-sibling.pxf",
+                             "field \"other\" shares oneof \"pick\" with key field \"name\", "
+                             "which entry name \"alpha\" already set in keyed field \"choices\""},
+                        Case{"err-key-oneof-sibling-null.pxf",
+                             "field \"other\" shares oneof \"pick\" with key field \"name\", "
+                             "which entry name \"alpha\" already set in keyed field \"choices\""},
                         Case{"err-empty-key.pxf", "empty entry name"},
                         Case{"err-empty-key-anonymous.pxf", "explicit empty-string assignment"},
                         Case{"err-quoted-name-unkeyed.pxf",
@@ -249,6 +258,46 @@ TEST_F(Keyed, RejectFixtures) {
     auto full = New(d);
     EXPECT_FALSE(protowire::pxf::UnmarshalFull(data, full.get()).ok());
   }
+}
+
+// The entry name is a binding of the key field (draft -01 §3.13), so the
+// anonymous form, which has no name, keeps every choice it had.
+TEST_F(Keyed, KeyOneofAccepts) {
+  const std::string data = ReadFixture("key-oneof-ok.pxf");
+  const pb::Descriptor* d = DescOf(data);
+  ASSERT_NE(d, nullptr);
+  protowire::Status st;
+  auto msg = Decode(d, data, &st);
+  ASSERT_TRUE(st.ok()) << st.ToString();
+  const auto* fd = d->FindFieldByName("choices");
+  ASSERT_EQ(msg->GetReflection()->FieldSize(*msg, fd), 3);
+  EXPECT_EQ(Key(msg->GetReflection()->GetRepeatedMessage(*msg, fd, 0), "name"), "alpha");
+  EXPECT_EQ(Key(msg->GetReflection()->GetRepeatedMessage(*msg, fd, 1), "name"), "beta");
+  EXPECT_EQ(Key(msg->GetReflection()->GetRepeatedMessage(*msg, fd, 2), "other"), "x");
+}
+
+TEST_F(Keyed, KeyNullAnonymousAccepts) {
+  const std::string data = ReadFixture("key-null-anonymous-ok.pxf");
+  const pb::Descriptor* d = DescOf(data);
+  ASSERT_NE(d, nullptr);
+  auto msg = New(d);
+  auto r = protowire::pxf::UnmarshalFull(data, msg.get());
+  ASSERT_TRUE(r.ok()) << r.status().ToString();
+  EXPECT_TRUE(r->IsNull("tags[0].name"));
+}
+
+// The conflict is reported at the entry that wrote it, in both body spellings.
+TEST_F(Keyed, BindingConflictPosition) {
+  const pb::Descriptor* d = Desc("keyed.v1.Catalog");
+  protowire::Status st;
+  Decode(d, "choices {\n  alpha {\n    other = \"x\"\n  }\n}\n", &st);
+  ASSERT_FALSE(st.ok());
+  ASSERT_TRUE(st.position().has_value());
+  EXPECT_EQ(st.position()->first, 3);
+  EXPECT_EQ(st.position()->second, 5);
+  Decode(d, "tags = {\n  alpha = {\n    name = null\n  }\n}\n", &st);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("null on key field"), std::string::npos) << st.ToString();
 }
 
 TEST_F(Keyed, FmtFixtures) {

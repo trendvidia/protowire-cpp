@@ -203,6 +203,11 @@ TEST(PxfCorpus, Duplicates) {
   RunDecoderCorpus("duplicates", {"duplicates.proto"}, ParseVerdict::kAccepts);
 }
 
+// Reject fixtures here parse: their errors belong to the schema layer.
+TEST(PxfCorpus, Keyed) {
+  RunDecoderCorpus("keyed", {"keyed.proto"}, ParseVerdict::kAccepts);
+}
+
 // A map's keys are scanned while short and move to a set when long; a
 // repeated key has to be caught on both sides of that line.
 TEST(PxfCorpus, MapKeyBoundTwiceInALongMap) {

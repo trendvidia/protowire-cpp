@@ -705,25 +705,48 @@ class DirectDecoder {
   // assignment to the key field must not be empty, and in the named
   // (keyed-block) form must agree with the entry name.
   struct KeyedElem {
-    std::string field;       // the keyed repeated field's PXF name
-    std::string key_name;    // the element message's key field name
-    std::string entry_name;  // entry name; meaningful only when named
-    bool named = false;      // keyed-block form (true) vs anonymous list element
+    std::string field;              // the keyed repeated field's PXF name
+    const FieldDescriptor* key_fd;  // the element message's key field
+    std::string entry_name;         // entry name; meaningful only when named
+    bool named = false;             // keyed-block form (true) vs anonymous list element
   };
   Status CheckExplicitKey(const KeyedElem& ke, std::string_view value, Position pos) {
     if (value.empty()) {
       return PosError(pos,
-                      "explicit empty-string assignment to key field \"" + ke.key_name +
-                          "\" of keyed field \"" + ke.field +
+                      "explicit empty-string assignment to key field \"" +
+                          std::string(ke.key_fd->name()) + "\" of keyed field \"" + ke.field +
                           "\": the empty string is not a valid key");
     }
     if (ke.named && value != ke.entry_name) {
       return PosError(pos,
-                      "key field \"" + ke.key_name + "\" = \"" + std::string(value) +
-                          "\" conflicts with entry name \"" + ke.entry_name +
+                      "key field \"" + std::string(ke.key_fd->name()) + "\" = \"" +
+                          std::string(value) + "\" conflicts with entry name \"" + ke.entry_name +
                           "\" in keyed field \"" + ke.field + "\"");
     }
     return Status::OK();
+  }
+  // CheckKeyBinding refuses a binding in a named entry's body that would undo
+  // the entry name, which binds the key field (draft -01 §3.13): null on the
+  // key field, or another member of the key field's oneof, by value or null.
+  Status CheckKeyBinding(const std::optional<KeyedElem>& ke,
+                         const FieldDescriptor* fd,
+                         bool is_null,
+                         Position pos) {
+    if (!ke.has_value() || !ke->named) return Status::OK();
+    const std::string key_name(ke->key_fd->name());
+    if (fd == ke->key_fd) {
+      if (!is_null) return Status::OK();
+      return PosError(pos,
+                      "null on key field \"" + key_name + "\" conflicts with entry name \"" +
+                          ke->entry_name + "\" in keyed field \"" + ke->field + "\"");
+    }
+    const auto* oo = fd->real_containing_oneof();
+    if (oo == nullptr || oo != ke->key_fd->real_containing_oneof()) return Status::OK();
+    return PosError(pos,
+                    "field \"" + std::string(fd->name()) + "\" shares oneof \"" +
+                        std::string(oo->name()) + "\" with key field \"" + key_name +
+                        "\", which entry name \"" + ke->entry_name +
+                        "\" already set in keyed field \"" + ke->field + "\"");
   }
   Status QuotedNameUnkeyedError(Position pos, std::string_view name) {
     return PosError(pos,
@@ -816,8 +839,9 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
           return PosError(pos,
                           "unknown field \"" + key + "\" in " + std::string(desc->full_name()));
         }
-        Status st = CheckOneof(fd, pos, &set_oneofs);
+        Status st = CheckKeyBinding(ke, fd, current_.kind == TokenKind::kNull, pos);
         if (!st.ok()) return st;
+        if (st = CheckOneof(fd, pos, &set_oneofs); !st.ok()) return st;
         if (st = CheckBindOnce(fd, pos, &scope); !st.ok()) return st;
 
         // null literal: track and continue without setting any field value.
@@ -833,7 +857,7 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
           Advance();
           continue;
         }
-        if (ke.has_value() && fd->name() == ke->key_name && current_.kind == TokenKind::kString) {
+        if (ke.has_value() && fd == ke->key_fd && current_.kind == TokenKind::kString) {
           // Explicit assignment to the element's key field: the empty
           // string is never a valid key, and in the named form the value
           // must agree with the entry name (draft -01 §3.13).
@@ -881,8 +905,9 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
           }
           return PosError(pos, "repeated field \"" + key + "\" must use list syntax");
         }
-        Status st = CheckOneof(fd, pos, &set_oneofs);
+        Status st = CheckKeyBinding(ke, fd, /*is_null=*/false, pos);
         if (!st.ok()) return st;
+        if (st = CheckOneof(fd, pos, &set_oneofs); !st.ok()) return st;
         if (st = CheckBindOnce(fd, pos, &scope); !st.ok()) return st;
         if (result_) {
           result_->MarkPresent(path_prefix_ + std::string(fd->name()));
@@ -1117,7 +1142,7 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
         }
         Advance();
         if (const FieldDescriptor* key_fd = KeyField(fd)) {
-          keyed_elem_ = KeyedElem{std::string(fd->name()), std::string(key_fd->name()), "", false};
+          keyed_elem_ = KeyedElem{std::string(fd->name()), key_fd, "", false};
         }
         const int index = msg->GetReflection()->FieldSize(*msg, fd) - 1;
         std::string saved = EnterElement(fd, result_ ? IndexSuffix(index) : "");
@@ -1149,8 +1174,8 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
 // equivalently `name = { ... }` — where each entry name (unquoted value,
 // for string-literal names) populates the element's key field and entry
 // order is list order. Duplicate entry names within the block, the empty
-// string as a name, and a disagreeing explicit key-field assignment inside
-// an entry are decode errors. The opening '{' has been consumed; the
+// string as a name, and a body that disagrees with or undoes its entry name
+// are decode errors. The opening '{' has been consumed; the
 // closing '}' is consumed before returning.
 Status DirectDecoder::DecodeKeyedBlockBody(Message* msg,
                                            const FieldDescriptor* fd,
@@ -1212,7 +1237,7 @@ Status DirectDecoder::DecodeKeyedBlockBody(Message* msg,
     if (Status s = CheckRepeatedCount(*msg, fd, current_.pos); !s.ok()) return s;
     Message* sub = r->AddMessage(msg, fd);
     sub->GetReflection()->SetString(sub, key_fd, name);
-    keyed_elem_ = KeyedElem{std::string(fd->name()), std::string(key_fd->name()), name, true};
+    keyed_elem_ = KeyedElem{std::string(fd->name()), key_fd, name, true};
     std::string saved = EnterElement(fd, result_ ? IndexSuffix(r->FieldSize(*msg, fd) - 1) : "");
     // The entry name supplies the key field, so the post-decode pass, which
     // reads presence only, must not treat it as absent: a default would
