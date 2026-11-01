@@ -1,0 +1,2 @@
+@type diff.v1.Root
+leaf { at = 2026-02-30T00:00:00Z }

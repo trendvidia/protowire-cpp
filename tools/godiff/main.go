@@ -6,8 +6,9 @@
 // this port, so scripts/go_differential.sh only has to diff two text files.
 // The two programs have to stay line for line alike.
 //
-// Manifest: one document per line, as root TAB protos TAB file. Paths are
-// relative to root, and protos is a comma-separated list.
+// Manifest: one document per line, as root TAB dir TAB protos TAB type TAB file. Paths are
+// relative to root, protos is a comma-separated list, and
+// type names the message of a document with no @type, or is "-".
 package main
 
 import (
@@ -103,26 +104,50 @@ func printText(label string, b []byte, err error) {
 	}
 }
 
-func runMessage(s *schema, d protoreflect.MessageDescriptor, text []byte) {
-	opts := pxf.UnmarshalOptions{TypeResolver: s}
-	plain := dynamicpb.NewMessage(d)
-	fmt.Printf("unmarshal: %s\n", status(opts.Unmarshal(text, plain)))
-	full := dynamicpb.NewMessage(d)
-	r, err := opts.UnmarshalFull(text, full)
-	fmt.Printf("full: %s\n", status(err))
-	if err != nil {
-		return
-	}
+func setFields(r *pxf.Result) []string {
 	set := []string{}
 	for _, p := range r.PresentFields() {
 		if r.IsSet(p) {
 			set = append(set, p)
 		}
 	}
-	nulls := r.NullFields()
 	sort.Strings(set)
+	return set
+}
+
+func runMessage(s *schema, d protoreflect.MessageDescriptor, text []byte) {
+	opts := pxf.UnmarshalOptions{TypeResolver: s}
+	plain := dynamicpb.NewMessage(d)
+	fmt.Printf("unmarshal: %s\n", status(opts.Unmarshal(text, plain)))
+	hooked := opts
+	hooked.OnSecretField = func(path, value string) error {
+		fmt.Printf("secret: %s = %s\n", quote(path), quote(value))
+		return nil
+	}
+	m := dynamicpb.NewMessage(d)
+	rr, herr := hooked.UnmarshalFull(text, m)
+	fmt.Printf("hooked: %s\n", status(herr))
+	if herr == nil {
+		fmt.Printf("bytes: %s\n", bytesOf(m))
+		fmt.Printf("set: %s\n", quote(strings.Join(setFields(rr), " ")))
+	}
+	raw := opts
+	raw.SkipPostDecode = true
+	rm := dynamicpb.NewMessage(d)
+	_, serr := raw.UnmarshalFull(text, rm)
+	fmt.Printf("skip-post: %s\n", status(serr))
+	if serr == nil {
+		fmt.Printf("bytes: %s\n", bytesOf(rm))
+	}
+	full := dynamicpb.NewMessage(d)
+	r, err := opts.UnmarshalFull(text, full)
+	fmt.Printf("full: %s\n", status(err))
+	if err != nil {
+		return
+	}
+	nulls := r.NullFields()
 	sort.Strings(nulls)
-	fmt.Printf("set: %s\n", quote(strings.Join(set, " ")))
+	fmt.Printf("set: %s\n", quote(strings.Join(setFields(r), " ")))
 	fmt.Printf("null: %s\n", quote(strings.Join(nulls, " ")))
 	fmt.Printf("bytes: %s\n", bytesOf(full))
 	b, err := pxf.MarshalOptions{TypeResolver: s}.Marshal(full)
@@ -157,7 +182,7 @@ func runDatasets(s *schema, doc *pxf.Document) {
 	}
 }
 
-func run(root, protoDir, protos, file string) {
+func run(root, dir, protoDir, protos, deftype, file string) {
 	fmt.Printf("=== %s\n", file)
 	path := filepath.Join(root, file)
 	text, err := os.ReadFile(path)
@@ -173,7 +198,7 @@ func run(root, protoDir, protos, file string) {
 	if protos == "" {
 		return
 	}
-	s, err := compile(root, filepath.Dir(file), strings.Split(protos, ","), protoDir)
+	s, err := compile(root, dir, strings.Split(protos, ","), protoDir)
 	if err != nil {
 		fmt.Printf("compile: failed\n")
 		return
@@ -182,7 +207,11 @@ func run(root, protoDir, protos, file string) {
 		runDatasets(s, doc)
 		return
 	}
-	d := s.find(typeOf(string(text)))
+	name := typeOf(string(text))
+	if name == "" {
+		name = deftype
+	}
+	d := s.find(name)
 	if d == nil {
 		fmt.Printf("type: none\n")
 		return
@@ -231,6 +260,6 @@ func main() {
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		p := strings.Split(sc.Text(), "\t")
-		run(p[0], os.Args[2], p[1], p[2])
+		run(p[0], p[1], os.Args[2], p[2], p[3], p[4])
 	}
 }

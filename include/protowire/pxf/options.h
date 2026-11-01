@@ -2,10 +2,13 @@
 // Copyright (c) 2026 TrendVidia, LLC.
 #pragma once
 
+#include <functional>
 #include <string>
 #include <string_view>
 
 #include <google/protobuf/descriptor.h>
+
+#include "protowire/detail/status.h"
 
 namespace protowire::pxf {
 
@@ -21,6 +24,10 @@ class TypeResolver {
   virtual const google::protobuf::Descriptor* FindMessageByURL(std::string_view type_url) = 0;
 };
 
+// SecretFieldHook receives the path and value of a pxf.Secret. A non-OK status
+// aborts the decode, and its message is carried in the decode's error.
+using SecretFieldHook = std::function<Status(std::string_view path, std::string_view value)>;
+
 struct UnmarshalOptions {
   // If non-null, used to resolve google.protobuf.Any type URLs.
   TypeResolver* type_resolver = nullptr;
@@ -32,6 +39,22 @@ struct UnmarshalOptions {
   // ValidateDescriptor in a one-time codegen or registry-load pass) can
   // set this to bypass the per-call recheck.
   bool skip_validate = false;
+  // When true, UnmarshalFull leaves out the post-decode pass: required fields
+  // are not checked and defaults are not applied, in the message or in an Any
+  // body. For a caller that merges several documents and runs its own pass;
+  // the Result carries what it needs. Unmarshal never runs that pass.
+  bool skip_post_decode = false;
+  // If set, called for each pxf.Secret's value in every form it can be
+  // written: `pw = "x"`, list elements, map values, and the block form. The
+  // value is then not stored in the message, and the caller routes it to
+  // memory it controls. Presence is still recorded, so Result::IsSet reports
+  // `pw.value` as set. `hint` and `fingerprint` go to the message as usual.
+  //
+  // The path is the dotted field path: "pw", "db.password", "servers[0].pw",
+  // "by_host[\"a\"].pw", "payload.pw" in an Any body, "keys[1]" for a list
+  // element. value is a view of a temporary, valid for the call. The plaintext
+  // also stays in the input for the length of the decode.
+  SecretFieldHook on_secret_field;
 
   // HARDENING.md § Mandatory limits, each configurable per call; 0 selects
   // the default in protowire/limits.h. max_message_size caps the input to

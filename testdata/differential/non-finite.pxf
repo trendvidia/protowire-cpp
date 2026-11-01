@@ -1,0 +1,2 @@
+@type diff.v1.Root
+numbers { d = nan f = inf fs = [inf, nan] ds = [nan] }

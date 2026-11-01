@@ -9,6 +9,7 @@
 #include "parser_internal.h"
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
+#include "protowire/detail/go_quote.h"
 #include "protowire/detail/rfc3339.h"
 #include "protowire/limits.h"
 #include "protowire/pxf/lexer.h"
@@ -29,7 +30,7 @@ class Parser {
   // Adopts a lexer already part-way through its input, with the token it
   // last produced; Release hands both back.
   Parser(Lexer&& lex, Token current, int max_depth)
-      : lex_(std::move(lex)), current_(current), max_depth_(max_depth) {}
+      : lex_(std::move(lex)), current_(current), max_depth_(max_depth), for_decoder_(true) {}
   void Release(Lexer* lex, Token* current) {
     *lex = std::move(lex_);
     *current = current_;
@@ -42,6 +43,17 @@ class Parser {
  private:
   void Advance();
   std::vector<Comment> FlushComments();
+
+  // TokenErrMsg renders the current token for "expected X, got Y".
+  std::string TokenErrMsg() const {
+    if (current_.kind == TokenKind::kIllegal) return std::string(current_.value);
+    return std::string(TokenKindName(current_.kind)) + " (" + detail::GoQuote(current_.value) + ")";
+  }
+  // DatasetTokenMsg is the same for a @dataset header or row. Parse names the
+  // token's kind there and the decoder its text, as protowire-go does.
+  std::string DatasetTokenMsg() const {
+    return for_decoder_ ? TokenErrMsg() : std::string(TokenKindName(current_.kind));
+  }
 
   StatusOr<EntryPtr> ParseEntry(bool allow_map_entry, bool allow_type_entry);
   StatusOr<ValuePtr> ParseValue();
@@ -72,6 +84,7 @@ class Parser {
   std::vector<Comment> comments_;
   int depth_ = 0;
   int max_depth_ = kMaxNestingDepth;
+  bool for_decoder_ = false;
 };
 
 // FindMatchingBrace returns the offset of the `}` that matches the `{`
@@ -122,7 +135,9 @@ StatusOr<Document> Parser::ParseDocument() {
       Advance();
       if (current_.kind != TokenKind::kIdent) {
         return Status::Error(
-            current_.pos.line, current_.pos.column, "expected type name after @type");
+            current_.pos.line,
+            current_.pos.column,
+            std::string("expected type name after @type, got ") + TokenKindName(current_.kind));
       }
       doc.type_url = std::string(current_.value);
       doc.body_offset = current_.pos.offset + static_cast<int>(current_.value.size());
@@ -165,8 +180,8 @@ StatusOr<Document> Parser::ParseDocument() {
   // @dataset header IS the document's type declaration.
   if (has_table && current_.kind != TokenKind::kEOF) {
     return Status::Error(
-        first_table_pos.line,
-        first_table_pos.column,
+        current_.pos.line,
+        current_.pos.column,
         "@dataset directive cannot coexist with top-level field entries; the document's "
         "payload is the @dataset rows (draft §3.4.4)");
   }
@@ -191,18 +206,22 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry, bool allow_type_entr
   // Assignment whose key is the literal "@type".
   if (current_.kind == TokenKind::kAtType) {
     if (!allow_type_entry) {
-      return Status::Error(pos.line, pos.column, "@type must be the first entry of a block");
+      return Status::Error(
+          pos.line,
+          pos.column,
+          "@type is allowed only as the first entry of a block bound to google.protobuf.Any "
+          "(draft -01 \"Any Blocks\")");
     }
     Advance();
     if (current_.kind != TokenKind::kEquals) {
-      return Status::Error(current_.pos.line, current_.pos.column, "expected '=' after @type");
+      return Status::Error(
+          current_.pos.line, current_.pos.column, "expected '=' after @type, got " + TokenErrMsg());
     }
     Advance();
     if (current_.kind != TokenKind::kString) {
       return Status::Error(current_.pos.line,
                            current_.pos.column,
-                           std::string("expected string type URL after @type =, got ") +
-                               TokenKindName(current_.kind));
+                           "expected a string type URL after @type =, got " + TokenErrMsg());
     }
     auto v = ParseValue();
     if (!v.ok()) return v.status();
@@ -215,20 +234,20 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry, bool allow_type_entr
   }
   // map-key = identifier / string / integer / bool (draft -01 § Entries
   // and Keys; the keyword spelling landed in protowire#284). A bool
-  // token is only ever a map key: `true = v` / `true { }` name no field.
+  // token is only ever a map key: `true = v` / `true { }` get the errors
+  // below that say so.
   if (current_.kind != TokenKind::kIdent && current_.kind != TokenKind::kString &&
-      current_.kind != TokenKind::kInt && !(allow_map_entry && current_.kind == TokenKind::kBool)) {
+      current_.kind != TokenKind::kInt && current_.kind != TokenKind::kBool) {
     return Status::Error(pos.line,
                          pos.column,
-                         std::string("expected identifier, string, or integer, got ") +
-                             TokenKindName(current_.kind));
+                         "expected identifier, string, integer, or bool, got " + TokenErrMsg());
   }
   TokenKind key_kind = current_.kind;
   std::string key(current_.value);
   if (!current_.prec.empty()) {
     return Status::Error(pos.line,
                          pos.column,
-                         "key " + key + ": a key cannot carry a precision suffix (p" +
+                         "map key " + key + ": a key cannot carry a precision suffix (p" +
                              std::string(current_.prec) + ")");
   }
   Advance();
@@ -244,8 +263,9 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry, bool allow_type_entr
         return Status::Error(
             pos.line,
             pos.column,
-            std::string("field assignment with '=' requires an identifier key, got ") +
-                TokenKindName(key_kind) + " (\"" + key + "\"); use ':' for map entries");
+            std::string("field assignment with '=' requires an identifier or string key, got ") +
+                TokenKindName(key_kind) + " (" + detail::GoQuote(key) +
+                "); use ':' for map entries");
       }
       Advance();
       auto v = ParseValue();
@@ -282,10 +302,11 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry, bool allow_type_entr
       // `{ ... }` denotes a submessage field; the same identifier-or-
       // string rule as `=` applies.
       if (key_kind != TokenKind::kIdent && key_kind != TokenKind::kString) {
-        return Status::Error(pos.line,
-                             pos.column,
-                             std::string("submessage block requires an identifier key, got ") +
-                                 TokenKindName(key_kind) + " (\"" + key + "\")");
+        return Status::Error(
+            pos.line,
+            pos.column,
+            std::string("submessage block requires an identifier or string key, got ") +
+                TokenKindName(key_kind) + " (" + detail::GoQuote(key) + ")");
       }
       Advance();
       auto entries = ParseBody();
@@ -301,7 +322,7 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry, bool allow_type_entr
     default:
       return Status::Error(current_.pos.line,
                            current_.pos.column,
-                           std::string("expected '=', ':', or '{' after \"") + key + "\", got " +
+                           "expected '=', ':', or '{' after " + detail::GoQuote(key) + ", got " +
                                TokenKindName(current_.kind));
   }
 }
@@ -342,7 +363,8 @@ StatusOr<ValuePtr> Parser::ParseValue() {
     case TokenKind::kBytes: {
       auto v = std::make_unique<BytesVal>();
       v->pos = pos;
-      auto decoded = detail::Base64DecodeStd(current_.value);
+      size_t offset = 0;
+      auto decoded = detail::Base64DecodeLenient(current_.value, &offset);
       if (decoded.has_value()) v->value = std::move(*decoded);
       Advance();
       return ValuePtr(std::move(v));
@@ -392,8 +414,7 @@ StatusOr<ValuePtr> Parser::ParseValue() {
       // The lexer's own diagnostic beats a generic "got ILLEGAL".
       return Status::Error(pos.line, pos.column, std::string(current_.value));
     default:
-      return Status::Error(
-          pos.line, pos.column, std::string("expected value, got ") + TokenKindName(current_.kind));
+      return Status::Error(pos.line, pos.column, "expected value, got " + TokenErrMsg());
   }
 }
 
@@ -560,10 +581,10 @@ StatusOr<DatasetDirective> Parser::ParseTableDirective(int* end_offset) {
 
   // Required: column list in `( ... )`. At least one column.
   if (current_.kind != TokenKind::kLParen) {
-    return Status::Error(current_.pos.line,
-                         current_.pos.column,
-                         std::string("expected '(' to start @dataset column list, got ") +
-                             TokenKindName(current_.kind));
+    return Status::Error(
+        current_.pos.line,
+        current_.pos.column,
+        std::string("expected '(' to start @dataset column list, got ") + DatasetTokenMsg());
   }
   Advance();  // consume (
 
@@ -572,15 +593,14 @@ StatusOr<DatasetDirective> Parser::ParseTableDirective(int* end_offset) {
                          current_.pos.column,
                          std::string("@dataset column list must contain at least one field name, "
                                      "got ") +
-                             TokenKindName(current_.kind));
+                             DatasetTokenMsg());
   }
   std::vector<Position> column_pos;
   for (;;) {
     if (current_.kind != TokenKind::kIdent) {
-      return Status::Error(
-          current_.pos.line,
-          current_.pos.column,
-          std::string("expected column field name, got ") + TokenKindName(current_.kind));
+      return Status::Error(current_.pos.line,
+                           current_.pos.column,
+                           std::string("expected column field name, got ") + DatasetTokenMsg());
     }
     tbl.columns.emplace_back(current_.value);
     column_pos.push_back(current_.pos);
@@ -590,10 +610,10 @@ StatusOr<DatasetDirective> Parser::ParseTableDirective(int* end_offset) {
       continue;
     }
     if (current_.kind == TokenKind::kRParen) break;
-    return Status::Error(current_.pos.line,
-                         current_.pos.column,
-                         std::string("expected ',' or ')' in @dataset column list, got ") +
-                             TokenKindName(current_.kind));
+    return Status::Error(
+        current_.pos.line,
+        current_.pos.column,
+        std::string("expected ',' or ')' in @dataset column list, got ") + DatasetTokenMsg());
   }
   // The rules that need no schema are checked here, at the offending
   // column; the ones that need the row type wait for a row to bind.
@@ -643,7 +663,7 @@ StatusOr<DatasetRow> Parser::ParseTableRow(int expected, int* end_offset) {
     return Status::Error(
         current_.pos.line,
         current_.pos.column,
-        std::string("expected ',' or ')' in @dataset row, got ") + TokenKindName(current_.kind));
+        std::string("expected ',' or ')' in @dataset row, got ") + DatasetTokenMsg());
   }
   int eo = current_.pos.offset + 1;
   Advance();  // consume )
@@ -726,10 +746,14 @@ StatusOr<ProtoDirective> Parser::ParseProtoDirective(int* end_offset) {
     }
     case TokenKind::kBytes: {
       pd.shape = ProtoShape::kDescriptor;
-      auto decoded = detail::Base64DecodeStd(current_.value);
+      size_t offset = 0;
+      auto decoded = detail::Base64DecodeProto(current_.value, &offset);
       if (!decoded.has_value()) {
-        return Status::Error(
-            current_.pos.line, current_.pos.column, "@proto descriptor body: invalid base64");
+        return Status::Error(current_.pos.line,
+                             current_.pos.column,
+                             "@proto descriptor body: invalid base64: illegal base64 data at "
+                             "input byte " +
+                                 std::to_string(offset));
       }
       pd.body = std::string(decoded->begin(), decoded->end());
       *end_offset = current_.pos.offset + static_cast<int>(current_.value.size()) + 3;  // b" … "

@@ -6,8 +6,9 @@
 // protowire-go, so scripts/go_differential.sh only has to diff two text
 // files. The two programs have to stay line for line alike.
 //
-// Manifest: one document per line, as root TAB protos TAB file. Paths are
-// relative to root, and protos is a comma-separated list.
+// Manifest: one document per line, as root TAB dir TAB protos TAB type TAB
+// file. Paths are relative to root, protos is a comma-separated list, and type
+// names the message of a document with no @type, or is "-".
 
 #include <algorithm>
 #include <cstdio>
@@ -22,12 +23,11 @@
 
 #include <google/protobuf/compiler/importer.h>
 #include <google/protobuf/dynamic_message.h>
-#include <google/protobuf/io/coded_stream.h>
-#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 
 #include "protowire/detail/go_quote.h"
 #include "protowire/pxf.h"
 #include "protowire/pxf/format.h"
+#include "protowire/pxf/go_wire.h"
 
 namespace {
 
@@ -118,16 +118,9 @@ std::string Join(std::vector<std::string> v, const char* sep) {
 }
 
 std::string BytesOf(const gpb::Message& m) {
-  std::string raw;
-  {
-    gpb::io::StringOutputStream stream(&raw);
-    gpb::io::CodedOutputStream coded(&stream);
-    coded.SetSerializationDeterministic(true);
-    m.SerializeToCodedStream(&coded);
-  }
   static constexpr char kHex[] = "0123456789abcdef";
   std::string out;
-  for (unsigned char c : raw) {
+  for (unsigned char c : pxf::SerializeGoOrder(m)) {
     out += kHex[c >> 4];
     out += kHex[c & 0xF];
   }
@@ -163,6 +156,27 @@ void RunMessage(Schema& s, const gpb::Descriptor* d, const std::string& text) {
   opts.type_resolver = &s;
   auto plain = s.New(d);
   std::cout << "unmarshal: " << Text(pxf::Unmarshal(text, plain.get(), opts)) << "\n";
+  {
+    pxf::UnmarshalOptions hooked = opts;
+    hooked.on_secret_field = [](std::string_view path, std::string_view value) {
+      std::cout << "secret: " << Quote(std::string(path)) << " = " << Quote(std::string(value))
+                << "\n";
+      return Status::OK();
+    };
+    auto m = s.New(d);
+    auto rr = pxf::UnmarshalFull(text, m.get(), hooked);
+    std::cout << "hooked: " << Text(rr.status()) << "\n";
+    if (rr.ok()) {
+      std::cout << "bytes: " << BytesOf(*m) << "\n";
+      std::cout << "set: " << Quote(Join(rr->SetFields(), " ")) << "\n";
+    }
+    pxf::UnmarshalOptions raw = opts;
+    raw.skip_post_decode = true;
+    auto rm = s.New(d);
+    auto rs = pxf::UnmarshalFull(text, rm.get(), raw);
+    std::cout << "skip-post: " << Text(rs.status()) << "\n";
+    if (rs.ok()) std::cout << "bytes: " << BytesOf(*rm) << "\n";
+  }
   auto full = s.New(d);
   auto r = pxf::UnmarshalFull(text, full.get(), opts);
   std::cout << "full: " << Text(r.status()) << "\n";
@@ -200,8 +214,10 @@ void RunDatasets(Schema& s, const pxf::Document& doc) {
 }
 
 void Run(const std::string& root,
+         const std::string& dir,
          const std::string& proto_dir,
          const std::string& protos,
+         const std::string& deftype,
          const std::string& file) {
   std::cout << "=== " << file << "\n";
   std::ifstream in(fs::path(root) / file, std::ios::binary);
@@ -216,7 +232,7 @@ void Run(const std::string& root,
   std::istringstream split(protos);
   std::string name;
   while (std::getline(split, name, ',')) names.push_back(name);
-  Schema s(root, fs::path(file).parent_path().string(), names, proto_dir);
+  Schema s(root, dir, names, proto_dir);
   if (s.failed()) {
     std::cout << "compile: failed\n";
     return;
@@ -225,7 +241,9 @@ void Run(const std::string& root,
     RunDatasets(s, *doc);
     return;
   }
-  const gpb::Descriptor* d = s.Find(TypeOf(text));
+  std::string type_name = TypeOf(text);
+  if (type_name.empty()) type_name = deftype;
+  const gpb::Descriptor* d = s.Find(type_name);
   if (d == nullptr) {
     std::cout << "type: none\n";
     return;
@@ -293,9 +311,11 @@ int main(int argc, char** argv) {
   }
   std::string line;
   while (std::getline(manifest, line)) {
-    size_t a = line.find('\t');
-    size_t b = line.find('\t', a + 1);
-    Run(line.substr(0, a), argv[2], line.substr(a + 1, b - a - 1), line.substr(b + 1));
+    std::vector<std::string> p;
+    std::istringstream cols(line);
+    std::string col;
+    while (std::getline(cols, col, '\t')) p.push_back(col);
+    Run(p[0], p[1], argv[2], p[2], p[3], p[4]);
   }
   return 0;
 }

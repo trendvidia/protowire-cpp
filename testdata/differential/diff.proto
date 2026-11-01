@@ -9,6 +9,7 @@ syntax = "proto3";
 package diff.v1;
 
 import "google/protobuf/any.proto";
+import "google/protobuf/duration.proto";
 import "google/protobuf/field_mask.proto";
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/wrappers.proto";
@@ -61,6 +62,9 @@ message Root {
   repeated Leaf named = 16 [(pxf.key) = "label"];
   pxf.Decimal dec = 17;
   repeated string strs = 18;
+  repeated pxf.Secret secrets = 19;
+  map<string, pxf.Secret> secret_map = 20;
+  string required_text = 21 [(pxf.required) = false, (pxf.default) = "dflt"];
   google.protobuf.FieldMask _null = 100;
 }
 
@@ -68,4 +72,21 @@ message Plain {
   Leaf leaf = 1;
   repeated Leaf items = 2;
   optional string name = 3;
+}
+
+message Times {
+  google.protobuf.Duration d = 1;
+  repeated google.protobuf.Duration ds = 2;
+  map<string, google.protobuf.Duration> m = 3;
+}
+
+message Vault {
+  pxf.Secret pw = 1;
+  repeated Vault nested = 2;
+  map<string, Vault> by_host = 3;
+  repeated pxf.Secret keys = 4;
+  map<string, pxf.Secret> tenant = 5;
+  google.protobuf.Any any = 6;
+  string label = 7 [(pxf.default) = "unnamed"];
+  string must = 8 [(pxf.required) = true];
 }

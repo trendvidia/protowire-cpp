@@ -76,6 +76,43 @@ bool GoIsPrint(uint32_t rune) {
   return it != end && it->lo <= rune;
 }
 
+namespace {
+
+// AppendEscaped is strconv's appendEscapedRune. raw is the rune's own bytes.
+void AppendEscaped(std::string* out, uint32_t r, std::string_view raw, char quote) {
+  if (r == static_cast<unsigned char>(quote) || r == '\\') {
+    *out += '\\';
+    *out += static_cast<char>(r);
+  } else if (GoIsPrint(r)) {
+    *out += raw;
+  } else if (r == '\a') {
+    *out += "\\a";
+  } else if (r == '\b') {
+    *out += "\\b";
+  } else if (r == '\f') {
+    *out += "\\f";
+  } else if (r == '\n') {
+    *out += "\\n";
+  } else if (r == '\r') {
+    *out += "\\r";
+  } else if (r == '\t') {
+    *out += "\\t";
+  } else if (r == '\v') {
+    *out += "\\v";
+  } else if (r < 0x20 || r == 0x7F) {
+    *out += "\\x";
+    AppendHex(out, r, 2);
+  } else if (r < 0x10000) {
+    *out += "\\u";
+    AppendHex(out, r, 4);
+  } else {
+    *out += "\\U";
+    AppendHex(out, r, 8);
+  }
+}
+
+}  // namespace
+
 std::string GoQuote(std::string_view s) {
   std::string out = "\"";
   for (size_t i = 0; i < s.size();) {
@@ -87,38 +124,24 @@ std::string GoQuote(std::string_view s) {
       ++i;
       continue;
     }
-    if (r == '"' || r == '\\') {
-      out += '\\';
-      out += static_cast<char>(r);
-    } else if (GoIsPrint(r)) {
-      out.append(s, i, width);
-    } else if (r == '\a') {
-      out += "\\a";
-    } else if (r == '\b') {
-      out += "\\b";
-    } else if (r == '\f') {
-      out += "\\f";
-    } else if (r == '\n') {
-      out += "\\n";
-    } else if (r == '\r') {
-      out += "\\r";
-    } else if (r == '\t') {
-      out += "\\t";
-    } else if (r == '\v') {
-      out += "\\v";
-    } else if (r < 0x20 || r == 0x7F) {
-      out += "\\x";
-      AppendHex(&out, r, 2);
-    } else if (r < 0x10000) {
-      out += "\\u";
-      AppendHex(&out, r, 4);
-    } else {
-      out += "\\U";
-      AppendHex(&out, r, 8);
-    }
+    AppendEscaped(&out, r, s.substr(i, width), '"');
     i += width;
   }
   out += '"';
+  return out;
+}
+
+std::string GoIllegalRune(std::string_view s, size_t* width) {
+  uint32_t r = static_cast<unsigned char>(s[0]);
+  *width = 1;
+  if (r >= 0x80 && !DecodeRune(s, &r, width)) {
+    std::string out = "unexpected byte 0x";
+    AppendHex(&out, static_cast<unsigned char>(s[0]), 2);
+    return out;
+  }
+  std::string out = "unexpected character '";
+  AppendEscaped(&out, r, s.substr(0, *width), '\'');
+  out += '\'';
   return out;
 }
 

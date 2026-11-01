@@ -8,14 +8,12 @@
 
 #include "protowire/pxf.h"
 #include "protowire/pxf/annotations.h"
-#include "protowire/pxf/format.h"
 #include "protowire/pxf/keyed.h"
 #include "protowire/pxf/result.h"
 
 #include <algorithm>
 #include <charconv>
 #include <cmath>
-#include <map>
 #include <memory>
 #include <string>
 #include <unordered_set>

@@ -20,18 +20,22 @@ trap 'rm -rf "$work"' EXIT
 
 manifest="$work/manifest"
 : > "$manifest"
-add_dir() { # root dir [extra protos]
-  local root=$1 dir=$2 extra=${3:-}
+add_dir() { # root dir [extra protos] [type of a document with no @type]
+  local root=$1 dir=$2 extra=${3:-} type=${4:--}
   local protos
-  protos=$(cd "$root/$dir" && ls | awk '/\.proto$/' | paste -sd, -)
+  protos=${ONLY_PROTOS:-$(cd "$root/$dir" && ls | awk '/\.proto$/' | paste -sd, -)}
   protos=${protos:+$protos}${extra:+${protos:+,}$extra}
   (cd "$root" && find "$dir" -name '*.pxf' | LC_ALL=C sort) |
-    awk -v r="$root" -v p="$protos" '{ print r "\t" p "\t" $0 }' >> "$manifest"
+    awk -v r="$root" -v d="$dir" -v p="$protos" -v t="$type" \
+      '{ print r "\t" d "\t" p "\t" t "\t" $0 }' >> "$manifest"
 }
-for dir in annotations any bigfloat blocks duplicates duration keyed map-keys \
+for dir in any blocks duplicates duration keyed map-keys \
            nulls strings; do
   add_dir "$spec/testdata" "$dir"
 done
+add_dir "$spec/testdata" bigfloat "" bf.v1.H
+# settings_annotated.proto needs the @required sugar's compiler plugin.
+ONLY_PROTOS=settings.proto add_dir "$spec/testdata" annotations "" settings.v1.Settings
 add_dir "$spec/testdata" dataset test.proto
 add_dir "$spec/testdata" repeated test.proto
 add_dir "$spec/testdata" proto-imports

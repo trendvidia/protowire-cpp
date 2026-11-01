@@ -116,7 +116,7 @@ TEST(LexerDuration, FractionalAndMicro) {
       // LETTER MU (CE BC) is not in the grammar even though ParseDuration
       // would accept it, and must not sneak in via the lexer. This port's
       // ILLEGAL path reports one byte at a time.
-      {"2μs", {{I, "2"}, {X, "\xCE"}, {X, "\xBC"}, {ID, "s"}}},
+      {"2μs", {{I, "2"}, {X, "unexpected character 'μ'"}, {ID, "s"}}},
       // A bare micro sign with no "s" is not a unit either.
       {"2µ", {{X, "invalid duration: 2µ"}}},
       {"2µm", {{X, "invalid duration: 2µm"}}},
