@@ -30,7 +30,7 @@ The Steward agent that enforces the constitution programmatically is
 **rolling out**. Until it is live:
 
 - Pull requests are reviewed by human maintainers.
-- The `0.70.x` release line implements the wire contract documented in
+- Each release implements the wire contract documented in
   [`docs/grammar.ebnf`](https://github.com/trendvidia/protowire/blob/main/docs/grammar.ebnf)
   + [`docs/HARDENING.md`](https://github.com/trendvidia/protowire/blob/main/docs/HARDENING.md);
   the ASan + UBSan job is the local enforcement of the hardening
