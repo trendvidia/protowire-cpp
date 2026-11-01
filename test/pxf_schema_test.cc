@@ -10,6 +10,7 @@
 #include "protowire/pxf/schema.h"
 
 #include <gtest/gtest.h>
+#include "fixture_dir.h"
 #include "protoc_compat.h"
 
 #include <algorithm>
@@ -58,12 +59,12 @@ class PxfSchema : public ::testing::Test {
 
   const pb::FileDescriptor* CompileFromString(const std::string& proto_src,
                                               const std::string& file_basename) {
-    proto_path_ = std::string(::testing::TempDir()) + "/" + file_basename;
+    proto_path_ = protowire_test::FixtureDir() + "/" + file_basename;
     {
       std::ofstream out(proto_path_, std::ios::binary);
       out << proto_src;
     }
-    source_tree_.MapPath("", ::testing::TempDir());
+    source_tree_.MapPath("", protowire_test::FixtureDir());
     importer_ = std::make_unique<pb::compiler::Importer>(&source_tree_, &errors_);
     return importer_->Import(file_basename);
   }
@@ -75,12 +76,12 @@ class PxfSchema : public ::testing::Test {
       const std::vector<std::pair<std::string, std::string>>& files,
       const std::string& main_basename) {
     for (const auto& [name, src] : files) {
-      std::string path = std::string(::testing::TempDir()) + "/" + name;
+      std::string path = protowire_test::FixtureDir() + "/" + name;
       std::ofstream out(path, std::ios::binary);
       out << src;
       extra_paths_.push_back(path);
     }
-    source_tree_.MapPath("", ::testing::TempDir());
+    source_tree_.MapPath("", protowire_test::FixtureDir());
     source_tree_.MapPath("", PROTO_DIR);
     source_tree_.MapPath("", WKT_PROTO_DIR);
     importer_ = std::make_unique<pb::compiler::Importer>(&source_tree_, &errors_);
