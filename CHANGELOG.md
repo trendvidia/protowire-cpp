@@ -27,6 +27,8 @@ format changes.
 - **`UnmarshalFull` with `skip_validate` no longer aborts on a default on a repeated or map field.** It returns an error.
 - **`Marshal` leaves out an empty map,** unless `emit_defaults` is set. It wrote `name = {\n}`, which read back as present, so a required map was satisfied by nothing. **Output text changes for a message with an empty map.**
 - **A map value takes the literal forms** (a timestamp, duration, wrapper or big number). Only a block was accepted, so a map of these failed to read back what `Marshal` wrote.
+- **A bool default is exactly `true` or `false`** (protowire-go#90). Any other spelling silently became `false`; it now fails the decode. **A schema with `(pxf.default) = "True"` now fails `UnmarshalFull`.**
+- **`ViolationKindName` and `Violation::ToString` use protowire-go's text:** `keyed field option`, `default field option`, `required field option`, and `invalid (pxf.key) = "..."`.
 
 ### Changed
 

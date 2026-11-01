@@ -18,6 +18,7 @@
 #include <google/protobuf/dynamic_message.h>
 #include <google/protobuf/timestamp.pb.h>
 #include <google/protobuf/unknown_field_set.h>
+#include <google/protobuf/wrappers.pb.h>
 
 #include "protowire/pxf.h"
 #include "protowire/pxf/schema.h"
@@ -99,6 +100,9 @@ class Pool {
     pb::FileDescriptorProto ts;
     pb::Timestamp::descriptor()->file()->CopyTo(&ts);
     EXPECT_NE(pool_.BuildFile(ts), nullptr);
+    pb::FileDescriptorProto wrappers;
+    pb::BoolValue::descriptor()->file()->CopyTo(&wrappers);
+    EXPECT_NE(pool_.BuildFile(wrappers), nullptr);
   }
   const pb::FileDescriptor* Build(const pb::FileDescriptorProto& f) {
     const pb::FileDescriptor* fd = pool_.BuildFile(f);
@@ -287,8 +291,30 @@ TEST_P(Rules, BadPlacementFailsDecodeAndSkipValidateDoesNotAbort) {
   skip.skip_validate = true;
   auto r = pxf::UnmarshalFull("", msg.get(), skip);
   ASSERT_FALSE(r.ok());
-  EXPECT_NE(r.status().message().find("repeated or map field \"tags\""), std::string::npos)
+  EXPECT_NE(r.status().message().find("not supported for repeated field \"tags\""),
+            std::string::npos)
       << r.status().ToString();
+}
+
+// A bool default is exactly `true` or `false`, in a scalar and a wrapper.
+TEST_P(Rules, BoolDefaultIsExact) {
+  for (const char* type : {"", ".google.protobuf.BoolValue"}) {
+    SCOPED_TRACE(type);
+    pb::DescriptorProto* m;
+    auto file = Base(&m);
+    file.add_dependency("google/protobuf/wrappers.proto");
+    auto* f = *type ? AddField(m, "on", kMsg, type)
+                    : AddField(m, "on", pb::FieldDescriptorProto::TYPE_BOOL);
+    SetDefault(f->mutable_options(), GetParam(), "True");
+    Pool pool;
+    const pb::FileDescriptor* fd = pool.Build(file);
+    pb::DynamicMessageFactory factory;
+    std::unique_ptr<pb::Message> msg(factory.GetPrototype(fd->message_type(0))->New());
+    auto r = pxf::UnmarshalFull("", msg.get());
+    ASSERT_FALSE(r.ok());
+    EXPECT_NE(r.status().message().find("invalid default bool \"True\""), std::string::npos)
+        << r.status().ToString();
+  }
 }
 
 // --- retired option numbers ------------------------------------------------
