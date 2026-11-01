@@ -33,6 +33,7 @@
 
 #include "protowire/detail/status.h"
 #include "protowire/pxf/ast.h"  // Directive, DatasetRow
+#include "protowire/pxf/options.h"
 
 namespace protowire::pxf {
 
@@ -63,6 +64,11 @@ class DatasetReader {
   // directive is seen (the message contains "no @dataset directive in
   // stream") or on a parse / I/O error.
   static StatusOr<std::unique_ptr<DatasetReader>> Create(std::istream* src);
+
+  // Create under options: Scan binds rows with them, so a cell holding an
+  // Any block needs opts.type_resolver, and opts.skip_validate turns off
+  // Scan's schema check.
+  static StatusOr<std::unique_ptr<DatasetReader>> Create(std::istream* src, UnmarshalOptions opts);
 
   // Row message type declared by the @dataset header (e.g. "trades.v1.Trade").
   const std::string& Type() const { return type_; }
@@ -119,24 +125,46 @@ class DatasetReader {
   std::string type_;
   std::vector<std::string> columns_;
   std::vector<Directive> directives_;
+  UnmarshalOptions opts_;
+  const google::protobuf::Descriptor* checked_type_ = nullptr;  // see Scan
 };
 
 // BindRow renders the row's cells as a synthetic PXF body and runs it
-// through the standard `Unmarshal` pipeline against `msg`. The
-// `columns` slice MUST have the same length as `row.cells`.
+// through the standard `UnmarshalFull` pipeline against `msg`. The
+// `columns` slice MUST have the same length as `row.cells`. A column may
+// be a dotted path into a sub-message, and cells sharing a prefix land in
+// one block.
 //
 // Cell-state semantics (mirrors draft §3.4.4):
 //   - std::nullopt cell (empty cell) — field absent. (pxf.default) is
 //     applied if declared on the field; (pxf.required) errors if
 //     neither default nor value is present.
-//   - *NullVal — field cleared, per draft §3.9 (clears optional /
-//     wrapper / oneof; rejects on non-nullable scalars).
-//   - any other Value — field set to that value.
+//   - NullVal — field present-but-null, on a field with presence; any
+//     other field rejects it, as a body does.
+//   - any other Value — field set, as `<column> = <value>` would set it
+//     in a body, so a list or block cell works and `{}` is a present
+//     empty message.
+//
+// A column that names no field of msg's type, or a path that goes through
+// a repeated, map or scalar field or into a type written as a literal,
+// fails every row bound into that type, its cells empty or not.
+//
+// msg's descriptor is checked against the bind-time schema rules
+// (ValidateDescriptor), as Unmarshal checks it. That walks the import
+// closure on every call. A caller binding many rows of one type should
+// validate once and pass opts.skip_validate, as DatasetReader::Scan does.
 //
 // Exported so callers iterating `Result::Datasets()[i].rows` can reuse
 // the same logic.
 Status BindRow(google::protobuf::Message* msg,
                const std::vector<std::string>& columns,
                const DatasetRow& row);
+
+// BindRow under options: their limits, skip_validate, and type_resolver,
+// which a cell holding an Any block that opens with a type entry needs.
+Status BindRow(google::protobuf::Message* msg,
+               const std::vector<std::string>& columns,
+               const DatasetRow& row,
+               UnmarshalOptions opts);
 
 }  // namespace protowire::pxf

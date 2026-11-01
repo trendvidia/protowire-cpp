@@ -26,4 +26,8 @@ bool IsIdentifierSafe(std::string_view s);
 // formats directly from the AST returned by Parse().
 std::string FormatDocument(const Document& doc);
 
+// FormatValue renders one value as FormatDocument would write it on the
+// right of `=`.
+std::string FormatValue(const ValuePtr& value);
+
 }  // namespace protowire::pxf

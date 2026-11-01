@@ -251,29 +251,29 @@ TEST(Table, ArityMismatchRejected) {
   EXPECT_NE(doc.status().message().find("3 cells, expected 2"), std::string::npos);
 }
 
-TEST(Table, DottedColumnRejected) {
+TEST(Table, DottedColumnAccepted) {
   std::string_view src = "@dataset x.Row ( a.b )\n";
   auto doc = Parse(src);
-  ASSERT_FALSE(doc.ok());
-  EXPECT_NE(doc.status().message().find("dotted column"), std::string::npos);
+  ASSERT_TRUE(doc.ok()) << doc.status().ToString();
+  EXPECT_EQ(doc->datasets[0].columns[0], "a.b");
 }
 
-TEST(Table, ListCellRejected) {
+TEST(Table, ListCellAccepted) {
   std::string_view src = R"(@dataset x.Row ( a )
 ( [1, 2] )
 )";
   auto doc = Parse(src);
-  ASSERT_FALSE(doc.ok());
-  EXPECT_NE(doc.status().message().find("list values"), std::string::npos);
+  ASSERT_TRUE(doc.ok()) << doc.status().ToString();
+  EXPECT_TRUE(doc->datasets[0].rows[0].cells[0].has_value());
 }
 
-TEST(Table, BlockCellRejected) {
+TEST(Table, BlockCellAccepted) {
   std::string_view src = R"(@dataset x.Row ( a )
 ( { x = 1 } )
 )";
   auto doc = Parse(src);
-  ASSERT_FALSE(doc.ok());
-  EXPECT_NE(doc.status().message().find("block values"), std::string::npos);
+  ASSERT_TRUE(doc.ok()) << doc.status().ToString();
+  EXPECT_TRUE(doc->datasets[0].rows[0].cells[0].has_value());
 }
 
 TEST(Table, StandaloneRejectsCoexistingAtType) {
@@ -546,31 +546,28 @@ TEST_F(PxfDirectiveFast, TableArityMismatchRejected) {
   EXPECT_NE(std::string(st.message()).find("3 cells, expected 2"), std::string::npos);
 }
 
-TEST_F(PxfDirectiveFast, TableDottedColumnRejected) {
+TEST_F(PxfDirectiveFast, TableDottedColumnAccepted) {
   auto msg = NewAllTypes();
   auto st = protowire::pxf::Unmarshal("@dataset x.Row ( a.b )\n", msg.get());
-  ASSERT_FALSE(st.ok());
-  EXPECT_NE(std::string(st.message()).find("dotted path"), std::string::npos);
+  EXPECT_TRUE(st.ok()) << st.ToString();
 }
 
-TEST_F(PxfDirectiveFast, TableListCellRejected) {
+TEST_F(PxfDirectiveFast, TableListCellAccepted) {
   auto msg = NewAllTypes();
   auto st = protowire::pxf::Unmarshal(R"(@dataset x.Row ( a )
 ( [1, 2] )
 )",
                                       msg.get());
-  ASSERT_FALSE(st.ok());
-  EXPECT_NE(std::string(st.message()).find("list/block"), std::string::npos);
+  EXPECT_TRUE(st.ok()) << st.ToString();
 }
 
-TEST_F(PxfDirectiveFast, TableBlockCellRejected) {
+TEST_F(PxfDirectiveFast, TableBlockCellAccepted) {
   auto msg = NewAllTypes();
   auto st = protowire::pxf::Unmarshal(R"(@dataset x.Row ( a )
 ( { x = 1 } )
 )",
                                       msg.get());
-  ASSERT_FALSE(st.ok());
-  EXPECT_NE(std::string(st.message()).find("list/block"), std::string::npos);
+  EXPECT_TRUE(st.ok()) << st.ToString();
 }
 
 TEST_F(PxfDirectiveFast, TableMissingTypeIsPermissive) {

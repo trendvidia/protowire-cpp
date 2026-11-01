@@ -5,6 +5,8 @@
 #include <string>
 #include <utility>
 
+#include "dataset_paths.h"
+#include "parser_internal.h"
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
 #include "protowire/detail/rfc3339.h"
@@ -24,7 +26,18 @@ class Parser {
     Advance();
   }
 
+  // Adopts a lexer already part-way through its input, with the token it
+  // last produced; Release hands both back.
+  Parser(Lexer&& lex, Token current, int max_depth)
+      : lex_(std::move(lex)), current_(current), max_depth_(max_depth) {}
+  void Release(Lexer* lex, Token* current) {
+    *lex = std::move(lex_);
+    *current = current_;
+  }
+
   StatusOr<Document> ParseDocument();
+  StatusOr<DatasetDirective> ParseTableDirective(int* end_offset);
+  StatusOr<DatasetRow> ParseTableRow(int expected, int* end_offset);
 
  private:
   void Advance();
@@ -36,8 +49,6 @@ class Parser {
   StatusOr<ValuePtr> ParseBlockVal();
   StatusOr<std::vector<EntryPtr>> ParseBody();
   StatusOr<Directive> ParseDirective(int* end_offset);
-  StatusOr<DatasetDirective> ParseTableDirective(int* end_offset);
-  StatusOr<DatasetRow> ParseTableRow(int expected, int* end_offset);
   StatusOr<ProtoDirective> ParseProtoDirective(int* end_offset);
   StatusOr<std::optional<ValuePtr>> ParseRowCell();
   TokenKind PeekKind();
@@ -68,7 +79,6 @@ class Parser {
 // inside literals don't confuse the brace count. Returns -1 on
 // unterminated input. Mirrors protowire-go's parser.findMatchingBrace.
 int FindMatchingBrace(std::string_view input, int open_offset);
-bool ContainsDot(std::string_view s);
 
 void Parser::Advance() {
   for (;;) {
@@ -556,6 +566,7 @@ StatusOr<DatasetDirective> Parser::ParseTableDirective(int* end_offset) {
                                      "got ") +
                              TokenKindName(current_.kind));
   }
+  std::vector<Position> column_pos;
   for (;;) {
     if (current_.kind != TokenKind::kIdent) {
       return Status::Error(
@@ -563,16 +574,8 @@ StatusOr<DatasetDirective> Parser::ParseTableDirective(int* end_offset) {
           current_.pos.column,
           std::string("expected column field name, got ") + TokenKindName(current_.kind));
     }
-    std::string col_name(current_.value);
-    // v1: column entries are unqualified field names; dotted paths
-    // reserved for a future revision.
-    if (ContainsDot(col_name)) {
-      return Status::Error(current_.pos.line,
-                           current_.pos.column,
-                           std::string("@dataset column \"") + col_name +
-                               "\": dotted column paths are not supported in v1 (draft §3.4.4)");
-    }
-    tbl.columns.push_back(std::move(col_name));
+    tbl.columns.emplace_back(current_.value);
+    column_pos.push_back(current_.pos);
     Advance();
     if (current_.kind == TokenKind::kComma) {
       Advance();
@@ -583,6 +586,13 @@ StatusOr<DatasetDirective> Parser::ParseTableDirective(int* end_offset) {
                          current_.pos.column,
                          std::string("expected ',' or ')' in @dataset column list, got ") +
                              TokenKindName(current_.kind));
+  }
+  // The rules that need no schema are checked here, at the offending
+  // column; the ones that need the row type wait for a row to bind.
+  size_t bad_column = 0;
+  if (std::string msg = ColumnPathError(tbl.columns, &bad_column); !msg.empty()) {
+    const Position& p = column_pos[bad_column];
+    return Status::Error(p.line, p.column, std::move(msg));
   }
   int eo = current_.pos.offset + 1;  // past `)`
   Advance();                         // consume )
@@ -729,23 +739,11 @@ StatusOr<ProtoDirective> Parser::ParseProtoDirective(int* end_offset) {
 }
 
 // ParseRowCell consumes one cell of a @dataset row. Returns nullopt for
-// an empty cell (no value between two commas, or at row start/end);
-// rejects list / block values per v1 cell-grammar (draft §3.4.4).
+// an empty cell (no value between two commas, or at row start/end). A cell
+// holds any value: `c = <value>` in a body means the same (draft §3.4.4).
 StatusOr<std::optional<ValuePtr>> Parser::ParseRowCell() {
-  switch (current_.kind) {
-    case TokenKind::kComma:
-    case TokenKind::kRParen:
-      return std::optional<ValuePtr>{std::nullopt};
-    case TokenKind::kLBracket:
-      return Status::Error(current_.pos.line,
-                           current_.pos.column,
-                           "@dataset cells cannot contain list values in v1 (draft §3.4.4)");
-    case TokenKind::kLBrace:
-      return Status::Error(current_.pos.line,
-                           current_.pos.column,
-                           "@dataset cells cannot contain block values in v1 (draft §3.4.4)");
-    default:
-      break;
+  if (current_.kind == TokenKind::kComma || current_.kind == TokenKind::kRParen) {
+    return std::optional<ValuePtr>{std::nullopt};
   }
   auto v = ParseValue();
   if (!v.ok()) return v.status();
@@ -835,13 +833,21 @@ int FindMatchingBrace(std::string_view input, int open_offset) {
   return -1;
 }
 
-bool ContainsDot(std::string_view s) {
-  for (char c : s)
-    if (c == '.') return true;
-  return false;
+}  // namespace
+
+StatusOr<DatasetDirective> ParseDatasetAt(Lexer* lex, Token* current, int max_depth) {
+  Parser p(std::move(*lex), *current, max_depth);
+  int end = 0;
+  auto tbl = p.ParseTableDirective(&end);
+  p.Release(lex, current);
+  return tbl;
 }
 
-}  // namespace
+StatusOr<DatasetRow> ParseDatasetRow(std::string_view row, int expected, int max_depth) {
+  Parser p(row, max_depth, kMaxBytesLiteralLength);
+  int end = 0;
+  return p.ParseTableRow(expected, &end);
+}
 
 StatusOr<Document> Parse(std::string_view input, ParseOptions opts) {
   const int max_size = opts.max_message_size > 0 ? opts.max_message_size : kMaxMessageSize;

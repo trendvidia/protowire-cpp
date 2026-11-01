@@ -208,6 +208,13 @@ class Formatter {
 
 }  // namespace
 
+std::string FormatValue(const ValuePtr& value) {
+  std::string out;
+  Formatter f(out);
+  f.FormatValue(value, 0);
+  return out;
+}
+
 std::string FormatDocument(const Document& doc) {
   std::string out;
   if (!doc.type_url.empty()) {
