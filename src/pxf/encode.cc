@@ -451,10 +451,9 @@ Status Encoder::EncodeMapField(const Message& msg, const FieldDescriptor* fd, in
 
 Status Encoder::EncodeField(const Message& msg, const FieldDescriptor* fd, int level) {
   const Reflection* r = msg.GetReflection();
-  if (fd->is_map()) return EncodeMapField(msg, fd, level);
-  if (fd->is_repeated()) {
+  if (fd->is_repeated()) {  // true of a map field too
     if (r->FieldSize(msg, fd) == 0 && !opts_.emit_defaults) return Status::OK();
-    return EncodeListField(msg, fd, level);
+    return fd->is_map() ? EncodeMapField(msg, fd, level) : EncodeListField(msg, fd, level);
   }
   if (!opts_.emit_defaults && !r->HasField(msg, fd) &&
       fd->cpp_type() != FieldDescriptor::CPPTYPE_MESSAGE) {
