@@ -21,3 +21,6 @@ _deps/
 # Python bytecode from fixture generators
 __pycache__/
 *.pyc
+
+# Agent worktrees
+.claude/

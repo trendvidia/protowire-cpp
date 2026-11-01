@@ -4,8 +4,7 @@
 #
 # Runs protowire-go and this port over the spec's fixtures and this repo's
 # testdata/differential, and fails when they differ. protowire-go is the
-# reference, so a difference is a bug here unless it is listed in
-# scripts/go_differential.accepted.
+# reference, so a difference is a bug here.
 #
 #   SPEC_DIR=../protowire GO_DIR=../protowire-go PXF_DIFF=build/bin/pxf_diff \
 #     scripts/go_differential.sh

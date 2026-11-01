@@ -173,7 +173,8 @@ std::optional<std::vector<uint8_t>> Base64DecodeLenient(std::string_view s, size
   auto decoded = DecodeGo(s, /*url=*/false, /*padded=*/true, offset);
   if (decoded.has_value()) return decoded;
   size_t ignored = 0;
-  for (const auto [url, padded] : {std::pair{false, false}, {true, true}, {true, false}}) {
+  const std::pair<bool, bool> kVariants[] = {{false, false}, {true, true}, {true, false}};
+  for (const auto& [url, padded] : kVariants) {
     if (auto d = DecodeGo(s, url, padded, &ignored)) return d;
   }
   return decoded;
