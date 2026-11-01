@@ -106,7 +106,7 @@ std::optional<std::vector<uint8_t>> DecodeGo(std::string_view src,
                                              bool url,
                                              bool padded,
                                              size_t* offset) {
-  const auto value = [url](unsigned char c) -> int {
+  const auto value = [url](char c) -> int {
     if (c >= 'A' && c <= 'Z') return c - 'A';
     if (c >= 'a' && c <= 'z') return c - 'a' + 26;
     if (c >= '0' && c <= '9') return c - '0' + 52;
@@ -133,7 +133,7 @@ std::optional<std::vector<uint8_t>> DecodeGo(std::string_view src,
         break;
       }
       const char in = src[si++];
-      const int v = value(static_cast<unsigned char>(in));
+      const int v = value(in);
       if (v >= 0) {
         val |= static_cast<uint32_t>(v) << (6 * (3 - j));
         continue;
