@@ -34,7 +34,7 @@ constexpr std::string_view kAnnotationDefault = "protowire.schema.v1.default";
 constexpr std::string_view kDefaultParamName = "value";
 
 // Field numbers from protowire/proto/schema/v1/descriptor.proto.
-enum : uint32_t {
+enum : uint8_t {
   kListEntries = 1,     // AnnotationList.entries
   kAnnotationName = 1,  // Annotation.name
   kAnnotationArgs = 2,  // Annotation.args
@@ -52,7 +52,7 @@ enum : uint32_t {
   kEnumValueName = 2,   // EnumLiteral.value_name
 };
 
-enum WireType : uint32_t { kVarint = 0, kFixed64 = 1, kBytes = 2, kFixed32 = 5 };
+enum WireType : uint8_t { kVarint = 0, kFixed64 = 1, kBytes = 2, kFixed32 = 5 };
 
 // WireField is one field of a serialized message.
 struct WireField {
@@ -147,14 +147,14 @@ std::string FormatCarrierDouble(double v, const pb::FieldDescriptor* fd) {
   const bool positional = fd->cpp_type() == pb::FieldDescriptor::CPPTYPE_MESSAGE &&
                           (IsBigInt(fd->message_type()) || IsDecimal(fd->message_type()));
   if (!positional) return ShortestDouble(v, "%.*g");
-  const std::string e = ShortestDouble(v, "%.*e");
+  std::string e = ShortestDouble(v, "%.*e");
   const size_t mark = e.find('e');
   if (mark == std::string::npos) return e;  // inf or nan: the binder refuses it
   std::string digits = e.substr(0, mark);
   const bool neg = !digits.empty() && digits[0] == '-';
   if (neg) digits.erase(0, 1);
   if (digits.size() > 1) digits.erase(1, 1);  // the point
-  const int exp = std::atoi(e.c_str() + mark + 1);
+  const long exp = std::strtol(e.c_str() + mark + 1, nullptr, 10);
   std::string out = neg ? "-" : "";
   if (exp < 0) {
     out += "0.";
