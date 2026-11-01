@@ -557,7 +557,18 @@ Token Lexer::LexNumber(Position pos) {
   if (frac || (pos_ < input_.size() && (Peek() == '.' || Peek() == 'e' || Peek() == 'E'))) {
     return LexFloat(pos, start);
   }
-  return Token{TokenKind::kInt, input_.substr(start, pos_ - start), pos};
+  std::string_view value = input_.substr(start, pos_ - start);
+  return Token{TokenKind::kInt, value, pos, LexPrecision()};
+}
+
+// LexPrecision consumes a number's precision suffix, 'p' and one or more
+// digits, and returns the digits; a 'p' with no digit after it is not one.
+std::string_view Lexer::LexPrecision() {
+  if (Peek() != 'p' || !IsDigit(Peek(1))) return {};
+  Advance();  // p
+  size_t start = pos_;
+  while (pos_ < input_.size() && IsDigit(Peek())) Advance();
+  return input_.substr(start, pos_ - start);
 }
 
 // AtDurationUnit reports whether the bytes at pos_ start a time-unit of
@@ -581,7 +592,8 @@ Token Lexer::LexFloat(Position pos, size_t start) {
     if (pos_ < input_.size() && (Peek() == '+' || Peek() == '-')) Advance();
     while (pos_ < input_.size() && IsDigit(Peek())) Advance();
   }
-  return Token{TokenKind::kFloat, input_.substr(start, pos_ - start), pos};
+  std::string_view value = input_.substr(start, pos_ - start);
+  return Token{TokenKind::kFloat, value, pos, LexPrecision()};
 }
 
 Token Lexer::LexTimestamp(Position pos, size_t start) {

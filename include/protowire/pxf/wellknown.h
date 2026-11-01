@@ -42,11 +42,18 @@ bool IsBigFloat(const google::protobuf::Descriptor* d);
 // appears in PXF text — these helpers parse/format it.
 bool SetBigIntFromString(google::protobuf::Message* msg, std::string_view literal);
 bool SetDecimalFromString(google::protobuf::Message* msg, std::string_view literal);
+// A pxf.BigFloat literal may carry its precision suffix (`1.5p53`); without
+// one it is read at 256 bits.
 bool SetBigFloatFromString(google::protobuf::Message* msg, std::string_view literal);
+Status SetBigFloatFromLiteral(google::protobuf::Message* msg,
+                              std::string_view literal,
+                              std::string_view prec_digits,
+                              int max_digits,
+                              int max_exponent);
 
 StatusOr<std::string> ReadBigIntAsString(const google::protobuf::Message& msg);
 StatusOr<std::string> ReadDecimalAsString(const google::protobuf::Message& msg);
-std::string ReadBigFloatAsString(const google::protobuf::Message& msg);
+StatusOr<std::string> ReadBigFloatAsString(const google::protobuf::Message& msg);
 
 // Locates the `_null` `google.protobuf.FieldMask` field on a descriptor used
 // to track null fields across protobuf binary round-trips. Returns nullptr

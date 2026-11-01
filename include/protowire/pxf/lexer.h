@@ -67,6 +67,7 @@ class Lexer {
   Token LexBytes(Position pos);
   Token LexDirective(Position pos);
   Token LexNumber(Position pos);
+  std::string_view LexPrecision();
   Token LexFloat(Position pos, size_t start);
   Token LexTimestamp(Position pos, size_t start);
   Token LexDuration(Position pos, size_t start);

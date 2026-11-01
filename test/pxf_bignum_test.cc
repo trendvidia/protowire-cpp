@@ -174,10 +174,9 @@ TEST_F(PxfBigNum, DecimalLiteralPastTheCapIsRefused) {
       << out.status().message();
 }
 
-TEST_F(PxfBigNum, BigFloatRoundTripsApprox) {
-  // BigFloat parses through double — round-trip preserves value to within
-  // double precision. Pick a clean dyadic fraction so the textual form
-  // matches exactly after %.17g formatting.
+TEST_F(PxfBigNum, BigFloatRoundTrips) {
+  // An unsuffixed literal reads at 256 bits, and the suffix written back
+  // says so.
   auto msg = NewWallet();
   ASSERT_TRUE(protowire::pxf::Unmarshal(R"(
 rate = 0.5
@@ -186,7 +185,7 @@ rate = 0.5
                   .ok());
   auto out = protowire::pxf::Marshal(*msg);
   ASSERT_TRUE(out.ok());
-  EXPECT_NE(out->find("rate = 0.5"), std::string::npos);
+  EXPECT_NE(out->find("rate = 0.5p256"), std::string::npos);
 }
 
 }  // namespace

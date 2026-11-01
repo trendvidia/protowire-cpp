@@ -22,6 +22,11 @@ inline constexpr int kMaxMessageSize = 64 << 20;
 // arbitrary-precision type, and the magnitude of pxf.Decimal.scale.
 inline constexpr int kMaxNumericLiteralDigits = 4096;
 
+// Magnitude of a pxf.BigFloat value's binary exponent: the wire `exponent`
+// plus the mantissa's bit length. Rendering in decimal costs time that grows
+// with its square. 16384 is IEEE 754 binary128's range, literals to 1e±4932.
+inline constexpr int kMaxBigFloatExponent = 16384;
+
 // Decoded length of any single PXF b"…" literal, in bytes.
 inline constexpr int kMaxBytesLiteralLength = kMaxMessageSize;
 

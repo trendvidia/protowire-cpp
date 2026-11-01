@@ -19,15 +19,23 @@ format changes.
 - **The type entry of a `google.protobuf.Any` block follows the spec** (protowire#354). `Parse` rejects `@type = ...` anywhere but as a block's first entry, and rejects a value that is not a string. The decoder now takes a type entry in a list element and a map value, not only a singular field. `name = { type_url = ... }` no longer fails: an Any block with no type entry is the Any's own fields. An Any body no longer marks a root field of the same name as present in `Result`.
 - **`BindRow` and `DatasetReader::Scan` run the bind-time schema checks and apply `(pxf.required)` and `(pxf.default)`.** They used `Unmarshal` with validation off, so a schema the spec refuses was accepted, and an empty cell was neither defaulted nor rejected. `Scan` checks once per row type. `BindRow` checks on every call unless the caller passes `skip_validate`. **A row missing a required field, or a row type that breaks a bind-time rule, is now rejected.**
 - **A `BindRow` or `Scan` decode error names its column and reports the row's position,** not a line of the synthetic body.
+- **`pxf.BigFloat` text is exact, at any precision** (protowire#393, #406, #410). It went through a `double`, so `Marshal` wrote `inf` from exponent 1024 up, `0` from -1075 down, and misread a mantissa past 8 bytes. It now writes the digits the precision implies, then a suffix: `1.5p53`. A suffixed literal reads at that precision. An unsuffixed one reads at 256 bits, not 53. **Output text changes for every BigFloat, and so does the stored value of an unsuffixed literal.** A suffix on any other field is rejected, as are `p0` and a precision past `p13603`. `MaxNumericLiteralDigits` counts a BigFloat's mantissa digits only.
+- **A `pxf.BigFloat` past `MaxBigFloatExponent` (16384) is refused** (protowire#281), reading or writing, before any work. `1e646456992` costs nothing to reject.
+
+### Changed
+
+- **`ReadBigFloatAsString` returns `StatusOr<std::string>`,** so it can refuse a value.
 
 ### Added
 
 - **`proto/pxf/secret.proto`,** the canonical `pxf.Secret` schema, which this port's copy of `proto/` lacked. The `testdata/dataset` fixtures import it.
-- **`testdata/{any,blocks,duplicates,nulls,strings,dataset}`** and `test/pxf_corpus_test.cc`, which runs them through both decoders, `Parse`, `BindRow` and `DatasetReader`. `testdata/blocks` needed no code change: a `,` or `;` between the entries of a block was already rejected (protowire#312).
+- **`testdata/{any,bigfloat,blocks,duplicates,nulls,strings,dataset}`** and `test/pxf_corpus_test.cc`, which runs them through both decoders, `Parse`, `BindRow` and `DatasetReader`. `testdata/blocks` needed no code change: a `,` or `;` between the entries of a block was already rejected (protowire#312).
 - **`@dataset` value cells** (protowire#341, v1.13). A cell holds any value, and `c = <value>` in a body means the same, so a list or block cell is accepted. `{}` is a present empty message.
 - **`@dataset` dotted column paths** (protowire#342, v1.13), such as `(id, desc.energy)`. Cells sharing a prefix bind in one block, and a prefix with no non-empty cell leaves its sub-message absent. A header naming a path twice, a field beside a path inside it, or an empty segment is rejected when parsed, so `(a, a)` is too. A path through a repeated, map or scalar field, or into a type written as a literal, fails when a row binds.
 - **`BindRow(msg, columns, row, opts)` and `DatasetReader::Create(src, opts)`,** for limits, `skip_validate` and the `type_resolver` a cell holding an Any block needs.
 - **`FormatValue`,** which renders one AST value.
+- **`kMaxBigFloatExponent` and `UnmarshalOptions::max_big_float_exponent`,** and `SetBigFloatFromLiteral`, which takes the limits. `check_decode` accepts `--limit MaxBigFloatExponent=N`.
+- **`Token::prec`, `IntVal::prec` and `FloatVal::prec`** hold a number's precision suffix, and `FormatDocument` keeps it.
 
 ## [1.2.1] — 2026-11-01
 

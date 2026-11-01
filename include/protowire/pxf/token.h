@@ -61,6 +61,10 @@ struct Token {
   TokenKind kind = TokenKind::kEOF;
   std::string_view value;
   Position pos;
+  // The digits of an integer or float's precision suffix (`1.5p53`), empty
+  // for none. Any field but a pxf.BigFloat rejects one; that is the
+  // decoder's call, not the lexer's.
+  std::string_view prec = {};
 };
 
 }  // namespace protowire::pxf

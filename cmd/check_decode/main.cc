@@ -29,7 +29,7 @@
 //
 // --limit NAME=VALUE lowers one HARDENING limit for this run —
 // MaxMessageSize, MaxNestingDepth, MaxNumericLiteralDigits,
-// MaxBytesLiteralLength, MaxRepeatedCount — through the package's per-call
+// MaxBytesLiteralLength, MaxRepeatedCount, MaxBigFloatExponent — through the package's per-call
 // options, so the corpus can prove a 64 MiB cap with a 2 KiB fixture
 // (protowire#299). Until protowire-cpp#26 the SBE leg exited 2, which the
 // harness reads as a crash, and the PXF decoder had no depth cap at all;
@@ -70,6 +70,7 @@ struct Limits {
   int max_numeric_literal_digits = 0;
   int max_bytes_literal_length = 0;
   int max_repeated_count = 0;
+  int max_big_float_exponent = 0;
 
   // Set parses one NAME=VALUE; returns false with *err set when the name
   // is unknown or the value is not a positive integer.
@@ -87,6 +88,7 @@ struct Limits {
     if (name == "MaxNumericLiteralDigits") slot = &max_numeric_literal_digits;
     if (name == "MaxBytesLiteralLength") slot = &max_bytes_literal_length;
     if (name == "MaxRepeatedCount") slot = &max_repeated_count;
+    if (name == "MaxBigFloatExponent") slot = &max_big_float_exponent;
     if (slot == nullptr) {
       *err = "--limit: unknown limit \"" + std::string(name) + "\"";
       return false;

@@ -39,12 +39,14 @@ struct UnmarshalOptions {
   // a literal bound to pxf.BigInt / Decimal / BigFloat;
   // max_bytes_literal_length the decoded length of any b"…" literal,
   // refused from the literal's length before it is decoded;
-  // max_repeated_count the element count of any repeated or map field.
+  // max_repeated_count the element count of any repeated or map field;
+  // max_big_float_exponent the magnitude of a pxf.BigFloat's binary exponent.
   int max_message_size = 0;
   int max_nesting_depth = 0;
   int max_numeric_literal_digits = 0;
   int max_bytes_literal_length = 0;
   int max_repeated_count = 0;
+  int max_big_float_exponent = 0;
 };
 
 // ParseOptions carries the limits Parse enforces — the subset of

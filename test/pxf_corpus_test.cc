@@ -22,6 +22,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <random>
 #include <set>
 #include <sstream>
 #include <string>
@@ -111,6 +112,16 @@ const pbuf::Descriptor* TypeOf(const Schema& schema, const std::string& text) {
     return nullptr;
   }
   return schema.Find(doc->type_url);
+}
+
+// Deterministic bytes, so two messages compare whatever their map order.
+std::string Bytes(const pbuf::Message& m) {
+  std::string out;
+  pbuf::io::StringOutputStream raw(&out);
+  pbuf::io::CodedOutputStream coded(&raw);
+  coded.SetSerializationDeterministic(true);
+  m.SerializeToCodedStream(&coded);
+  return out;
 }
 
 // DecodeBothWays runs the two public decoders. They must agree, and the
@@ -236,6 +247,108 @@ TEST(PxfCorpus, BoundTwicePastTheSixtyFourthField) {
     std::unique_ptr<pbuf::Message> b(factory.GetPrototype(d)->New());
     EXPECT_FALSE(pxf::Unmarshal(once + once, b.get()).ok());
   }
+}
+
+// testdata/bigfloat: enc-* is a PB message and the text Marshal must write,
+// dec-* a document and the PB bytes a decoder must produce, err-* a document
+// to reject, naming its cause so it cannot pass on an unrelated error.
+TEST(PxfCorpus, BigFloat) {
+  Schema schema("bigfloat", {"bigfloat.proto"});
+  const pbuf::Descriptor* d = schema.Find("bf.v1.H");
+  ASSERT_NE(d, nullptr);
+  auto files = Fixtures("bigfloat");
+  ASSERT_EQ(files.size(), 35u);
+  int enc = 0;
+  int dec = 0;
+  int err = 0;
+  for (const auto& path : files) {
+    const std::string name = path.stem().string();
+    SCOPED_TRACE(name);
+    const std::string text = ReadFile(path);
+    fs::path wire_path = path;
+    wire_path.replace_extension(".binpb");
+    if (name.rfind("enc-", 0) == 0) {
+      auto msg = schema.New(d);
+      ASSERT_TRUE(msg->ParseFromString(ReadFile(wire_path)));
+      auto out = pxf::Marshal(*msg);
+      ASSERT_TRUE(out.ok()) << out.status().ToString();
+      EXPECT_EQ(*out, text);
+      ++enc;
+    } else if (name.rfind("dec-", 0) == 0) {
+      auto msg = schema.New(d);
+      Status st = pxf::Unmarshal(text, msg.get());
+      ASSERT_TRUE(st.ok()) << st.ToString();
+      EXPECT_EQ(Bytes(*msg), ReadFile(wire_path));
+      ++dec;
+    } else {
+      ASSERT_EQ(name.rfind("err-", 0), 0u);
+      auto msg = schema.New(d);
+      Status st = pxf::Unmarshal(text, msg.get());
+      ASSERT_FALSE(st.ok());
+      const std::string want = name == "err-suffix-on-int32" ? "field \"count\"" : "precision";
+      EXPECT_NE(st.message().find(want), std::string::npos) << st.ToString();
+      ++err;
+    }
+  }
+  EXPECT_GT(enc, 0);
+  EXPECT_GT(dec, 0);
+  EXPECT_EQ(err, 4);
+}
+
+// What a value's binary exponent may be, and that refusing a far-out literal
+// costs nothing: 1e646456992 is sixteen bytes and would otherwise build a
+// number of two billion bits.
+TEST(PxfCorpus, BigFloatExponentBound) {
+  Schema schema("bigfloat", {"bigfloat.proto"});
+  const pbuf::Descriptor* d = schema.Find("bf.v1.H");
+  auto decode = [&](const std::string& lit, pxf::UnmarshalOptions opts = {}) {
+    auto msg = schema.New(d);
+    return pxf::Unmarshal("bf = " + lit + "\n", msg.get(), opts);
+  };
+  EXPECT_TRUE(decode("1e4932").ok());
+  EXPECT_FALSE(decode("1e4933").ok());
+  EXPECT_TRUE(decode("1e-4932").ok());
+  EXPECT_FALSE(decode("1e-4933").ok());
+  EXPECT_FALSE(decode("1e646456992").ok());
+  EXPECT_FALSE(decode("1e-999999999999999999999999").ok());
+  pxf::UnmarshalOptions tight;
+  tight.max_big_float_exponent = 10;
+  EXPECT_TRUE(decode("1000", tight).ok());
+  EXPECT_FALSE(decode("1024", tight).ok());
+}
+
+// What Marshal writes reads back as the same message, across precisions
+// and across zero, tiny and huge exponents. The seed is fixed.
+TEST(PxfCorpus, BigFloatRoundTrips) {
+  Schema schema("bigfloat", {"bigfloat.proto"});
+  const pbuf::Descriptor* d = schema.Find("bf.v1.H");
+  const pbuf::Descriptor* bd = d->FindFieldByName("bf")->message_type();
+  std::mt19937 rng(20261031);
+  int ran = 0;
+  for (uint32_t prec : {8u, 24u, 53u, 64u, 113u, 256u, 1024u, 4000u}) {
+    for (int i = 0; i < 40; ++i) {
+      // A prec-bit mantissa with its top bit set, as a decoder stores it.
+      std::string mantissa((prec + 7) / 8, '\0');
+      for (char& c : mantissa) c = static_cast<char>(rng());
+      const unsigned top = (prec + 7) % 8;
+      mantissa[0] = static_cast<char>((mantissa[0] & ((1u << top) - 1)) | (1u << top));
+      const int bin = static_cast<int>(rng() % 32000) - 16000;
+      auto msg = schema.New(d);
+      auto* bf = msg->GetReflection()->MutableMessage(msg.get(), d->FindFieldByName("bf"));
+      const auto* r = bf->GetReflection();
+      r->SetString(bf, bd->FindFieldByName("mantissa"), mantissa);
+      r->SetInt32(bf, bd->FindFieldByName("exponent"), bin - static_cast<int>(prec));
+      r->SetUInt32(bf, bd->FindFieldByName("prec"), prec);
+      auto text = pxf::Marshal(*msg);
+      ASSERT_TRUE(text.ok()) << text.status().ToString();
+      auto back = schema.New(d);
+      Status st = pxf::Unmarshal(*text, back.get());
+      ASSERT_TRUE(st.ok()) << st.ToString() << "\n" << *text;
+      EXPECT_EQ(Bytes(*back), Bytes(*msg)) << *text;
+      ++ran;
+    }
+  }
+  EXPECT_EQ(ran, 320);
 }
 
 // Resolves a type URL to the message named after its last '/', as
@@ -446,16 +559,6 @@ TEST(PxfCorpus, Dataset) {
     EXPECT_EQ(materialized.ok(), it->second.accept) << materialized.ToString();
   }
   EXPECT_EQ(seen.size(), DatasetVerdicts().size());
-}
-
-// Deterministic bytes, so two messages compare whatever their map order.
-std::string Bytes(const pbuf::Message& m) {
-  std::string out;
-  pbuf::io::StringOutputStream raw(&out);
-  pbuf::io::CodedOutputStream coded(&raw);
-  coded.SetSerializationDeterministic(true);
-  m.SerializeToCodedStream(&coded);
-  return out;
 }
 
 // A verdict says a row bound, not what it bound to. Each row here must
