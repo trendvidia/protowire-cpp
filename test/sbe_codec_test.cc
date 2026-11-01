@@ -3,6 +3,7 @@
 #include "protowire/sbe.h"
 
 #include <gtest/gtest.h>
+#include "fixture_dir.h"
 #include "protoc_compat.h"
 
 #include <cstdio>
@@ -53,8 +54,8 @@ class SbeCodec : public ::testing::Test {
     source_tree_.MapPath("", PROTO_DIR);
     source_tree_.MapPath("", WKT_PROTO_DIR);
     // Map a virtual file for our schema.
-    source_tree_.MapPath("", testing::TempDir());
-    std::string schema_path = std::string(testing::TempDir()) + "/order.proto";
+    source_tree_.MapPath("", protowire_test::FixtureDir());
+    std::string schema_path = protowire_test::FixtureDir() + "/order.proto";
     FILE* f = std::fopen(schema_path.c_str(), "w");
     std::fwrite(kOrderProto, 1, std::strlen(kOrderProto), f);
     std::fclose(f);
@@ -184,8 +185,8 @@ class SbeHardening : public ::testing::Test {
   void SetUp() override {
     source_tree_.MapPath("", PROTO_DIR);
     source_tree_.MapPath("", WKT_PROTO_DIR);
-    source_tree_.MapPath("", testing::TempDir());
-    std::string schema_path = std::string(testing::TempDir()) + "/with_group.proto";
+    source_tree_.MapPath("", protowire_test::FixtureDir());
+    std::string schema_path = protowire_test::FixtureDir() + "/with_group.proto";
     FILE* f = std::fopen(schema_path.c_str(), "w");
     std::fwrite(kGroupProto, 1, std::strlen(kGroupProto), f);
     std::fclose(f);

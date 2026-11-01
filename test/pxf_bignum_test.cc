@@ -5,6 +5,7 @@
 #include "protowire/pxf.h"
 
 #include <gtest/gtest.h>
+#include "fixture_dir.h"
 #include "protoc_compat.h"
 
 #include <cstdint>
@@ -47,8 +48,8 @@ class PxfBigNum : public ::testing::Test {
   void SetUp() override {
     source_tree_.MapPath("", PROTO_DIR);
     source_tree_.MapPath("", WKT_PROTO_DIR);
-    source_tree_.MapPath("", testing::TempDir());
-    std::string proto_path = std::string(testing::TempDir()) + "/wallet.proto";
+    source_tree_.MapPath("", protowire_test::FixtureDir());
+    std::string proto_path = protowire_test::FixtureDir() + "/wallet.proto";
     FILE* f = std::fopen(proto_path.c_str(), "w");
     std::fwrite(kProto, 1, std::strlen(kProto), f);
     std::fclose(f);
