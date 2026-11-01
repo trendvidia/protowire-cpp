@@ -8,7 +8,7 @@
 // ever allocated. Token values borrow from the input buffer via
 // std::string_view, mirroring Go's `unsafe.String` zero-copy trick.
 //
-// Feature parity with the AST decoder in decode.cc:
+// It covers:
 //   - all proto3 scalars, enums, repeated, maps, nested messages
 //   - WKT sugar: Timestamp, Duration, the wrappers, Any
 //   - pxf.BigInt / pxf.Decimal / pxf.BigFloat sugar
@@ -17,9 +17,8 @@
 //   - UnmarshalOptions::discard_unknown
 //   - Result presence tracking (UnmarshalFull only)
 //
-// Public Unmarshal / UnmarshalFull live here; the AST-based path moved to
-// internal helpers in decode.cc, used only by Parse() consumers who want
-// comments preserved.
+// This is the only decoder: Parse() builds an AST for consumers who want
+// comments preserved, and nothing binds that AST to a message.
 
 #include "protowire/pxf.h"
 
