@@ -78,6 +78,11 @@ bool IsBigFloat(const pb::Descriptor* d) {
   return d && d->full_name() == "pxf.BigFloat";
 }
 
+bool IsDefaultable(const pb::Descriptor* d) {
+  return IsTimestamp(d) || IsDuration(d) || WrapperInnerCppType(d) != -1 || IsBigInt(d) ||
+         IsDecimal(d) || IsBigFloat(d);
+}
+
 const pb::FieldDescriptor* FindNullMaskField(const pb::Descriptor* d) {
   if (!d) return nullptr;
   const pb::FieldDescriptor* fd = d->FindFieldByName("_null");

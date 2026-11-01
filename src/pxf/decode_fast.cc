@@ -1495,6 +1495,18 @@ void DirectDecoder::SkipBracketed() {
   }
 }
 
+// ParseBoolDefault reads a bool default. Anything but the two PXF literals
+// is an error: `def == "true"` turned "True" into false, with no diagnostic.
+Status ParseBoolDefault(std::string_view def, const FieldDescriptor* fd, bool* out) {
+  if (def == "true" || def == "false") {
+    *out = def == "true";
+    return Status::OK();
+  }
+  return Status::Error("invalid default bool \"" + std::string(def) + "\" for field \"" +
+                       std::string(fd->name()) +
+                       "\": a PXF bool literal is exactly \"true\" or \"false\", case-sensitive");
+}
+
 // ApplyMessageDefault handles defaults for well-known message types:
 // google.protobuf.Timestamp / Duration, the wrapper types (StringValue,
 // Int32Value, …), and pxf.BigInt / Decimal / BigFloat. Mirrors
@@ -1544,9 +1556,12 @@ Status ApplyMessageDefault(Message* msg, const FieldDescriptor* fd, std::string_
           sr->SetString(sub, value_fd, std::string(def));
         }
         return Status::OK();
-      case FieldDescriptor::CPPTYPE_BOOL:
-        sr->SetBool(sub, value_fd, def == "true");
+      case FieldDescriptor::CPPTYPE_BOOL: {
+        bool b = false;
+        if (Status st = ParseBoolDefault(def, fd, &b); !st.ok()) return st;
+        sr->SetBool(sub, value_fd, b);
         return Status::OK();
+      }
       case FieldDescriptor::CPPTYPE_INT32: {
         int32_t n;
         if (!ParseInteger(def, n))
@@ -1635,7 +1650,16 @@ Status ApplyMessageDefault(Message* msg, const FieldDescriptor* fd, std::string_
 // `msg`'s `fd` slot. Mirrors protowire-go applyDefault — handles every scalar
 // kind plus enum, bytes, and the well-known message types in
 // ApplyMessageDefault above.
+//
+// ValidateFile rejects what this rejects (CheckDefaultPlacement), but
+// skip_validate bypasses that, and a scalar setter on a repeated or map field
+// aborts in libprotobuf.
 Status ApplyDefault(Message* msg, const FieldDescriptor* fd, std::string_view def) {
+  if (fd->is_repeated()) {
+    return Status::Error(std::string("default values not supported for ") +
+                         (fd->is_map() ? "map" : "repeated") + " field \"" +
+                         std::string(fd->name()) + "\"");
+  }
   const Reflection* r = msg->GetReflection();
   switch (fd->cpp_type()) {
     case FieldDescriptor::CPPTYPE_STRING: {
@@ -1651,9 +1675,12 @@ Status ApplyDefault(Message* msg, const FieldDescriptor* fd, std::string_view de
       }
       return Status::OK();
     }
-    case FieldDescriptor::CPPTYPE_BOOL:
-      r->SetBool(msg, fd, def == "true");
+    case FieldDescriptor::CPPTYPE_BOOL: {
+      bool b = false;
+      if (Status st = ParseBoolDefault(def, fd, &b); !st.ok()) return st;
+      r->SetBool(msg, fd, b);
       return Status::OK();
+    }
     case FieldDescriptor::CPPTYPE_INT32: {
       int32_t n;
       if (!ParseInteger(def, n))

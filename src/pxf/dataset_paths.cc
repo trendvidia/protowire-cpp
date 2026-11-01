@@ -27,8 +27,7 @@ bool IsPathPrefix(std::string_view prefix, std::string_view path) {
 // pxf.Secret is not one: it has a block form people write, so a path may
 // go into it, and a path into an Any names the Any's own fields.
 bool IsLiteralType(const pb::Descriptor* d) {
-  return IsTimestamp(d) || IsDuration(d) || WrapperInnerCppType(d) != -1 || IsBigInt(d) ||
-         IsDecimal(d) || IsBigFloat(d);
+  return IsDefaultable(d);
 }
 
 std::string Quoted(std::string_view s) {
