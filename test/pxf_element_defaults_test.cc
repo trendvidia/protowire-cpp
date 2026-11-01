@@ -71,7 +71,7 @@ message Leaf {
 }
 
 message KeyedDefault {
-  string name = 1 [(pxf.default) = "must-not-replace-the-entry-name"];
+  string name = 1 [(pxf.default) = "key-dflt"];
 }
 
 // Required at the root, with an element holding a field of the same name.
@@ -243,7 +243,7 @@ TEST_F(ElementDefaults, AppliedInAnyBodies) {
 TEST_F(ElementDefaults, RequiredCheckedWithTheBodysPath) {
   const std::vector<std::pair<std::string, std::string>> cases = {
       {"items = [{ deep { n = 1 } }, { deep {} }]\n", "items[1].deep.n"},
-      {"by_key = { \"k\": { deep {} } }\n", "by_key[\"k\"].deep.n"},
+      {"by_key = { \"k\": { deep {} } }\n", "by_key[\\\"k\\\"].deep.n"},
       {"by_num = { 7: { deep {} } }\n", "by_num[7].deep.n"},
       {"keyed { a { deep {} } }\n", "keyed[0].deep.n"},
       {"payload { @type = \"elemdefaults.v1.Item\" deep {} }\n", "payload.deep.n"},
@@ -266,7 +266,8 @@ TEST_F(ElementDefaults, MapErrorsAreInKeyOrder) {
   auto m = New();
   auto r = pxf::UnmarshalFull("by_key = { b: { deep {} }\n a: { deep {} } }\n", m.get(), opts_);
   ASSERT_FALSE(r.ok());
-  EXPECT_NE(r.status().message().find("by_key[\"a\"]"), std::string::npos) << r.status().ToString();
+  EXPECT_NE(r.status().message().find("by_key[\\\"a\\\"]"), std::string::npos)
+      << r.status().ToString();
 }
 
 TEST_F(ElementDefaults, NullSatisfiesRequiredAndItsBodyIsNotEntered) {
@@ -290,12 +291,58 @@ TEST_F(ElementDefaults, NullInAnElementStaysOutOfTheMask) {
   EXPECT_EQ(mask.GetReflection()->GetRepeatedString(mask, paths, 0), "one.w");
 }
 
-// The entry name wrote the key field, so its default does not apply.
-TEST_F(ElementDefaults, KeyedEntryNameCountsAsTheKeyField) {
+// An Any body under singular fields is not an element, so its null is in the
+// mask, under the Any's path. Inside an element it is not.
+TEST_F(ElementDefaults, NullInAnAnyBodyFollowsTheMaskRule) {
+  auto m = New();
+  auto r = pxf::UnmarshalFull(
+      "payload { @type = \"elemdefaults.v1.Item\" w = null }\n"
+      "items = [{ inner = { @type = \"elemdefaults.v1.Item\" w = null } }]\n",
+      m.get(),
+      opts_);
+  ASSERT_TRUE(r.ok()) << r.status().ToString();
+  EXPECT_TRUE(r->IsNull("payload.w"));
+  EXPECT_TRUE(r->IsNull("items[0].inner.w"));
+  const auto& mask = Sub(*m, "_null");
+  const auto* paths = mask.GetDescriptor()->FindFieldByName("paths");
+  ASSERT_EQ(mask.GetReflection()->FieldSize(mask, paths), 1);
+  EXPECT_EQ(mask.GetReflection()->GetRepeatedString(mask, paths, 0), "payload.w");
+}
+
+TEST_F(ElementDefaults, RequiredErrorIsAtOneOne) {
+  auto m = New("Parent");
+  auto r = pxf::UnmarshalFull("", m.get());
+  ASSERT_FALSE(r.ok());
+  ASSERT_TRUE(r.status().position().has_value());
+  EXPECT_EQ(r.status().position()->first, 1);
+  EXPECT_EQ(r.status().position()->second, 1);
+}
+
+TEST_F(ElementDefaults, AnAnyBodyPacksTheSameEveryTime) {
+  std::string first;
+  for (int i = 0; i < 20; ++i) {
+    auto m = New();
+    auto r = pxf::UnmarshalFull(
+        "payload { @type = \"elemdefaults.v1.P\" by_key = { c: {} a: {} b: {} d: {} } }\n",
+        m.get(),
+        opts_);
+    ASSERT_TRUE(r.ok()) << r.status().ToString();
+    const auto& any = Sub(*m, "payload");
+    const std::string value =
+        any.GetReflection()->GetString(any, any.GetDescriptor()->FindFieldByName("value"));
+    if (i == 0) first = value;
+    EXPECT_EQ(value, first);
+  }
+}
+
+// Matches protowire-go, the reference for every port: the entry name does
+// not count as supplying the key field, so the field's default replaces it.
+// That looks wrong, and is filed on protowire-go. Change this with Go.
+TEST_F(ElementDefaults, KeyDefaultReplacesTheEntryNameAsGoDoes) {
   auto m = New();
   auto r = pxf::UnmarshalFull("kd { alpha {} }\n", m.get(), opts_);
   ASSERT_TRUE(r.ok()) << r.status().ToString();
-  EXPECT_EQ(Str(Elem(*m, "kd", 0), "name"), "alpha");
+  EXPECT_EQ(Str(Elem(*m, "kd", 0), "name"), "key-dflt");
 }
 
 TEST_F(ElementDefaults, ElementFieldsDoNotMarkTheParent) {

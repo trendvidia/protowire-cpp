@@ -39,6 +39,8 @@
 
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/dynamic_message.h>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/message.h>
 
 #include "carrier.h"
@@ -173,8 +175,9 @@ class BodyScope {
   std::vector<MapKeys> maps_;
 };
 
-// QuoteKey quotes a string key as protowire-go's strconv.Quote does for the
-// bytes that matter in a path, so the two ports name one key alike.
+// QuoteKey quotes a string as protowire-go's strconv.Quote does, so the ports
+// name one map key alike. The difference left: strconv.Quote also escapes
+// non-printable runes above ASCII, which takes Unicode tables.
 std::string QuoteKey(const std::string& key) {
   static constexpr char kHex[] = "0123456789abcdef";
   std::string out = "\"";
@@ -186,6 +189,15 @@ std::string QuoteKey(const std::string& key) {
       case '\\':
         out += "\\\\";
         break;
+      case '\a':
+        out += "\\a";
+        break;
+      case '\b':
+        out += "\\b";
+        break;
+      case '\f':
+        out += "\\f";
+        break;
       case '\n':
         out += "\\n";
         break;
@@ -194,6 +206,9 @@ std::string QuoteKey(const std::string& key) {
         break;
       case '\t':
         out += "\\t";
+        break;
+      case '\v':
+        out += "\\v";
         break;
       default:
         if (c < 0x20 || c == 0x7f) {
@@ -676,7 +691,8 @@ class DirectDecoder {
   // TokenErrMsg describes the current token for "expected X, got Y".
   std::string TokenErrMsg() const {
     if (current_.kind == TokenKind::kIllegal) return std::string(current_.value);
-    return std::string(TokenKindName(current_.kind)) + " (\"" + std::string(current_.value) + "\")";
+    return std::string(TokenKindName(current_.kind)) + " (" +
+           QuoteKey(std::string(current_.value)) + ")";
   }
 
   // Skipping for unknown fields.
@@ -729,8 +745,8 @@ class DirectDecoder {
   Limits lim_;
   int depth_ = 0;
   std::string path_prefix_;
-  // Bodies entered that have no place in the root's _null mask, which names
-  // paths of singular fields: list elements, map values and Any bodies.
+  // List elements and map values entered. A FieldMask path names fields, so
+  // a null inside one has no place in the root's _null mask.
   int elem_depth_ = 0;
   // Context for the next DecodeFields call: it decodes one element of a
   // keyed repeated field. Consumed on entry so nested bodies don't
@@ -1022,38 +1038,45 @@ Status DirectDecoder::DecodeBlockInto(Message* sub, const FieldDescriptor* fd) {
 // On entry current_ is the @type of an Any block's type entry, the block's
 // '{' has been consumed, and the path is the Any's own.
 Status DirectDecoder::DecodeAnyInner(Message* any_msg) {
-  if (resolver_ == nullptr) {
-    return PosError(current_.pos,
-                    "a google.protobuf.Any type entry needs UnmarshalOptions::type_resolver");
-  }
   Advance();
   if (current_.kind != TokenKind::kEquals) {
-    return PosError(current_.pos, "expected '=' after @type");
+    return PosError(current_.pos, "expected '=' after @type, got " + TokenErrMsg());
   }
   Advance();
   if (current_.kind != TokenKind::kString) {
-    return PosError(current_.pos, "expected string type URL after @type =");
+    return PosError(current_.pos, "expected a string type URL after @type =, got " + TokenErrMsg());
   }
   std::string type_url(current_.value);
+  const Position url_pos = current_.pos;
   Advance();
+  if (resolver_ == nullptr) {
+    return PosError(url_pos,
+                    "cannot resolve Any type " + QuoteKey(type_url) +
+                        ": no TypeResolver (UnmarshalOptions::type_resolver)");
+  }
 
   const Descriptor* inner_desc = resolver_->FindMessageByURL(type_url);
   if (!inner_desc) {
-    return PosError(current_.pos, "cannot resolve Any type \"" + type_url + "\"");
+    return PosError(url_pos, "cannot resolve Any type " + QuoteKey(type_url));
   }
   pb::DynamicMessageFactory factory(inner_desc->file()->pool());
   std::unique_ptr<Message> inner(factory.GetPrototype(inner_desc)->New());
   // The body's fields are recorded under the Any's path, as `payload.code`.
   // It is packed to bytes below, out of the root pass's reach, so it takes
   // the post-decode pass here.
-  ++elem_depth_;
   Status st = DecodeFields(inner.get(), /*in_block=*/true);
-  --elem_depth_;
   if (st.ok() && result_) st = post_.Run(inner.get(), nullptr, path_prefix_);
   if (!st.ok()) return st;
+  // Deterministic, so one document always packs to the same bytes: map
+  // entries have no fixed order otherwise.
   std::string packed;
-  if (!inner->SerializeToString(&packed)) {
-    return Status::Error("Any inner serialization failed");
+  {
+    pb::io::StringOutputStream stream(&packed);
+    pb::io::CodedOutputStream coded(&stream);
+    coded.SetSerializationDeterministic(true);
+    if (!inner->SerializeToCodedStream(&coded) || coded.HadError()) {
+      return Status::Error("cannot marshal Any inner message");
+    }
   }
   any_msg->GetReflection()->SetString(
       any_msg, any_msg->GetDescriptor()->FindFieldByName("type_url"), std::move(type_url));
@@ -1191,8 +1214,6 @@ Status DirectDecoder::DecodeKeyedBlockBody(Message* msg,
     sub->GetReflection()->SetString(sub, key_fd, name);
     keyed_elem_ = KeyedElem{std::string(fd->name()), std::string(key_fd->name()), name, true};
     std::string saved = EnterElement(fd, result_ ? IndexSuffix(r->FieldSize(*msg, fd) - 1) : "");
-    // The entry name wrote the key field, so the document supplied it.
-    if (result_) result_->MarkPresent(path_prefix_ + std::string(key_fd->name()));
     Status st = DecodeFields(sub, /*in_block=*/true);
     LeaveElement(std::move(saved));
     if (!st.ok()) return st;
@@ -1942,7 +1963,7 @@ Status PostDecoder::Run(Message* msg,
     if (null_mask_fd != nullptr && fd->number() == null_mask_fd->number()) continue;
     std::string path = prefix + std::string(fd->name());
     if (!result_->Has(path)) {
-      if (p.required) return Status::Error("required field \"" + path + "\" is absent");
+      if (p.required) return Status::Error(1, 1, "required field " + QuoteKey(path) + " is absent");
       if (p.def.has_value() && !OneofChosen(fd, prefix)) {
         if (Status st = ApplyDefault(msg, fd, *p.def); !st.ok()) return st;
       }
