@@ -11,6 +11,7 @@
 #include "protowire/sbe.h"
 
 #include <gtest/gtest.h>
+#include "fixture_dir.h"
 #include "protoc_compat.h"
 
 #include <cstdint>
@@ -74,8 +75,8 @@ class SbeNavigation : public ::testing::Test {
   void SetUp() override {
     source_tree_.MapPath("", PROTO_DIR);
     source_tree_.MapPath("", WKT_PROTO_DIR);
-    source_tree_.MapPath("", testing::TempDir());
-    std::string schema_path = std::string(testing::TempDir()) + "/trade.proto";
+    source_tree_.MapPath("", protowire_test::FixtureDir());
+    std::string schema_path = protowire_test::FixtureDir() + "/trade.proto";
     FILE* f = std::fopen(schema_path.c_str(), "w");
     std::fwrite(kTradeProto, 1, std::strlen(kTradeProto), f);
     std::fclose(f);

@@ -13,6 +13,7 @@
 #include "protowire/pxf/parser.h"
 
 #include <gtest/gtest.h>
+#include "fixture_dir.h"
 #include "protoc_compat.h"
 
 #include <memory>
@@ -62,8 +63,8 @@ class Hardening : public ::testing::Test {
   void SetUp() override {
     source_tree_.MapPath("", PROTO_DIR);
     source_tree_.MapPath("", WKT_PROTO_DIR);
-    source_tree_.MapPath("", testing::TempDir());
-    std::string path = std::string(testing::TempDir()) + "/hardening.proto";
+    source_tree_.MapPath("", protowire_test::FixtureDir());
+    std::string path = protowire_test::FixtureDir() + "/hardening.proto";
     FILE* f = std::fopen(path.c_str(), "w");
     ASSERT_NE(f, nullptr);
     std::fwrite(kProto, 1, std::strlen(kProto), f);

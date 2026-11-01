@@ -16,6 +16,7 @@
 #include "protowire/pxf/parser.h"
 
 #include <gtest/gtest.h>
+#include "fixture_dir.h"
 #include "protoc_compat.h"
 
 #include <fstream>
@@ -298,12 +299,12 @@ message Bad {
   repeated Elem good = 6 [(pxf.key) = "name"];
 }
 )";
-  std::string path = std::string(testing::TempDir()) + "/badkey.proto";
+  std::string path = protowire_test::FixtureDir() + "/badkey.proto";
   FILE* f = std::fopen(path.c_str(), "w");
   ASSERT_NE(f, nullptr);
   std::fwrite(bad, 1, std::strlen(bad), f);
   std::fclose(f);
-  source_tree_.MapPath("", testing::TempDir());
+  source_tree_.MapPath("", protowire_test::FixtureDir());
   const pb::FileDescriptor* fd = importer_->Import("badkey.proto");
   ASSERT_NE(fd, nullptr) << errors_.last_;
   const pb::Descriptor* bad_d = importer_->pool()->FindMessageTypeByName("badkey.v1.Bad");
