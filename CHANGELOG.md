@@ -11,6 +11,16 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`null` binds only to a field with explicit presence** (protowire#339, #379, #380). On a proto3 scalar without `optional`, a proto2 `required` field, or a repeated or map field it is now rejected, in a `@dataset` cell too. Such a field has no unset state, so `null` read back as its zero value. **This rejects documents that were accepted before:** declare the field `optional`, or as a wrapper type.
+- **A raw line feed in a simple string is rejected** (protowire#350), by `Parse` and the decoder, in a `@dataset` cell too. `BindRow` writes a line feed in a cell's string as `\n`, so a cell holding the escape still binds.
+
+### Added
+
+- **`proto/pxf/secret.proto`,** the canonical `pxf.Secret` schema, which this port's copy of `proto/` lacked. The `testdata/dataset` fixtures import it.
+- **`testdata/{blocks,nulls,strings,dataset}`** and `test/pxf_corpus_test.cc`, which runs them through both decoders, `Parse`, `BindRow` and `DatasetReader`. `testdata/blocks` needed no code change: a `,` or `;` between the entries of a block was already rejected (protowire#312).
+
 ### Changed
 
 - **`Violation::name` holds the `(pxf.default)` literal for `(pxf.required)` with `(pxf.default)` on one field** (protowire-go#211). It was empty.

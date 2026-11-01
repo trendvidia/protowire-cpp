@@ -190,13 +190,13 @@ TEST_F(PxfDecode, RoundTrip) {
 TEST_F(PxfDecode, UnmarshalFullTracksNullAndAbsent) {
   std::string src = R"(
 string_field = "alice"
-int32_field = null
+nullable_int = null
 )";
   auto msg = NewAllTypes();
   auto r = protowire::pxf::UnmarshalFull(src, msg.get());
   ASSERT_TRUE(r.ok());
   EXPECT_TRUE(r->IsSet("string_field"));
-  EXPECT_TRUE(r->IsNull("int32_field"));
+  EXPECT_TRUE(r->IsNull("nullable_int"));
   EXPECT_TRUE(r->IsAbsent("bool_field"));
 }
 

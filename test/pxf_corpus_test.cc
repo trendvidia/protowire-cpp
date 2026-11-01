@@ -1,0 +1,334 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 TrendVidia, LLC.
+//
+// Drives the cross-port fixtures vendored from trendvidia/protowire's
+// testdata/ through this port. CI has no checkout of that repository, so
+// the fixtures live here; refresh a directory by copying it from there,
+// and a new file fails the test until it is given a verdict.
+//
+// A file named err-* MUST be rejected and any other MUST be accepted,
+// except in testdata/dataset, whose verdicts are the table below.
+
+#include "protowire/pxf.h"
+#include "protowire/pxf/dataset_reader.h"
+#include "protowire/pxf/parser.h"
+
+#include <gtest/gtest.h>
+#include "protoc_compat.h"
+
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <memory>
+#include <set>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <google/protobuf/compiler/importer.h>
+#include <google/protobuf/dynamic_message.h>
+
+namespace {
+
+namespace pbuf = google::protobuf;
+namespace fs = std::filesystem;
+using protowire::Status;
+namespace pxf = protowire::pxf;
+
+class CollectErrors : public pbuf::compiler::MultiFileErrorCollector {
+ public:
+  PROTOWIRE_PROTOC_RECORD_ERROR(filename, line, column, msg) {
+    last_ = std::string(filename) + ":" + std::to_string(line) + ":" + std::to_string(column) +
+            ": " + std::string(msg);
+  }
+  std::string last_;
+};
+
+std::string ReadFile(const fs::path& p) {
+  std::ifstream in(p, std::ios::binary);
+  std::stringstream ss;
+  ss << in.rdbuf();
+  return ss.str();
+}
+
+std::vector<fs::path> Fixtures(const std::string& dir) {
+  std::vector<fs::path> out;
+  for (const auto& e : fs::directory_iterator(fs::path(TESTDATA_DIR) / dir)) {
+    if (e.path().extension() == ".pxf") out.push_back(e.path());
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+bool IsReject(const fs::path& p) {
+  return p.filename().string().rfind("err-", 0) == 0;
+}
+
+// Schema compiles the named protos of one corpus directory into one pool.
+class Schema {
+ public:
+  Schema(const std::string& dir, const std::vector<std::string>& protos) {
+    tree_.MapPath("", WKT_PROTO_DIR);
+    tree_.MapPath("", PROTO_DIR);
+    tree_.MapPath("", TESTDATA_DIR);
+    tree_.MapPath("", (fs::path(TESTDATA_DIR) / dir).string());
+    importer_ = std::make_unique<pbuf::compiler::Importer>(&tree_, &errors_);
+    for (const auto& p : protos) {
+      EXPECT_NE(importer_->Import(p), nullptr) << errors_.last_;
+    }
+    factory_ = std::make_unique<pbuf::DynamicMessageFactory>(importer_->pool());
+  }
+
+  const pbuf::Descriptor* Find(const std::string& name) const {
+    return importer_->pool()->FindMessageTypeByName(name);
+  }
+
+  std::unique_ptr<pbuf::Message> New(const pbuf::Descriptor* d) const {
+    return std::unique_ptr<pbuf::Message>(factory_->GetPrototype(d)->New());
+  }
+
+ private:
+  pbuf::compiler::DiskSourceTree tree_;
+  CollectErrors errors_;
+  std::unique_ptr<pbuf::compiler::Importer> importer_;
+  std::unique_ptr<pbuf::DynamicMessageFactory> factory_;
+};
+
+// TypeOf reads the fixture's own `@type` line.
+const pbuf::Descriptor* TypeOf(const Schema& schema, const std::string& text) {
+  auto doc = pxf::Parse(text);
+  if (!doc.ok()) {
+    // A fixture the parser refuses still names its type on a line of its own.
+    std::istringstream in(text);
+    std::string line;
+    while (std::getline(in, line)) {
+      if (line.rfind("@type ", 0) == 0) return schema.Find(line.substr(6));
+    }
+    return nullptr;
+  }
+  return schema.Find(doc->type_url);
+}
+
+// DecodeBothWays runs the two public decoders. They must agree, and the
+// returned status is theirs.
+Status DecodeBothWays(const Schema& schema, const std::string& text) {
+  const pbuf::Descriptor* d = TypeOf(schema, text);
+  if (d == nullptr) return Status::Error("fixture names no known @type");
+  auto plain = schema.New(d);
+  Status a = pxf::Unmarshal(text, plain.get());
+  auto full = schema.New(d);
+  auto b = pxf::UnmarshalFull(text, full.get());
+  EXPECT_EQ(a.ok(), b.ok()) << "Unmarshal: " << a.ToString()
+                            << "\nUnmarshalFull: " << b.status().ToString();
+  return a.ok() ? b.status() : a;
+}
+
+// ParseVerdict says what the schema-less Parse of a directory must do.
+enum class ParseVerdict { kSameAsDecoder, kAccepts };
+
+void RunDecoderCorpus(const std::string& dir,
+                      const std::vector<std::string>& protos,
+                      ParseVerdict parse) {
+  Schema schema(dir, protos);
+  auto files = Fixtures(dir);
+  ASSERT_FALSE(files.empty());
+  int ran = 0;
+  for (const auto& path : files) {
+    SCOPED_TRACE(path.filename().string());
+    std::string text = ReadFile(path);
+    Status st = DecodeBothWays(schema, text);
+    if (IsReject(path)) {
+      EXPECT_FALSE(st.ok()) << "MUST be rejected";
+    } else {
+      EXPECT_TRUE(st.ok()) << st.ToString();
+    }
+    auto doc = pxf::Parse(text);
+    if (parse == ParseVerdict::kAccepts || !IsReject(path)) {
+      EXPECT_TRUE(doc.ok()) << doc.status().ToString();
+    } else {
+      EXPECT_FALSE(doc.ok()) << "Parse MUST reject";
+    }
+    ++ran;
+  }
+  EXPECT_EQ(ran, static_cast<int>(files.size()));
+}
+
+TEST(PxfCorpus, Blocks) {
+  RunDecoderCorpus("blocks", {"blocks.proto"}, ParseVerdict::kSameAsDecoder);
+}
+
+TEST(PxfCorpus, Strings) {
+  RunDecoderCorpus("strings", {"strings.proto"}, ParseVerdict::kSameAsDecoder);
+}
+
+TEST(PxfCorpus, Nulls) {
+  RunDecoderCorpus("nulls",
+                   {"nulls.proto", "nulls_proto2.proto", "nulls_editions.proto"},
+                   ParseVerdict::kAccepts);
+}
+
+// Every accept fixture in nulls/ binds null and nothing else: the message
+// stays empty and a full decode reports the field present-but-null.
+TEST(PxfCorpus, NullsLeaveTheFieldUnsetAndNull) {
+  Schema schema("nulls", {"nulls.proto", "nulls_proto2.proto", "nulls_editions.proto"});
+  int ran = 0;
+  for (const auto& path : Fixtures("nulls")) {
+    if (IsReject(path)) continue;
+    SCOPED_TRACE(path.filename().string());
+    std::string text = ReadFile(path);
+    auto doc = pxf::Parse(text);
+    ASSERT_TRUE(doc.ok()) << doc.status().ToString();
+    ASSERT_EQ(doc->entries.size(), 1u);
+    const auto& a = std::get<std::unique_ptr<pxf::Assignment>>(doc->entries[0]);
+    auto msg = schema.New(schema.Find(doc->type_url));
+    auto r = pxf::UnmarshalFull(text, msg.get());
+    ASSERT_TRUE(r.ok()) << r.status().ToString();
+    EXPECT_TRUE(r->IsNull(a->key));
+    EXPECT_EQ(msg->ByteSizeLong(), 0u);
+    ++ran;
+  }
+  EXPECT_EQ(ran, 9);
+}
+
+// An escaped line feed in a cell survives BindRow's trip through PXF text.
+TEST(PxfCorpus, CellStringKeepsAnEscapedNewline) {
+  Schema schema("dataset", {"test.proto"});
+  auto doc = pxf::Parse("@dataset test.v1.AllTypes (string_field)\n(\"a\\nb\")\n");
+  ASSERT_TRUE(doc.ok()) << doc.status().ToString();
+  const pbuf::Descriptor* d = schema.Find("test.v1.AllTypes");
+  auto msg = schema.New(d);
+  Status st = pxf::BindRow(msg.get(), doc->datasets[0].columns, doc->datasets[0].rows[0]);
+  ASSERT_TRUE(st.ok()) << st.ToString();
+  EXPECT_EQ(msg->GetReflection()->GetString(*msg, d->FindFieldByName("string_field")), "a\nb");
+}
+
+// --- @dataset ---------------------------------------------------------------
+
+struct DatasetFixture {
+  bool accept;
+  // The issue that makes this port meet the fixture, while it does not.
+  const char* gap = nullptr;
+};
+
+const std::map<std::string, DatasetFixture>& DatasetVerdicts() {
+  static const auto* table = new std::map<std::string, DatasetFixture>{
+      {"empty-rows.pxf", {true}},
+      {"rows-end-at-directive.pxf", {true}},
+      {"list-cell.pxf", {true, "#41"}},
+      {"block-cell.pxf", {true, "#41"}},
+      {"nested-cells.pxf", {true, "#41"}},
+      {"cell-framing.pxf", {true, "#41"}},
+      {"arity-long.pxf", {false}},
+      {"arity-short.pxf", {false}},
+      {"junk-between-rows.pxf", {false}},
+      {"truncated-row-eof.pxf", {false}},
+      {"truncated-row-then-rows.pxf", {false}},
+      {"with-body.pxf", {false}},
+      {"with-type.pxf", {false}},
+      {"block-on-scalar.pxf", {false}},
+      {"string-newline-in-cell.pxf", {false}},
+      {"null-on-scalar-cell.pxf", {false}},
+      {"null-on-optional-cell.pxf", {true}},
+      {"dotted-column.pxf", {true, "#43"}},
+      {"dotted-grouping.pxf", {true, "#43"}},
+      {"dotted-null-leaf.pxf", {true, "#43"}},
+      {"dotted-oneof.pxf", {true, "#43"}},
+      {"dotted-required.pxf", {true, "#43"}},
+      {"dotted-with-value-cells.pxf", {true, "#43"}},
+      {"dotted-oneof-two-members.pxf", {false}},
+      {"dotted-through-repeated.pxf", {false}},
+      {"dotted-through-map.pxf", {false}},
+      {"dotted-into-timestamp.pxf", {false}},
+      {"dotted-into-wrapper.pxf", {false}},
+      {"dotted-overlap.pxf", {false}},
+      {"duplicate-column.pxf", {false, "#43"}},
+      {"dotted-required-missing.pxf", {false}},
+      {"dotted-empty-segment.pxf", {false}},
+      {"dotted-trailing-dot.pxf", {false}},
+      {"dotted-unknown-segment.pxf", {false}},
+      {"dotted-through-scalar.pxf", {false}},
+      {"dotted-into-duration.pxf", {false}},
+      {"dotted-into-bignum.pxf", {false}},
+      {"dotted-overlap-deep.pxf", {false}},
+      {"dotted-bad-header-empty-row.pxf", {false}},
+      {"dotted-into-secret.pxf", {true, "#43"}},
+      {"dotted-into-any.pxf", {true, "#43"}},
+      {"dotted-bad-header-no-rows.pxf", {true, "#43"}},
+  };
+  return *table;
+}
+
+// BindMaterialized is `pxf validate`: parse, then bind every row.
+Status BindMaterialized(const Schema& schema, const std::string& text) {
+  auto doc = pxf::Parse(text);
+  if (!doc.ok()) return doc.status();
+  for (const auto& ds : doc->datasets) {
+    const pbuf::Descriptor* d = schema.Find(ds.type);
+    if (d == nullptr) return Status::Error("unknown row type " + ds.type);
+    for (const auto& row : ds.rows) {
+      auto msg = schema.New(d);
+      if (Status s = pxf::BindRow(msg.get(), ds.columns, row); !s.ok()) return s;
+    }
+  }
+  return Status::OK();
+}
+
+// BindStreaming reads every dataset of the document through DatasetReader.
+Status BindStreaming(const Schema& schema, const std::string& text) {
+  auto input = std::make_unique<std::istringstream>(text);
+  for (;;) {
+    auto reader = pxf::DatasetReader::Create(input.get());
+    if (!reader.ok()) return reader.status();
+    const pbuf::Descriptor* d = schema.Find((*reader)->Type());
+    if (d == nullptr) return Status::Error("unknown row type " + (*reader)->Type());
+    for (;;) {
+      auto msg = schema.New(d);
+      if (Status s = (*reader)->Scan(msg.get()); !s.ok()) return s;
+      if ((*reader)->Done()) break;
+    }
+    auto tail = (*reader)->Tail();
+    std::string rest((std::istreambuf_iterator<char>(*tail)), std::istreambuf_iterator<char>());
+    bool blank = true;
+    std::istringstream lines(rest);
+    std::string line;
+    while (std::getline(lines, line)) {
+      auto at = line.find_first_not_of(" \t\r");
+      if (at != std::string::npos && line[at] != '#') blank = false;
+    }
+    if (blank) return Status::OK();
+    if (rest.find("@dataset") == std::string::npos) {
+      return Status::Error("junk after the rows: top-level field entries");
+    }
+    input = std::make_unique<std::istringstream>(std::move(rest));
+  }
+}
+
+TEST(PxfCorpus, Dataset) {
+  Schema schema("dataset", {"test.proto", "paths.proto"});
+  auto files = Fixtures("dataset");
+  ASSERT_EQ(files.size(), DatasetVerdicts().size());
+  std::set<std::string> seen;
+  for (const auto& path : files) {
+    const std::string name = path.filename().string();
+    SCOPED_TRACE(name);
+    auto it = DatasetVerdicts().find(name);
+    ASSERT_NE(it, DatasetVerdicts().end()) << "no verdict for this fixture";
+    seen.insert(name);
+    std::string text = ReadFile(path);
+    Status materialized = BindMaterialized(schema, text);
+    Status streamed = BindStreaming(schema, text);
+    EXPECT_EQ(materialized.ok(), streamed.ok())
+        << "materialized: " << materialized.ToString() << "\nstreamed: " << streamed.ToString();
+    if (it->second.gap != nullptr) {
+      // A closed gap fails here until its entry is removed.
+      EXPECT_NE(materialized.ok(), it->second.accept)
+          << "the gap is closed; drop it from the table: " << it->second.gap;
+      continue;
+    }
+    EXPECT_EQ(materialized.ok(), it->second.accept) << materialized.ToString();
+  }
+  EXPECT_EQ(seen.size(), DatasetVerdicts().size());
+}
+
+}  // namespace

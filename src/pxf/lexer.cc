@@ -435,6 +435,12 @@ Token Lexer::LexString(Position pos) {
       }
       continue;
     }
+    if (c == '\n') {
+      return Token{
+          TokenKind::kIllegal,
+          R"(newline in string literal: write it as \n, or use a """triple-quoted""" string)",
+          pos};
+    }
     if (needs_storage) sb.push_back(static_cast<char>(c));
     Advance();
   }
