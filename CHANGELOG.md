@@ -26,6 +26,9 @@ format changes.
 - **An option at a retired extension number is diagnosed** (STABILITY.md promise 3), as the new `ViolationKind::kRetiredNumber`. A descriptor compiled before protowire v1.12.0 lost its `(pxf.required)` and `(pxf.default)` silently; it now fails to bind and must be recompiled. The check runs only in a file importing protowire's annotations, on the Options kind each number was allocated on.
 - **`UnmarshalFull` with `skip_validate` no longer aborts on a default on a repeated or map field.** It returns an error.
 - **`Marshal` leaves out an empty map,** unless `emit_defaults` is set. It wrote `name = {\n}`, which read back as present, so a required map was satisfied by nothing. **Output text changes for a message with an empty map.**
+- **`(pxf.required)` and `(pxf.default)` apply in list elements, map values, keyed entries and Any bodies** (protowire-go#161). `UnmarshalFull` checked singular message fields only, so a list element missing a required field was accepted. **This rejects documents that were accepted before, and fills defaults in where nothing was set.**
+- **A field in a list element or map value no longer marks its parent's path.** `Result` recorded it at the parent's prefix, so an element's `x` could satisfy a required `x` beside the list. It is now `items[0].x`, or `by_key["k"].x`. A field in an Any body is `payload.x`. **Paths from `Result` change for these fields.**
+- **A oneof member's default no longer destroys the member the document chose** (draft -01 §annotation-extensions, "Oneof Members"). Applying it cleared the sibling, in a singular message as well as an element.
 - **A map value takes the literal forms** (a timestamp, duration, wrapper or big number). Only a block was accepted, so a map of these failed to read back what `Marshal` wrote.
 
 ### Changed

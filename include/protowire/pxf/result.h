@@ -12,8 +12,11 @@
 namespace protowire::pxf {
 
 // Result tracks per-field presence after a UnmarshalFull. Field paths are
-// dotted (e.g. "tls.cert_file"). Set + Null are mutually exclusive; Absent
-// is the complement of both.
+// dotted (e.g. "tls.cert_file"). A field in a list element carries the
+// element's index ("items[0].label"), one in a map value its key
+// ("by_key[\"k\"].label", a bare number or bool for those key types), and one
+// in an Any body the Any's own path ("payload.code"). Set + Null are mutually
+// exclusive; Absent is the complement of both.
 //
 // Result also surfaces the document-root directives the decoder saw:
 //   - Directives()  → generic `@<name> *(prefix) [{ ... }]` blocks, in
