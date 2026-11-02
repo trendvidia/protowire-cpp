@@ -22,6 +22,7 @@ StatusOr<Codec> Codec::New(std::vector<const pb::FileDescriptor*> files, CodecOp
   Codec c;
   if (opts.max_message_size > 0) c.max_message_size_ = opts.max_message_size;
   if (opts.max_repeated_count > 0) c.max_repeated_ = opts.max_repeated_count;
+  c.validator_ = opts.validator;
   for (const pb::FileDescriptor* fd : files) {
     auto schema = GetFileUint32Option(fd, kExtSchemaID);
     if (!schema.has_value()) {

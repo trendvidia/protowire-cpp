@@ -26,6 +26,7 @@ import (
 
 	"github.com/trendvidia/protocompile"
 	"github.com/trendvidia/protocompile/linker"
+	"github.com/trendvidia/protowire-go/check"
 	"github.com/trendvidia/protowire-go/encoding/pxf"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -217,11 +218,51 @@ func run(root, dir, protoDir, protos, deftype, file string) {
 		return
 	}
 	fmt.Printf("type: %s\n", d.FullName())
+	tdoc, _ := pxf.ParseTolerant(text)
+	for _, k := range pxf.KeyedDiagnostics(tdoc, d) {
+		fmt.Printf("keyed: %s field=%s key=%s %s\n", k.Kind, quote(k.Field), quote(k.Key), quote(k.Error()))
+	}
 	if perr == nil {
 		pxf.CanonicalizeKeyed(doc, d)
 		printText("canonical", pxf.FormatDocument(doc), nil)
 	}
 	runMessage(s, d, text)
+	runSeams(s, d, text)
+}
+
+type stubValidator struct{ rep *check.Report }
+
+func (v stubValidator) Validate(any) (*check.Report, error) { return v.rep, nil }
+
+// runSeams covers the entry points that allocate the message and the
+// validator seam.
+func runSeams(s *schema, d protoreflect.MessageDescriptor, text []byte) {
+	opts := pxf.UnmarshalOptions{TypeResolver: s}
+	m, err := opts.UnmarshalDescriptor(text, d)
+	fmt.Printf("descriptor: %s\n", status(err))
+	if err == nil {
+		fmt.Printf("bytes: %s\n", bytesOf(m))
+	}
+	fm, r, err := opts.UnmarshalFullDescriptor(text, d)
+	fmt.Printf("descriptor-full: %s\n", status(err))
+	if err == nil {
+		fmt.Printf("bytes: %s\n", bytesOf(fm))
+		present := r.PresentFields()
+		sort.Strings(present)
+		fmt.Printf("present: %s\n", quote(strings.Join(present, " ")))
+	}
+	reports := []*check.Report{
+		{},
+		{Violations: []check.Violation{{Message: "bad"}}},
+		{Violations: []check.Violation{{Path: "a.b", RuleID: "test.rule", Message: "bad"}}},
+		{Violations: []check.Violation{{Path: "a", Message: "one"}, {RuleID: "r", Message: "two"}}},
+	}
+	for i, rep := range reports {
+		opts.Validator = stubValidator{rep}
+		fmt.Printf("validated %d: %s\n", i, status(opts.Unmarshal(text, dynamicpb.NewMessage(d))))
+		_, err := opts.UnmarshalFull(text, dynamicpb.NewMessage(d))
+		fmt.Printf("validated-full %d: %s\n", i, status(err))
+	}
 }
 
 // quoteRunes prints every rune through the quoter, so that the differential

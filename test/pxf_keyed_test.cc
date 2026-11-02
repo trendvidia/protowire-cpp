@@ -477,4 +477,44 @@ TEST(KeyedGrammar, QuotedEntryNamesRoundTrip) {
   EXPECT_FALSE(Parse("42 { }\n").ok());
 }
 
+TEST_F(Keyed, DiagnosticsFollowTheRejectFixtures) {
+  using protowire::pxf::KeyedDiagnostics;
+  using protowire::pxf::KeyedErrorKind;
+  struct Case {
+    const char* file;
+    KeyedErrorKind kind;
+  };
+  for (const Case& c : {Case{"err-duplicate-key.pxf", KeyedErrorKind::kDuplicateKey},
+                        Case{"err-duplicate-key-spelling.pxf", KeyedErrorKind::kDuplicateKey},
+                        Case{"err-empty-key.pxf", KeyedErrorKind::kEmptyKey},
+                        Case{"err-empty-key-anonymous.pxf", KeyedErrorKind::kEmptyKey},
+                        Case{"err-key-conflict.pxf", KeyedErrorKind::kKeyConflict},
+                        Case{"err-key-null.pxf", KeyedErrorKind::kKeyConflict},
+                        Case{"err-key-oneof-sibling.pxf", KeyedErrorKind::kKeyConflict},
+                        Case{"err-quoted-name-unkeyed.pxf", KeyedErrorKind::kQuotedNameUnkeyed}}) {
+    const std::string text = ReadFixture(c.file);
+    auto doc = protowire::pxf::ParseTolerant(text);
+    auto diags = KeyedDiagnostics(doc.document, DescOf(text));
+    ASSERT_EQ(diags.size(), 1u) << c.file;
+    EXPECT_EQ(diags[0].kind, c.kind) << c.file;
+  }
+}
+
+TEST_F(Keyed, DiagnosticsAreInSourceOrderAndQuoteLikeGo) {
+  auto doc =
+      protowire::pxf::ParseTolerant("children {\n  \"a\\\"b\" { id = \"c\" }\n  \"a\\\"b\" { }\n");
+  auto diags = protowire::pxf::KeyedDiagnostics(doc.document, Desc("keyed.v1.Node"));
+  ASSERT_EQ(diags.size(), 2u);
+  EXPECT_EQ(diags[0].msg,
+            R"(key field "id" = "c" conflicts with entry name "a\"b" in keyed field "children")");
+  EXPECT_EQ(diags[1].msg, R"(duplicate key "a\"b" in keyed field "children")");
+  EXPECT_LT(diags[0].pos.offset, diags[1].pos.offset);
+  EXPECT_STREQ(protowire::pxf::KeyedErrorKindName(diags[1].kind), "duplicate key");
+}
+
+TEST_F(Keyed, DiagnosticsToleratesNullDescriptor) {
+  auto doc = protowire::pxf::ParseTolerant("x = 1");
+  EXPECT_TRUE(protowire::pxf::KeyedDiagnostics(doc.document, nullptr).empty());
+}
+
 }  // namespace

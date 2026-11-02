@@ -194,6 +194,49 @@ void RunMessage(Schema& s, const gpb::Descriptor* d, const std::string& text) {
   PrintText("marshal-nulls", pxf::Marshal(*full, m));
 }
 
+class StubValidator : public protowire::check::Validator {
+ public:
+  explicit StubValidator(protowire::check::Report rep) : rep_(std::move(rep)) {}
+  protowire::StatusOr<protowire::check::Report> Validate(const gpb::Message&) override {
+    return rep_;
+  }
+
+ private:
+  protowire::check::Report rep_;
+};
+
+// RunSeams covers the entry points that allocate the message and the validator
+// seam.
+void RunSeams(Schema& s, const gpb::Descriptor* d, const std::string& text) {
+  pxf::UnmarshalOptions opts;
+  opts.type_resolver = &s;
+  auto m = pxf::UnmarshalDescriptor(text, d, opts);
+  std::cout << "descriptor: " << Text(m.status()) << "\n";
+  if (m.ok()) std::cout << "bytes: " << BytesOf(**m) << "\n";
+  auto f = pxf::UnmarshalFullDescriptor(text, d, opts);
+  std::cout << "descriptor-full: " << Text(f.status()) << "\n";
+  if (f.ok()) {
+    std::cout << "bytes: " << BytesOf(*f->message) << "\n";
+    std::cout << "present: " << Quote(Join(f->result.PresentFields(), " ")) << "\n";
+  }
+  using protowire::check::Report;
+  const std::vector<Report> reports = {
+      Report{},
+      Report{{{"", "", "bad"}}},
+      Report{{{"a.b", "test.rule", "bad"}}},
+      Report{{{"a", "", "one"}, {"", "r", "two"}}},
+  };
+  for (size_t i = 0; i < reports.size(); ++i) {
+    StubValidator v(reports[i]);
+    opts.validator = &v;
+    auto vm = s.New(d);
+    std::cout << "validated " << i << ": " << Text(pxf::Unmarshal(text, vm.get(), opts)) << "\n";
+    auto fm = s.New(d);
+    std::cout << "validated-full " << i << ": "
+              << Text(pxf::UnmarshalFull(text, fm.get(), opts).status()) << "\n";
+  }
+}
+
 void RunDatasets(Schema& s, const pxf::Document& doc) {
   for (const auto& ds : doc.datasets) {
     const gpb::Descriptor* d = s.Find(ds.type);
@@ -262,11 +305,17 @@ void Run(const std::string& root,
     return;
   }
   std::cout << "type: " << d->full_name() << "\n";
+  auto tolerant = pxf::ParseTolerant(text);
+  for (const auto& k : pxf::KeyedDiagnostics(tolerant.document, d)) {
+    std::cout << "keyed: " << pxf::KeyedErrorKindName(k.kind) << " field=" << Quote(k.field)
+              << " key=" << Quote(k.key) << " " << Quote(k.ToString()) << "\n";
+  }
   if (doc.ok()) {
     pxf::CanonicalizeKeyed(&*doc, d);
     PrintText("canonical", pxf::FormatDocument(*doc));
   }
   RunMessage(s, d, text);
+  RunSeams(s, d, text);
 }
 
 // AstDump writes a document's whole AST with every span, in a form the Go side

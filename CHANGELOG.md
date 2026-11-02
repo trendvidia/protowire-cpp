@@ -13,6 +13,13 @@ number says nothing about any other port. See the Releases section of
 
 ### Fixed
 
+- **A timestamp follows Go's `time.Parse`, not the RFC.** A one-digit hour (`T3:04:05Z`), a `,` before the fraction, a fraction past nine digits (cut, not rounded) and an offset up to `24:60` now read. A lower-case `t` or `z` and an offset past that are rejected. **This rejects documents that were accepted before.**
+- **`MaxNumericLiteralDigits` leaves out leading zeros** (protowire#410), for `pxf.BigInt`, `Decimal` and `BigFloat`, so a literal with a long run of them no longer fails. A `BigFloat` literal may open with `+` or `.`, as `big.Float` allows, and `inf` is reported as out of range.
+- **A `(pxf.default)` is read as protowire-go reads it, by `strconv` and package `time`.** `+5`, `nan`, `Infinity` and hex floats now work. The errors carry the text Go wraps, such as `strconv.ParseInt: parsing "x": invalid syntax`. A rejected wrapper or big number default no longer leaves an empty message on the parent, so `HasField` stays false.
+- **`Parse` matches protowire-go on more errors:** the position of the nesting limit, `@type` at the top level, `@type` beside `@dataset`, and a key with a precision suffix. **Text a caller matched on changes.** A user-supplied name or value in a decoder error is escaped as Go's `%q` does.
+- **A trailing comment stays with its entry.** `a = 1 # note` became a leading comment of the next entry, or was dropped at the end of a block. **`FormatDocument` output changes for such a document.**
+- **`body_offset` after a source or descriptor `@proto` is the end of the token.** It could be short by the literal's quotes and escapes. The brace matcher is protowire-go's.
+- **The token kind prints as `@directive`,** not `@<directive>`, in error text.
 - **`null` binds only to a field with explicit presence** (protowire#339, #379, #380). On a proto3 scalar without `optional`, a proto2 `required` field, or a repeated or map field it is now rejected, in a `@dataset` cell too. Such a field has no unset state, so `null` read back as its zero value. **This rejects documents that were accepted before:** declare the field `optional`, or as a wrapper type.
 - **A raw line feed in a simple string is rejected** (protowire#350), by `Parse` and the decoder, in a `@dataset` cell too. `BindRow` writes a line feed in a cell's string as `\n`, so a cell holding the escape still binds.
 - **A singular field or a map key bound twice in one message body is rejected** (protowire#347, #396). A second scalar replaced the first and two blocks merged; now each is an error, whatever the values. **This rejects documents that were accepted before.** A repeated map key also stayed in the message, so a `DynamicMessage` serialized both entries. Map keys compare as values of the key type, so `1:` and `"1":` on an int-keyed map are one key. Repeated fields still concatenate, a map bound twice with distinct keys still merges, and each message body is its own scope.
@@ -58,6 +65,13 @@ number says nothing about any other port. See the Releases section of
 
 ### Added
 
+- **`ParseTolerant`,** for editor tooling on a broken buffer. It returns a best-effort `Document` and every syntax error in source order, with a `BadVal` where a value is missing.
+- **`EntrySpan` and `ValueSpan`.** Every AST node has an `end` position.
+- **`TypeEntry` and `BadVal` in the AST.** An Any block's `@type = "..."` is now a `TypeEntry`, not an `Assignment` keyed `@type`. **A caller visiting `EntryPtr` or `ValuePtr` with no generic case must handle both.**
+- **`KeyedDiagnostics`,** the keyed-field errors as positioned diagnostics over a parsed document.
+- **The validator seam,** `protowire/check.h`: `check::Validator`, `check::Report`, `UnmarshalOptions::validator`, `Result::Report`, and `CodecOptions::validator` for SBE. A `Status` has only text, so `UnmarshalOptions::report` receives the report on failure.
+- **`UnmarshalDescriptor` and `UnmarshalFullDescriptor`,** which allocate the message. They return a `shared_ptr` that keeps its factory alive.
+- **`ApplyDefault`, `AppendValue` and `Result::PresentFields`.**
 - **`UnmarshalOptions::on_secret_field`,** a hook that receives each `pxf.Secret` value in place of the message. As in protowire-go's `OnSecretField`.
 - **`UnmarshalOptions::skip_post_decode`,** for a caller that runs its own required and default pass.
 - **`AppendDatasetHeader` and `AppendDatasetRow` write `@dataset` tables** (#78). A cell holds what `Marshal` writes for the field, on one line, and an empty cell reads back as the unset field or the row is refused. On error `dst` is unchanged. Text and errors match protowire-go, and a column error now quotes the name as `strconv.Quote` does.

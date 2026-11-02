@@ -2,11 +2,13 @@
 // Copyright (c) 2026 TrendVidia, LLC.
 #pragma once
 
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "protowire/check.h"
 #include "protowire/pxf/ast.h"  // Directive, DatasetDirective, ProtoDirective
 
 namespace protowire::pxf {
@@ -54,6 +56,10 @@ class Result {
     return std::vector<std::string>(present_.begin(), present_.end());
   }
 
+  // Report is the validator's report, or nullptr when none ran.
+  const check::Report* Report() const { return report_.has_value() ? &*report_ : nullptr; }
+  void SetReport(check::Report r) { report_ = std::move(r); }
+
   void MarkPresent(std::string path) { present_.insert(std::move(path)); }
   void MarkNull(std::string path) {
     null_.insert(path);
@@ -76,6 +82,7 @@ class Result {
   std::vector<Directive> directives_;
   std::vector<DatasetDirective> datasets_;
   std::vector<ProtoDirective> protos_;
+  std::optional<check::Report> report_;
 };
 
 }  // namespace protowire::pxf

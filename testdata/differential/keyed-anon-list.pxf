@@ -1,0 +1,2 @@
+@type diff.v1.Root
+named = [ { label = "" }, { label = "a" }, { label = "a" } ]

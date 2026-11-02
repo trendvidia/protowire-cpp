@@ -108,6 +108,27 @@ TEST_F(SbeCodec, RoundTrip) {
   EXPECT_EQ(r->GetUInt32(*got, desc_->FindFieldByName("side")), 2u);
 }
 
+TEST_F(SbeCodec, ValidatorRunsOnEveryDecode) {
+  class Refuse : public protowire::check::Validator {
+   public:
+    protowire::StatusOr<protowire::check::Report> Validate(const pb::Message&) override {
+      ++calls;
+      return protowire::check::Report{{{"price", "test.rule", "too low"}}};
+    }
+    int calls = 0;
+  } refuse;
+  protowire::sbe::CodecOptions opts;
+  opts.validator = &refuse;
+  auto codec = protowire::sbe::Codec::New({file_}, opts);
+  ASSERT_TRUE(codec.ok());
+  auto bytes = codec->Marshal(*NewOrder());
+  ASSERT_TRUE(bytes.ok());
+  auto got = NewOrder();
+  EXPECT_EQ(codec->Unmarshal(*bytes, got.get()).message(), "check: price: too low (test.rule)");
+  EXPECT_EQ(refuse.calls, 1);
+  EXPECT_TRUE(codec_->Unmarshal(*bytes, got.get()).ok());  // no validator
+}
+
 // HARDENING.md § UTF-8 covers SBE char[] arrays decoded into a proto3
 // string: the bytes are copied from the wire, so an invalid sequence is
 // refused at the field rather than stored.

@@ -1,0 +1,9 @@
+@type diff.v1.Root
+named {
+  "a\"b" { label = "other\tq" }
+  "a\"b" { }
+  "" { }
+  x { label = null }
+  y { label = "" }
+  z { text = "t" number = 1 }
+}

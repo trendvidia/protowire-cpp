@@ -6,6 +6,10 @@
 
 #pragma once
 
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include <google/protobuf/descriptor.h>
 
 #include "protowire/pxf/ast.h"
@@ -30,6 +34,44 @@ namespace protowire::pxf {
 // invalid document never destroys information. Callers typically follow
 // with FormatDocument; this pair is the reference `pxf fmt` pipeline.
 void CanonicalizeKeyed(Document* doc, const google::protobuf::Descriptor* desc);
+
+// KeyedErrorKind classifies the keyed-repeated-field errors of draft -01 §3.13.
+enum class KeyedErrorKind {
+  // Two entries in one keyed block whose names are equal after unquoting.
+  kDuplicateKey = 1,
+  // An explicit key-field assignment in a named entry that disagrees with the
+  // entry name, or a binding that would undo it.
+  kKeyConflict,
+  // The empty string as a key: a quoted entry name "", or an explicit
+  // assignment to the key field of an element, in either surface form.
+  kEmptyKey,
+  // A quoted entry name anywhere but in a keyed repeated field's block.
+  kQuotedNameUnkeyed,
+};
+
+const char* KeyedErrorKindName(KeyedErrorKind k);
+
+// KeyedError is one keyed-repeated-field diagnostic.
+struct KeyedError {
+  Position pos;
+  KeyedErrorKind kind;
+  std::string field;  // the keyed field's name; empty for kQuotedNameUnkeyed
+  std::string key;    // the offending key or entry name, when one applies
+  std::string msg;
+  std::string ToString() const { return pos.ToString() + ": " + msg; }
+};
+
+// KeyedDiagnostics walks a parsed document against desc and returns every keyed
+// repeated field violation of draft -01 §3.13, in source order: duplicate entry
+// names in a keyed block, empty keys, key-field assignments that disagree with
+// their entry name, and quoted entry names outside a keyed field's block.
+//
+// It is the tolerant counterpart to the errors Unmarshal returns. Editor
+// tooling runs ParseTolerant, binds a schema later, and shows these. Entries
+// that don't resolve against the schema are skipped: those are ordinary schema
+// errors.
+std::vector<KeyedError> KeyedDiagnostics(const Document& doc,
+                                         const google::protobuf::Descriptor* desc);
 
 // IsIdentifierSafeEntryName reports whether s can be written as an
 // unquoted entry name: it matches the grammar's identifier production

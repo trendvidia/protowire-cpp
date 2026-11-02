@@ -8,6 +8,7 @@
 
 #include <google/protobuf/descriptor.h>
 
+#include "protowire/check.h"
 #include "protowire/detail/status.h"
 
 namespace protowire::pxf {
@@ -55,6 +56,16 @@ struct UnmarshalOptions {
   // element. value is a view of a temporary, valid for the call. The plaintext
   // also stays in the input for the length of the decode.
   SecretFieldHook on_secret_field;
+
+  // If non-null, runs data validation on the decoded message after a
+  // successful decode. When it reports violations the decode fails with
+  // check::ErrorMessage's text; an engine failure is returned as it is.
+  // ValidateFile checks the schema, this the data against an engine's rules.
+  check::Validator* validator = nullptr;
+  // If non-null, receives the validator's report, on failure too: a Status
+  // carries text only, where Go's *check.Error carries the report. The message
+  // stays decoded. Result::Report() has it when the decode succeeds.
+  check::Report* report = nullptr;
 
   // HARDENING.md § Mandatory limits, each configurable per call; 0 selects
   // the default in protowire/limits.h. max_message_size caps the input to

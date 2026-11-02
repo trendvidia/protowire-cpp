@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -40,6 +41,21 @@ Status Unmarshal(std::string_view data, google::protobuf::Message* msg, Unmarsha
 StatusOr<Result> UnmarshalFull(std::string_view data,
                                google::protobuf::Message* msg,
                                UnmarshalOptions opts = {});
+
+// UnmarshalDescriptor decodes into a new message of type desc, for a caller with
+// a descriptor and no generated class. The message owns what it needs and desc
+// must outlive it.
+StatusOr<std::shared_ptr<google::protobuf::Message>> UnmarshalDescriptor(
+    std::string_view data, const google::protobuf::Descriptor* desc, UnmarshalOptions opts = {});
+
+// UnmarshalFullDescriptor is UnmarshalFull into a new message of type desc.
+struct DescriptorResult {
+  std::shared_ptr<google::protobuf::Message> message;
+  Result result;
+};
+StatusOr<DescriptorResult> UnmarshalFullDescriptor(std::string_view data,
+                                                   const google::protobuf::Descriptor* desc,
+                                                   UnmarshalOptions opts = {});
 
 // ApplyDefault parses def, a (pxf.default) literal, and writes it to fd of msg.
 // A caller running its own post-decode pass, as a layered config does after

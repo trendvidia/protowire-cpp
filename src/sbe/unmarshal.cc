@@ -171,7 +171,7 @@ Status Codec::Unmarshal(std::span<const uint8_t> data, pb::Message* msg) const {
       pos += entry_block;
     }
   }
-  return Status::OK();
+  return check::Validate(validator_, *msg, nullptr);
 }
 
 }  // namespace protowire::sbe

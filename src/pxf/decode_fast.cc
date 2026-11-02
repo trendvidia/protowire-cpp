@@ -2123,7 +2123,8 @@ Status CheckSchema(const Message* msg, const UnmarshalOptions& opts) {
 Status Unmarshal(std::string_view data, Message* msg, UnmarshalOptions opts) {
   if (Status s = CheckSchema(msg, opts); !s.ok()) return s;
   DirectDecoder d(data, msg, /*result=*/nullptr, opts);
-  return d.Run();
+  if (Status s = d.Run(); !s.ok()) return s;
+  return check::Validate(opts.validator, *msg, opts.report);
 }
 
 StatusOr<Result> UnmarshalFull(std::string_view data, Message* msg, UnmarshalOptions opts) {
@@ -2132,10 +2133,52 @@ StatusOr<Result> UnmarshalFull(std::string_view data, Message* msg, UnmarshalOpt
   DirectDecoder d(data, msg, &r, opts);
   Status st = d.Run();
   if (!st.ok()) return st;
-  if (opts.skip_post_decode) return r;
-  const auto* null_mask_fd = FindNullMaskField(msg->GetDescriptor());
-  if (Status pst = d.RunPostDecode(null_mask_fd); !pst.ok()) return pst;
+  if (!opts.skip_post_decode) {
+    const auto* null_mask_fd = FindNullMaskField(msg->GetDescriptor());
+    if (Status pst = d.RunPostDecode(null_mask_fd); !pst.ok()) return pst;
+  }
+  check::Report report;
+  bool has_report = false;
+  st = check::Validate(opts.validator, *msg, &report, &has_report);
+  if (has_report && opts.report != nullptr) *opts.report = report;
+  if (!st.ok()) return st;
+  if (has_report) r.SetReport(std::move(report));
   return r;
+}
+
+namespace {
+
+// OwnedMessage keeps a dynamic message and the factory it needs alive together.
+struct OwnedMessage {
+  google::protobuf::DynamicMessageFactory factory;
+  std::unique_ptr<Message> message;
+};
+
+std::shared_ptr<OwnedMessage> NewOwned(const Descriptor* desc) {
+  auto owned = std::make_shared<OwnedMessage>();
+  owned->message.reset(owned->factory.GetPrototype(desc)->New());
+  return owned;
+}
+
+}  // namespace
+
+StatusOr<std::shared_ptr<Message>> UnmarshalDescriptor(std::string_view data,
+                                                       const Descriptor* desc,
+                                                       UnmarshalOptions opts) {
+  auto owned = NewOwned(desc);
+  Message* msg = owned->message.get();
+  if (Status s = Unmarshal(data, msg, opts); !s.ok()) return s;
+  return std::shared_ptr<Message>(owned, msg);
+}
+
+StatusOr<DescriptorResult> UnmarshalFullDescriptor(std::string_view data,
+                                                   const Descriptor* desc,
+                                                   UnmarshalOptions opts) {
+  auto owned = NewOwned(desc);
+  Message* msg = owned->message.get();
+  auto r = UnmarshalFull(data, msg, opts);
+  if (!r.ok()) return r.status();
+  return DescriptorResult{std::shared_ptr<Message>(owned, msg), std::move(r).consume()};
 }
 
 }  // namespace protowire::pxf
