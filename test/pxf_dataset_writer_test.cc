@@ -182,18 +182,6 @@ message CellRequired {
 message CellRequiredHolder {
   CellRequired body = 1;
 }
-
-message EmptyRequiredList {
-  repeated int32 ints = 1 [(pxf.required) = true];
-}
-
-message EmptyRequiredMessages {
-  repeated Deep deeps = 1 [(pxf.required) = true];
-}
-
-message EmptyRequiredMap {
-  map<string, int32> counts = 1 [(pxf.required) = true];
-}
 )schema";
 
 // Every cell-shaped field of dsw.v1.Row.
@@ -966,16 +954,111 @@ TEST_F(DatasetWriter, ValueCellBodies) {
             "pxf: @dataset column \"body\": name is unset, and the field is (pxf.required)");
 }
 
-// An empty required list has no value a cell can hold. For a map or a list of
-// messages this is Go's error. For a list of scalars Go panics, or for strings
-// writes the list's address, so this port returns the same kind of error.
-TEST_F(DatasetWriter, EmptyRequiredList) {
-  EXPECT_EQ(RowError(*New(Desc("EmptyRequiredMessages")), {"deeps"}),
-            "pxf: @dataset column \"deeps\": unsupported kind: message");
-  EXPECT_EQ(RowError(*New(Desc("EmptyRequiredMap")), {"counts"}),
-            "pxf: @dataset column \"counts\": unsupported kind: message");
-  EXPECT_EQ(RowError(*New(Desc("EmptyRequiredList")), {"ints"}),
-            "pxf: @dataset column \"ints\": unsupported kind: int32");
+// An empty (pxf.required) repeated or map field is written `[]` or `{}`, which
+// the reader counts as supplied. Mirrors Go's dataset_write_required_list_test.go.
+class DatasetWriterRequiredList : public DatasetWriter {
+ protected:
+  void SetUp() override {
+    DatasetWriter::SetUp();
+    Compile("dswl.proto", R"schema(
+syntax = "proto3";
+package dswl.v1;
+
+import "pxf/annotations.proto";
+
+enum E { E_ZERO = 0; }
+message Sub { int32 x = 1; }
+message Key { string id = 1; }
+
+message Ints { repeated int32 f = 1 [(pxf.required) = true]; }
+message Strs { repeated string f = 1 [(pxf.required) = true]; }
+message Bools { repeated bool f = 1 [(pxf.required) = true]; }
+message Bys { repeated bytes f = 1 [(pxf.required) = true]; }
+message Dbls { repeated double f = 1 [(pxf.required) = true]; }
+message Flts { repeated float f = 1 [(pxf.required) = true]; }
+message Enums { repeated E f = 1 [(pxf.required) = true]; }
+message Msgs { repeated Sub f = 1 [(pxf.required) = true]; }
+message Keyed { repeated Key f = 1 [(pxf.required) = true, (pxf.key) = "id"]; }
+message Maps { map<string, int32> f = 1 [(pxf.required) = true]; }
+message MsgMaps { map<string, Sub> f = 1 [(pxf.required) = true]; }
+
+message Outer {
+  Ints ints = 1;
+  Maps maps = 2;
+  repeated Ints list = 3;
+  map<string, Maps> by_key = 4;
+}
+)schema");
+    ASSERT_NE(file_, nullptr) << errors_.last;
+  }
+
+  const pb::Descriptor* L(const std::string& name) const {
+    return importer_->pool()->FindMessageTypeByName("dswl.v1." + name);
+  }
+
+  void ExpectRoundTrip(const pb::Message& m, const Columns& cols, const std::string& want) {
+    const std::string row = Row(m, cols);
+    EXPECT_EQ(row, want);
+    ExpectReadsBack(m.GetDescriptor(), Header(m.GetDescriptor(), cols) + row, Msgs{&m});
+  }
+};
+
+TEST_F(DatasetWriterRequiredList, EmptyRequiredList) {
+  for (const char* name :
+       {"Ints", "Strs", "Bools", "Bys", "Dbls", "Flts", "Enums", "Msgs", "Keyed"}) {
+    SCOPED_TRACE(name);
+    ExpectRoundTrip(*New(L(name)), {"f"}, "([])\n");
+  }
+  for (const char* name : {"Maps", "MsgMaps"}) {
+    SCOPED_TRACE(name);
+    ExpectRoundTrip(*New(L(name)), {"f"}, "({})\n");
+  }
+}
+
+// The reader checks (pxf.required) in every body of a cell and through a dotted
+// column, so the rule holds there too.
+TEST_F(DatasetWriterRequiredList, EmptyRequiredListNested) {
+  const auto* md = L("Outer");
+  const auto field = [&](const char* name) { return md->FindFieldByName(name); };
+  {
+    SCOPED_TRACE("list in a block cell");
+    MessagePtr m = New(md);
+    m->GetReflection()->MutableMessage(m.get(), field("ints"));
+    ExpectRoundTrip(*m, {"ints"}, "({ f = [] })\n");
+    ExpectRoundTrip(*m, {"ints.f"}, "([])\n");
+  }
+  {
+    SCOPED_TRACE("map in a block cell");
+    MessagePtr m = New(md);
+    m->GetReflection()->MutableMessage(m.get(), field("maps"));
+    ExpectRoundTrip(*m, {"maps"}, "({ f = {} })\n");
+    ExpectRoundTrip(*m, {"maps.f"}, "({})\n");
+  }
+  {
+    SCOPED_TRACE("list in a list element");
+    MessagePtr m = New(md);
+    m->GetReflection()->AddMessage(m.get(), field("list"));
+    ExpectRoundTrip(*m, {"list"}, "([ { f = [] } ])\n");
+  }
+  {
+    SCOPED_TRACE("map in a map value");
+    MessagePtr m = New(md);
+    pb::Message* entry = m->GetReflection()->AddMessage(m.get(), field("by_key"));
+    const pb::Reflection* er = entry->GetReflection();
+    const auto* ed = entry->GetDescriptor();
+    er->SetString(entry, ed->map_key(), "a");
+    er->MutableMessage(entry, ed->map_value());
+    ExpectRoundTrip(*m, {"by_key"}, "({ a: { f = {} } })\n");
+  }
+}
+
+// A list with elements is untouched, and an unannotated empty list stays an
+// empty cell: only (pxf.required) changes what is written.
+TEST_F(DatasetWriterRequiredList, RequiredListWithElements) {
+  MessagePtr m = New(L("Ints"));
+  m->GetReflection()->AddInt32(m.get(), L("Ints")->FindFieldByName("f"), 7);
+  EXPECT_EQ(Row(*m, {"f"}), "([ 7 ])\n");
+  EXPECT_EQ(Row(*New(L("Outer")), {"list"}), "()\n");
 }
 
 // Dotted columns write the leaf through its parents; a row reads back as the

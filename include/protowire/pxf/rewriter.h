@@ -220,6 +220,21 @@ class Rewriter {
   struct Insertion {
     int at = 0;
     std::string text;
+    // The comma needed after the element before the insertion, when that is not
+    // next to it: a comment on that element must stay on it. -1 when none.
+    int comma_at = -1;
+  };
+  // A half-open range of source offsets.
+  struct ByteSpan {
+    int start;
+    int end;
+  };
+  // The comment ending a line, or -1s, and the line's end, or -1 when something
+  // other than a comment follows on the line.
+  struct TrailingCommentSpan {
+    int start;
+    int end;
+    int line_end;
   };
   struct RemovalSpan {
     int start = 0;
@@ -284,19 +299,30 @@ class Rewriter {
                           std::string_view field_path,
                           const KeyedElem& elem,
                           const KeyedElem* anchor);
-  Status MoveListElement(const std::string& op,
-                         std::string_view field_path,
+  Status MoveListElement(std::string_view field_path,
                          const KeyedElem& elem,
                          const KeyedElem* anchor);
   bool ListMultiline(const ListVal& lv) const;
   std::string ListElementIndent(const ListVal& lv, int scope_start) const;
-  std::pair<int, int> ListElementRemovalSpan(const ListVal& lv, int idx) const;
+  int ListComma(int from, int to) const;
+  int ListElemComma(const ListVal& lv, int idx) const;
+  int ListElemTail(const ListVal& lv, int idx) const;
+  TrailingCommentSpan TrailingComment(int off) const;
+  std::vector<ByteSpan> ListElementRemovalSpans(const ListVal& lv,
+                                                int idx,
+                                                bool keep_comment) const;
+  bool GapHasComment(int from, int to) const;
+  void StageListRemoval(const std::string& path_key, const std::vector<ByteSpan>& spans);
+  void StageSplice(const std::string& path_key, Insertion s);
   int TrailingListPad(int off) const;
   std::string RenderListElement(const KeyedBinding& b, const ValuePtr& bv) const;
-  Insertion SpliceListElementAppend(const KeyedBinding& b, const std::string& elem_text) const;
+  Insertion SpliceListElementAppend(const KeyedBinding& b,
+                                    const std::string& elem_text,
+                                    const std::string& comment) const;
   Insertion SpliceListElementBefore(const KeyedBinding& b,
                                     int idx,
-                                    const std::string& elem_text) const;
+                                    const std::string& elem_text,
+                                    const std::string& comment) const;
   int ExtendOverLeadingComments(int start) const;
 
   std::string src_;

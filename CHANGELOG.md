@@ -54,6 +54,7 @@ number says nothing about any other port. See the Releases section of
 - **A map value takes the literal forms** (a timestamp, duration, wrapper or big number). Only a block was accepted, so a map of these failed to read back what `Marshal` wrote.
 - **A bool default is exactly `true` or `false`** (protowire-go#90). Any other spelling silently became `false`; it now fails the decode. **A schema with `(pxf.default) = "True"` now fails `UnmarshalFull`.**
 - **`ViolationKindName` and `Violation::ToString` use protowire-go's text:** `keyed field option`, `default field option`, `required field option`, and `invalid (pxf.key) = "..."`.
+- **`AppendDatasetRow` writes an empty `(pxf.required)` repeated field or map as `[]` or `{}`** (protowire-go#219). The reader counts both as supplied. This port returned `unsupported kind`, and inside a block cell it left the field out, so the reader refused the row.
 
 ### Changed
 

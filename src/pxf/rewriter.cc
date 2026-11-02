@@ -164,6 +164,8 @@ const EntryPtr* FindEntry(const Entries& entries, std::string_view key) {
   return nullptr;
 }
 
+bool EntryContainsBadVal(const EntryPtr& e);
+
 // ContainsBadVal reports whether v is or contains a BadVal placeholder anywhere
 // in its value tree.
 bool ContainsBadVal(const ValuePtr& v) {
@@ -175,8 +177,7 @@ bool ContainsBadVal(const ValuePtr& v) {
   }
   if (const auto* n = As<BlockVal>(v)) {
     for (const auto& e : n->entries) {
-      const ValuePtr* val = EntryValue(e);
-      if (val != nullptr && ContainsBadVal(*val)) return true;
+      if (EntryContainsBadVal(e)) return true;
     }
   }
   return false;
@@ -1186,8 +1187,7 @@ Status Rewriter::SetKeyed(std::string_view field_path,
   if (!elem) {
     auto chain = BuildEntryChain(op, subpath, v);
     if (!chain.ok()) return chain.status();
-    Insertion ins = RenderAppendKeyedElement(bs->back(), key, std::move(chain).consume());
-    Stage({path_key, ins.at, ins.at, std::move(ins.text)});
+    StageSplice(path_key, RenderAppendKeyedElement(bs->back(), key, std::move(chain).consume()));
     return Status::OK();
   }
   auto t = ResolveIn(*elem->body, elem->ContainerOf(), subpath);
@@ -1202,7 +1202,7 @@ Rewriter::Insertion Rewriter::RenderAppendKeyedElement(const KeyedBinding& b,
                                                        Entries body) const {
   if (b.anon) {
     return SpliceListElementAppend(
-        b, RenderListElement(b, NewAnonElement(b.key_field, key, std::move(body))));
+        b, RenderListElement(b, NewAnonElement(b.key_field, key, std::move(body))), "");
   }
   return RenderAppendEntry(
       b.scope_start, b.close_off, *b.entries, NewKeyedElementBlock(key, std::move(body)));
@@ -1244,8 +1244,7 @@ Status Rewriter::RemoveKeyedElement(std::string_view field_path, std::string_vie
   path_key.push_back('\0');
   path_key += key;
   if (elem->b->anon) {
-    auto [start, end] = ListElementRemovalSpan(*elem->b->list, elem->idx);
-    Stage({std::move(path_key), start, end, ""});
+    StageListRemoval(path_key, ListElementRemovalSpans(*elem->b->list, elem->idx, false));
     return Status::OK();
   }
   RemovalSpan s = EntryRemovalSpan(*elem->node);
@@ -1277,8 +1276,7 @@ Status Rewriter::InsertKeyedElement(std::string_view field_path,
   path_key += key;
 
   if (before.empty()) {
-    Insertion ins = RenderAppendKeyedElement(bs->back(), key, CloneEntries(body));
-    Stage({std::move(path_key), ins.at, ins.at, std::move(ins.text)});
+    StageSplice(path_key, RenderAppendKeyedElement(bs->back(), key, CloneEntries(body)));
     return Status::OK();
   }
   auto anchor = FindKeyedElem<KeyedElem>(*bs, before);
@@ -1288,8 +1286,7 @@ Status Rewriter::InsertKeyedElement(std::string_view field_path,
   if (anchor->b->anon) {
     std::string text = RenderListElement(
         *anchor->b, NewAnonElement(anchor->b->key_field, key, CloneEntries(body)));
-    Insertion ins = SpliceListElementBefore(*anchor->b, anchor->idx, text);
-    Stage({std::move(path_key), ins.at, ins.at, std::move(ins.text)});
+    StageSplice(path_key, SpliceListElementBefore(*anchor->b, anchor->idx, text, ""));
     return Status::OK();
   }
   Insertion ins = RenderInsertBlockElementBefore(
@@ -1383,7 +1380,7 @@ Status Rewriter::MoveKeyedElement(std::string_view field_path,
     }
   }
   const KeyedElem* a = anchor ? &*anchor : nullptr;
-  if (elem->b->anon) return MoveListElement(op, field_path, *elem, a);
+  if (elem->b->anon) return MoveListElement(field_path, *elem, a);
   return MoveBlockElement(op, field_path, *elem, a);
 }
 
@@ -1444,29 +1441,46 @@ Status Rewriter::MoveBlockElement(const std::string& op,
 }
 
 // MoveListElement reorders an anonymous-form element by capturing its value span
-// and reinserting it before the anchor (or at the list end).
-Status Rewriter::MoveListElement(const std::string& /*op*/,
-                                 std::string_view field_path,
+// and reinserting it before the anchor (or at the list end). The element's
+// trailing comment goes along only to a line of the element's own: on an inline
+// target a line comment would swallow whatever followed it.
+Status Rewriter::MoveListElement(std::string_view field_path,
                                  const KeyedElem& elem,
                                  const KeyedElem* anchor) {
+  const ListVal& lv = *elem.b->list;
+  // Already where it was asked to go: reproduce the input.
+  if (anchor == nullptr && elem.idx == static_cast<int>(lv.elements.size()) - 1) {
+    return Status::OK();
+  }
+  if (anchor != nullptr && anchor->b->list == &lv && anchor->idx == elem.idx + 1) {
+    return Status::OK();
+  }
   const std::string text(Slice(elem.bv->pos.offset, elem.bv->end.offset));
-  auto [del_start, del_end] = ListElementRemovalSpan(*elem.b->list, elem.idx);
   std::string del_key(1, '\0');
   del_key += "keyed:mv:";
   del_key += field_path;
   del_key.push_back('\0');
   del_key += elem.key;
-  std::string ins_key = del_key;
-  ins_key.push_back('\0');
-  ins_key += "ins";
 
-  Insertion ins = anchor != nullptr ? SpliceListElementBefore(*elem.b, anchor->idx, text)
-                                    : SpliceListElementAppend(*elem.b, text);
-  // The move must not straddle: if the delete span and insert offset overlap,
-  // the element already sits where asked, so reproduce the input.
-  if (ins.at >= del_start && ins.at <= del_end) return Status::OK();
-  Stage({std::move(del_key), del_start, del_end, ""});
-  Stage({std::move(ins_key), ins.at, ins.at, std::move(ins.text)});
+  const KeyedBinding* to = anchor != nullptr ? anchor->b : elem.b;
+  bool on_own_line = ListMultiline(*to->list);
+  if (anchor != nullptr) {
+    const int p = ValuePos(to->list->elements[anchor->idx]).offset;
+    on_own_line = on_own_line && IsBlank(Slice(LineStartOffset(src_, p), p));
+  }
+  std::string comment;
+  if (on_own_line) {
+    const TrailingCommentSpan c = TrailingComment(ListElemTail(lv, elem.idx));
+    if (c.start >= 0) comment = std::string(Slice(c.start, c.end));
+  }
+
+  Insertion ins = anchor != nullptr
+                      ? SpliceListElementBefore(*anchor->b, anchor->idx, text, comment)
+                      : SpliceListElementAppend(*elem.b, text, comment);
+  StageListRemoval(del_key, ListElementRemovalSpans(lv, elem.idx, !on_own_line));
+  del_key.push_back('\0');
+  del_key += "ins";
+  StageSplice(del_key, std::move(ins));
   return Status::OK();
 }
 
@@ -1489,41 +1503,151 @@ std::string Rewriter::ListElementIndent(const ListVal& lv, int scope_start) cons
   return LineLeadingIndent(scope_start) + IndentStep();
 }
 
-// ListElementRemovalSpan returns the span to delete for element idx of lv,
-// including the comma that separates it from a neighbour, so the list stays
-// well-formed.
-std::pair<int, int> Rewriter::ListElementRemovalSpan(const ListVal& lv, int idx) const {
+// ListComma returns the offset of the first comma in [from, to), which must be
+// the gap between two list tokens, or -1. Comments in the gap are stepped over,
+// since one may hold a comma of its own.
+int Rewriter::ListComma(int from, int to) const {
+  const auto starts = [&](int i, std::string_view pre) {
+    return Slice(i, to).substr(0, pre.size()) == pre;
+  };
+  for (int i = from; i < to;) {
+    if (src_[i] == ',') return i;
+    if (src_[i] == '#' || starts(i, "//")) {
+      while (i < to && src_[i] != '\n') ++i;
+    } else if (starts(i, "/*")) {
+      const size_t n = Slice(i, to).find("*/");
+      if (n == std::string_view::npos) return -1;
+      i += static_cast<int>(n) + 2;
+    } else {
+      ++i;
+    }
+  }
+  return -1;
+}
+
+// ListElemComma returns the offset of the comma following element idx of lv, or
+// -1 for a last element with no trailing comma.
+int Rewriter::ListElemComma(const ListVal& lv, int idx) const {
+  int limit = lv.end.offset - 1;
+  if (idx < static_cast<int>(lv.elements.size()) - 1) limit = ValuePos(lv.elements[idx + 1]).offset;
+  return ListComma(ValueSpan(lv.elements[idx]).second.offset, limit);
+}
+
+// ListElemTail returns the offset where a trailing comment of element idx of lv
+// would start to look: past its comma when that sits on the element's last
+// line, else just past the element.
+int Rewriter::ListElemTail(const ListVal& lv, int idx) const {
+  const int end = ValueSpan(lv.elements[idx]).second.offset;
+  const int c = ListElemComma(lv, idx);
+  if (c >= 0 && !HasNewline(Slice(end, c))) return c + 1;
+  return end;
+}
+
+// TrailingComment finds the comment that ends the line at off. It returns the
+// comment's span, or -1s when there is none, and the offset of the line's end,
+// or -1 when something other than a comment follows off on the line. A block
+// comment counts only when it closes on the line, as in EntryRemovalSpan.
+Rewriter::TrailingCommentSpan Rewriter::TrailingComment(int off) const {
+  std::string_view src(src_);
+  int i = off + TrailingListPad(off);
+  int start = -1;
+  int end = -1;
+  if (i < Len()) {
+    std::string_view rest = src.substr(i);
+    if (rest[0] == '#' || rest.substr(0, 2) == "//") {
+      start = i;
+      while (i < Len() && src_[i] != '\n') ++i;
+      end = i;
+    } else if (rest.substr(0, 2) == "/*") {
+      const size_t n = rest.find("*/");
+      if (n != std::string_view::npos && !HasNewline(rest.substr(0, n))) {
+        start = i;
+        end = i + static_cast<int>(n) + 2;
+        i = end + TrailingListPad(end);
+      }
+    }
+  }
+  if (i >= Len() || src_[i] == '\n') return {start, end, i};
+  return {-1, -1, -1};
+}
+
+// ListElementRemovalSpans returns the spans to delete for element idx of lv: the
+// element, the comma that separates it from a neighbour so the list stays
+// well-formed, and a trailing comment on its last line unless keep_comment is
+// set. Those can be apart, with a comment on the element that stays between
+// them, which is why this is more than one span.
+//
+// An element on lines of its own goes with those lines, so the lines around it
+// survive. A last element with no trailing comma gives up the comma before it,
+// which is then not its own: a list with a trailing comma keeps that shape.
+std::vector<Rewriter::ByteSpan> Rewriter::ListElementRemovalSpans(const ListVal& lv,
+                                                                  int idx,
+                                                                  bool keep_comment) const {
   const auto& elems = lv.elements;
   auto [pos, end_pos] = ValueSpan(elems[idx]);
   int start = pos.offset;
   const int end = end_pos.offset;
+  const int comma = ListElemComma(lv, idx);
+  const int tail = ListElemTail(lv, idx);
+  const TrailingCommentSpan tc = TrailingComment(tail);
+  int line_end = tc.line_end;
+  if (keep_comment && tc.start >= 0) line_end = -1;
 
-  if (elems.size() == 1) {
-    // Sole element: leave empty brackets.
-    const int ls = LineStartOffset(src_, start);
-    if (IsBlank(Slice(ls, start))) start = ls;
-    return {start, end};
+  std::vector<ByteSpan> out;
+  if (comma >= tail) {  // on a later line than the element
+    out.push_back({comma, comma + 1 + TrailingListPad(comma + 1)});
+  } else if (comma < 0 && idx > 0) {
+    const int prev_end = ValueSpan(elems[idx - 1]).second.offset;
+    const int prev = ListComma(prev_end, start);
+    if (tc.start < 0 && prev >= 0 && !GapHasComment(prev_end, start)) {
+      // Nothing to keep between the two elements: they close up.
+      return {{prev_end, end + TrailingListPad(end)}};
+    }
+    if (prev >= 0) out.push_back({prev, prev + 1});
   }
-  if (idx < static_cast<int>(elems.size()) - 1) {
-    // Not last: consume the following comma and up to the next element's line,
-    // and this element's own leading indent.
-    const int ls = LineStartOffset(src_, start);
-    if (IsBlank(Slice(ls, start))) start = ls;
-    const int next = ValuePos(elems[idx + 1]).offset;
-    const int nls = LineStartOffset(src_, next);
-    if (IsBlank(Slice(nls, next))) return {start, nls};
-    // Inline: stop just before the next element, having eaten the comma.
-    int j = end;
-    while (j < next && src_[j] != ',') ++j;
-    if (j < next) ++j;  // comma
-    while (j < next && (src_[j] == ' ' || src_[j] == '\t')) ++j;
-    return {start, j};
+
+  const int ls = LineStartOffset(src_, start);
+  if (line_end < 0) {  // shares its last line with what follows
+    out.push_back({start, tail + TrailingListPad(tail)});
+  } else if (!IsBlank(Slice(ls, start))) {
+    while (start > ls && (src_[start - 1] == ' ' || src_[start - 1] == '\t')) --start;
+    out.push_back({start, line_end});
+  } else if (line_end < Len()) {
+    out.push_back({ls, line_end + 1});
+  } else {
+    out.push_back({ls, line_end});
   }
-  // Last element: consume the preceding comma back to the previous element's
-  // end, and any inline padding after this element (a trailing newline stays
-  // with the closing-bracket line).
-  const int prev_end = ValueSpan(elems[idx - 1]).second.offset;
-  return {prev_end, end + TrailingListPad(end)};
+  return out;
+}
+
+// GapHasComment reports whether [from, to), the gap between two list tokens,
+// holds a comment.
+bool Rewriter::GapHasComment(int from, int to) const {
+  for (char c : Slice(from, to)) {
+    if (c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != ',') return true;
+  }
+  return false;
+}
+
+// StageListRemoval stages the deletion of spans under one identity.
+void Rewriter::StageListRemoval(const std::string& path_key, const std::vector<ByteSpan>& spans) {
+  for (size_t i = 0; i < spans.size(); ++i) {
+    std::string path = path_key;
+    path.push_back('\0');
+    path += std::to_string(i);
+    Stage({std::move(path), spans[i].start, spans[i].end, ""});
+  }
+}
+
+// StageSplice stages an insertion under one identity.
+void Rewriter::StageSplice(const std::string& path_key, Insertion s) {
+  Stage({path_key, s.at, s.at, std::move(s.text)});
+  if (s.comma_at >= 0) {
+    std::string path = path_key;
+    path.push_back('\0');
+    path += "comma";
+    Stage({std::move(path), s.comma_at, s.comma_at, ","});
+  }
 }
 
 // TrailingListPad returns the count of spaces and tabs immediately after off
@@ -1542,9 +1666,12 @@ std::string Rewriter::RenderListElement(const KeyedBinding& b, const ValuePtr& b
 }
 
 // SpliceListElementAppend returns the insertion that adds elem_text as the last
-// element of b's list.
+// element of b's list, with comment after it on its line. It goes after the last
+// element's line, so a comment there stays on that element, and after a trailing
+// comma, which the new element then ends with too: the list keeps its shape.
 Rewriter::Insertion Rewriter::SpliceListElementAppend(const KeyedBinding& b,
-                                                      const std::string& elem_text) const {
+                                                      const std::string& elem_text,
+                                                      const std::string& comment) const {
   const ListVal& lv = *b.list;
   std::string indent = ListElementIndent(lv, b.scope_start);
   if (lv.elements.empty()) {
@@ -1552,26 +1679,53 @@ Rewriter::Insertion Rewriter::SpliceListElementAppend(const KeyedBinding& b,
     std::string sb = "\n" + indent + elem_text + "\n" + LineLeadingIndent(b.scope_start);
     return {b.close_off, std::move(sb)};
   }
-  const int last_end = ValueSpan(lv.elements.back()).second.offset;
-  if (ListMultiline(lv)) return {last_end, ",\n" + indent + elem_text};
-  return {last_end, ", " + elem_text};
+  const int last = static_cast<int>(lv.elements.size()) - 1;
+  const int last_end = ValueSpan(lv.elements[last]).second.offset;
+  const int comma = ListElemComma(lv, last);
+
+  if (!ListMultiline(lv)) {
+    if (comma >= 0) return {comma + 1, " " + elem_text + ","};
+    return {last_end, ", " + elem_text};
+  }
+
+  const int after = comma >= 0 ? comma + 1 : last_end;
+  const int comment_end = TrailingComment(after).end;
+  const int at = comment_end >= 0 ? comment_end : after;
+  int comma_at = -1;
+  std::string sb;
+  if (comma < 0) {
+    if (comment_end >= 0) {
+      comma_at = last_end;
+    } else {
+      sb.push_back(',');
+    }
+  }
+  sb += "\n" + indent + elem_text;
+  if (comma >= 0) sb.push_back(',');
+  if (!comment.empty()) sb += " " + comment;
+  return {at, std::move(sb), comma_at};
 }
 
 // SpliceListElementBefore returns the insertion that places elem_text
-// immediately before element idx of b's list.
+// immediately before element idx of b's list, with comment after it on its line.
+// On a list of lines it goes above the target's glued leading comments, which
+// belong to the target.
 Rewriter::Insertion Rewriter::SpliceListElementBefore(const KeyedBinding& b,
                                                       int idx,
-                                                      const std::string& elem_text) const {
+                                                      const std::string& elem_text,
+                                                      const std::string& comment) const {
   const ListVal& lv = *b.list;
   std::string indent = ListElementIndent(lv, b.scope_start);
   const int target = ValuePos(lv.elements[idx]).offset;
   if (ListMultiline(lv)) {
     const int ls = LineStartOffset(src_, target);
     if (IsBlank(Slice(ls, target))) {
-      // Insert at the target's line start: the new element takes the target's
-      // indent, then the comma and newline, leaving the target's own leading
-      // indent (already in source) intact.
-      return {ls, indent + elem_text + ",\n"};
+      // Insert at a line start: the new element takes the target's indent, then
+      // the comma and newline, leaving the lines after it intact.
+      std::string sb = indent + elem_text + ",";
+      if (!comment.empty()) sb += " " + comment;
+      sb.push_back('\n');
+      return {ExtendOverLeadingComments(ls), std::move(sb)};
     }
   }
   return {target, elem_text + ", "};

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 TrendVidia, LLC.
 // Mirrors protowire-go's rewrite_test.go, rewrite_keyed_test.go,
-// rewrite_keyed_forms_test.go and node_edit_test.go, in that order, one TEST per
+// rewrite_keyed_forms_test.go, node_edit_test.go and
+// rewrite_keyed_comments_test.go, in that order, one TEST per
 // Go test. scripts/go_differential.sh runs the same edits through both ports
 // and compares every error and every output byte.
 
@@ -1176,6 +1177,261 @@ TEST(RewriterNil, InsertKeyedElementLeavesBodyIntact) {
   ASSERT_TRUE(r->InsertKeyedElement("children", "footer", "", body).ok());
   ASSERT_EQ(body.size(), 1u);
   EXPECT_EQ(Get<Assignment>(body[0])->key, "type");
+}
+
+// Comments around the elements of an anonymous keyed list, mirroring Go's
+// rewrite_keyed_comments_test.go: an edit takes an element's own trailing
+// comment or none, never a neighbour's.
+namespace {
+
+std::string KeyedEdit(const std::string& src, const std::function<Status(Rewriter&)>& edit) {
+  return Rewrite(src, [&](Rewriter& r) {
+    r.KeyedByField("f", "k");
+    return edit(r);
+  });
+}
+
+size_t Count(const std::string& s, const std::string& sub) {
+  size_t n = 0;
+  for (size_t at = s.find(sub); at != std::string::npos; at = s.find(sub, at + sub.size())) ++n;
+  return n;
+}
+
+}  // namespace
+
+TEST(RewriterKeyedComments, AnonRemoveKeepsCommentsOfOtherElements) {
+  struct Case {
+    const char* name;
+    std::string src, key, want;
+  };
+  const Case cases[] = {
+      {"the issue: first element",
+       "f = [\n  { k = \"a\" }, # after a\n  // second\n  { k = \"b\" }\n]\n",
+       "a",
+       "f = [\n  // second\n  { k = \"b\" }\n]\n"},
+      {"last element keeps the previous element's comment",
+       "f = [\n  { k = \"a\" }, # after a\n  { k = \"b\" } # after b\n]\n",
+       "b",
+       "f = [\n  { k = \"a\" } # after a\n]\n"},
+      {"last element leaves the comment between",
+       "f = [\n  { k = \"a\" }, # after a\n  // second\n  { k = \"b\" }\n]\n",
+       "b",
+       "f = [\n  { k = \"a\" } # after a\n  // second\n]\n"},
+      {"middle element",
+       "f = [\n  { k = \"a\" }, # after a\n  // b\n  { k = \"b\" }, # after b\n  // c\n  { k = "
+       "\"c\" "
+       "}\n]\n",
+       "b",
+       "f = [\n  { k = \"a\" }, # after a\n  // b\n  // c\n  { k = \"c\" }\n]\n"},
+      {"a trailing comma stays",
+       "f = [\n  { k = \"a\" },\n  { k = \"b\" },\n]\n",
+       "b",
+       "f = [\n  { k = \"a\" },\n]\n"},
+      {"sole element with a comma and a comment",
+       "f = [\n  { k = \"a\" }, # after a\n]\n",
+       "a",
+       "f = [\n]\n"},
+      {"block comment between inline elements",
+       "f = [ { k = \"a\" }, /* b */ { k = \"b\" } ]\n",
+       "b",
+       "f = [ { k = \"a\" } /* b */ ]\n"},
+      {"a comma in a comment is not the separator",
+       "f = [\n  { k = \"a\" } # x, y\n  , { k = \"b\" }\n]\n",
+       "a",
+       "f = [\n  { k = \"b\" }\n]\n"},
+      {"an element sharing its line keeps the next one's indent",
+       "f = [\n  { k = \"a\" }, { k = \"b\" }\n]\n",
+       "a",
+       "f = [\n  { k = \"b\" }\n]\n"},
+  };
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.name);
+    EXPECT_EQ(KeyedEdit(c.src, [&](Rewriter& r) { return r.RemoveKeyedElement("f", c.key); }),
+              c.want);
+  }
+}
+
+TEST(RewriterKeyedComments, AnonInsertKeepsComments) {
+  struct Case {
+    const char* name;
+    std::string src, before, want;
+  };
+  const Case cases[] = {
+      {"the issue: trailing comma",
+       "f = [\n  { k = \"a\" }, # after a\n]\n",
+       "",
+       "f = [\n  { k = \"a\" }, # after a\n  {\n    k = \"b\"\n  },\n]\n"},
+      {"no trailing comma, a comment",
+       "f = [\n  { k = \"a\" } # after a\n]\n",
+       "",
+       "f = [\n  { k = \"a\" }, # after a\n  {\n    k = \"b\"\n  }\n]\n"},
+      {"block comment",
+       "f = [\n  { k = \"a\" } /* after a */\n]\n",
+       "",
+       "f = [\n  { k = \"a\" }, /* after a */\n  {\n    k = \"b\"\n  }\n]\n"},
+      {"no comment, as before",
+       "f = [\n  { k = \"a\" }\n]\n",
+       "",
+       "f = [\n  { k = \"a\" },\n  {\n    k = \"b\"\n  }\n]\n"},
+      {"inline with a trailing comma",
+       "f = [ { k = \"a\" } /* a */, ]\n",
+       "",
+       "f = [ { k = \"a\" } /* a */, {\n    k = \"b\"\n  }, ]\n"},
+      {"before an anchor, above its comment",
+       "f = [\n  { k = \"a\" }, # after a\n  // second\n  { k = \"c\" }\n]\n",
+       "c",
+       "f = [\n  { k = \"a\" }, # after a\n  {\n    k = \"b\"\n  },\n  // second\n  { k = \"c\" "
+       "}\n]\n"},
+  };
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.name);
+    EXPECT_EQ(
+        KeyedEdit(c.src, [&](Rewriter& r) { return r.InsertKeyedElement("f", "b", c.before, {}); }),
+        c.want);
+  }
+}
+
+TEST(RewriterKeyedComments, AnonMoveKeepsComments) {
+  const std::string src =
+      "f = [\n  { k = \"a\" }, # after a\n  // second\n  { k = \"b\" }, # after b\n  { k = \"c\" } "
+      "# after c\n]\n";
+  struct Case {
+    const char* name;
+    std::string key, before, want;
+  };
+  const Case cases[] = {
+      {"to the end",
+       "a",
+       "",
+       "f = [\n  // second\n  { k = \"b\" }, # after b\n  { k = \"c\" }, # after c\n  { k = \"a\" "
+       "} "
+       "# after a\n]\n"},
+      {"last to first",
+       "c",
+       "a",
+       "f = [\n  { k = \"c\" }, # after c\n  { k = \"a\" }, # after a\n  // second\n  { k = \"b\" "
+       "} "
+       "# after b\n]\n"},
+      {"before its successor", "a", "b", src},
+      {"last to the end", "c", "", src},
+  };
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.name);
+    EXPECT_EQ(KeyedEdit(src, [&](Rewriter& r) { return r.MoveKeyedElement("f", c.key, c.before); }),
+              c.want);
+  }
+
+  // A line comment cannot follow an element into an inline list.
+  const std::string got =
+      KeyedEdit("f = [\n  { k = \"a\" }, { k = \"b\" },\n  { k = \"c\" } # after c\n]\n",
+                [](Rewriter& r) { return r.MoveKeyedElement("f", "c", "b"); });
+  EXPECT_TRUE(Has(got, "# after c")) << got;
+  EXPECT_TRUE(pxf::Parse(got).ok()) << got;
+  EXPECT_EQ(Count(got, "k ="), 3u);
+}
+
+// The anchor of a move may sit in another binding of the field, and its index
+// counts in that binding's list.
+TEST(RewriterKeyedComments, AnonMoveToAnchorInAnotherBinding) {
+  EXPECT_EQ(KeyedEdit("f = [\n  { k = \"a\" },\n  { k = \"b\" },\n  { k = \"c\" }\n]\nf = [\n  { k "
+                      "= \"d\" }\n]\n",
+                      [](Rewriter& r) { return r.MoveKeyedElement("f", "a", "d"); }),
+            "f = [\n  { k = \"b\" },\n  { k = \"c\" }\n]\nf = [\n  { k = \"a\" },\n  { k = \"d\" "
+            "}\n]\n");
+}
+
+// With the shorter list holding the element, that index is past its end.
+TEST(RewriterKeyedComments, AnonMoveToAnchorPastTheElementsList) {
+  EXPECT_EQ(KeyedEdit("f = [\n  { k = \"a\" }\n]\nf = [\n  { k = \"c\" },\n  { k = \"d\" }\n]\n",
+                      [](Rewriter& r) { return r.MoveKeyedElement("f", "a", "d"); }),
+            "f = [\n]\nf = [\n  { k = \"c\" },\n  { k = \"a\" },\n  { k = \"d\" }\n]\n");
+}
+
+// Every edit of every layout: the output parses, each surviving element keeps
+// its own comment on its own line, and a comment between elements is never
+// lost. The removed element's trailing comment is the only one that may go.
+TEST(RewriterKeyedComments, AnonCommentsSurviveEveryEdit) {
+  const std::vector<std::string> keys = {"a", "b", "c"};
+  const auto elem = [](const std::string& k, bool comma, const std::string& trail) {
+    std::string s = "  { k = \"" + k + "\" }";
+    if (comma) s += ",";
+    if (!trail.empty()) {
+      s += " " + trail + " after " + k;
+      if (trail == "/*") s += " */";
+    }
+    return s + "\n";
+  };
+  int checked = 0;
+  for (const std::string trail : {"", "#", "//", "/*"}) {
+    for (bool between : {false, true}) {
+      for (bool trailing_comma : {false, true}) {
+        std::string src = "f = [\n";
+        for (size_t i = 0; i < keys.size(); ++i) {
+          if (between) src += "  // before " + keys[i] + "\n";
+          src += elem(keys[i], i + 1 < keys.size() || trailing_comma, trail);
+        }
+        src += "]\n";
+
+        const auto check = [&](const std::string& name,
+                               const std::string& gone,
+                               const std::function<Status(Rewriter&)>& edit) {
+          SCOPED_TRACE(name + " of\n" + src);
+          const std::string got = KeyedEdit(src, edit);
+          ASSERT_TRUE(pxf::Parse(got).ok()) << got;
+          ++checked;
+          for (const std::string& k : keys) {
+            if (between) EXPECT_TRUE(Has(got, "// before " + k + "\n")) << got;
+            if (trail.empty() || k == gone) continue;
+            bool ok = false;
+            std::istringstream lines(got);
+            for (std::string line; std::getline(lines, line);) {
+              if (Has(line, "after " + k)) ok = Has(line, "k = \"" + k + "\"");
+            }
+            EXPECT_TRUE(ok) << "comment on " << k << " moved or lost, gave\n" << got;
+          }
+        };
+        for (const std::string& k : keys) {
+          check("remove " + k, k, [&](Rewriter& r) { return r.RemoveKeyedElement("f", k); });
+          check("insert before " + k, "", [&](Rewriter& r) {
+            return r.InsertKeyedElement("f", "new", k, {});
+          });
+          check(
+              "move to end " + k, "", [&](Rewriter& r) { return r.MoveKeyedElement("f", k, ""); });
+          for (const std::string& to : keys) {
+            if (to == k) continue;
+            check("move " + k + " before " + to, "", [&](Rewriter& r) {
+              return r.MoveKeyedElement("f", k, to);
+            });
+          }
+        }
+        check("append", "", [](Rewriter& r) { return r.InsertKeyedElement("f", "new", "", {}); });
+      }
+    }
+  }
+  EXPECT_EQ(checked, 4 * 2 * 2 * (3 * 5 + 1));
+}
+
+TEST(RewriterKeyedComments, SetRefusesNestedBadVal) {
+  const auto block = [](EntryPtr e) {
+    auto b = std::make_unique<BlockVal>();
+    b->entries.push_back(std::move(e));
+    return ValuePtr(std::move(b));
+  };
+  const auto bad = [] { return Assign("x", Bad()); };
+  std::vector<ValuePtr> values;
+  values.push_back(block(bad()));
+  values.push_back(block(Blk("b", bad())));
+  values.push_back(block(Blk("b", Blk("c", bad()))));
+  values.push_back(List(block(MapE("m", block(Blk("b", bad()))))));
+  for (const ValuePtr& v : values) {
+    auto r = MustNew("a = 1\n");
+    Status st = r->Set("a", v);
+    EXPECT_FALSE(st.ok());
+    EXPECT_TRUE(Has(st.message(), "cannot write a BadVal placeholder")) << st.message();
+    st = r->ReplaceValue(Get<Assignment>(r->Document()->entries[0])->value, v);
+    EXPECT_FALSE(st.ok());
+    EXPECT_TRUE(Has(st.message(), "cannot write a BadVal placeholder")) << st.message();
+  }
 }
 
 }  // namespace

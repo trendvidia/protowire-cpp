@@ -156,13 +156,11 @@ Status WriteCell(const Message& m,
     return WriteCellLiteral(sub, out);
   }
   if (!o.has_default && !o.required) return Status::OK();  // empty: absent, as it reads back
+  if (fd->is_repeated()) {
+    *out += EmptyCollection(fd);  // only required gets here: a default is refused on these
+    return Status::OK();
+  }
   if (!fd->has_presence()) {
-    if (fd->is_repeated()) {
-      // Go hands the empty list to its scalar writer here. For a map or a list
-      // of messages that is this error. For a list of scalars Go panics, or
-      // for strings writes the list's address, neither of which can be matched.
-      return Status::Error("unsupported kind: " + std::string(fd->type_name()));
-    }
     WriteCellScalar(m, fd, out);  // the zero value, explicitly
     return Status::OK();
   }
@@ -243,12 +241,19 @@ class RowPresence {
 
 }  // namespace
 
+// EmptyCollection is the literal for a list or map field with nothing in it. An
+// empty keyed list could be `{}` as well; the reader takes `[]`.
+const char* EmptyCollection(const FieldDescriptor* fd) {
+  return fd->is_map() ? "{}" : "[]";
+}
+
 // CellUnset decides how a value cell writes fd, which msg does not set. Inside
 // a cell, as in a row, the reader applies (pxf.default) to an absent field and
 // checks (pxf.required), so an unset annotated field is written the way
 // WriteCell writes one: a field without presence as its zero value (*write), a
 // message-typed field as null, and an optional or oneof scalar not at all,
-// which reads back as its default. A oneof member is not written when a
+// which reads back as its default. A required list or map has no presence, so
+// it is a write too, of EmptyCollection. A oneof member is not written when a
 // sibling is set: the sibling keeps its default off. An unset required field
 // with presence cannot be written. An unannotated field is not written.
 Status CellUnset(const Message& msg,
