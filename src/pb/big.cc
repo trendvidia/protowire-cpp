@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -66,6 +67,52 @@ bool ParseDigits(const std::string& s, size_t pos, size_t end, std::vector<uint8
   // Strip leading zero bytes; fully zero magnitude is represented as empty.
   while (!mag.empty() && mag.front() == 0) mag.erase(mag.begin());
   return true;
+}
+
+void TrimLeadingZeros(std::vector<uint8_t>& mag) {
+  mag.erase(mag.begin(), std::find_if(mag.begin(), mag.end(), [](uint8_t b) { return b != 0; }));
+}
+
+// The bit length of a magnitude with no leading zero byte.
+int64_t BitLen(const std::vector<uint8_t>& mag) {
+  if (mag.empty()) return 0;
+  int64_t n = static_cast<int64_t>(mag.size() - 1) * 8;
+  for (uint8_t top = mag.front(); top != 0; top >>= 1) ++n;
+  return n;
+}
+
+// Drops the low n bits of a magnitude, 0 < n < its bit length, rounding half to
+// even as big.Float does.
+void ShiftRightRounded(std::vector<uint8_t>& mag, int64_t n) {
+  const auto bit = [&](int64_t i) {
+    return ((mag[mag.size() - 1 - static_cast<size_t>(i / 8)] >> (i % 8)) & 1) != 0;
+  };
+  const bool half = bit(n - 1);
+  bool sticky = false;
+  for (int64_t i = 0; i < n - 1 && !sticky; ++i) sticky = bit(i);
+
+  mag.resize(mag.size() - static_cast<size_t>(n / 8));
+  if (const int shift = static_cast<int>(n % 8); shift != 0) {
+    for (size_t i = mag.size(); i-- > 0;) {
+      const unsigned high = i == 0 ? 0 : mag[i - 1];
+      mag[i] = static_cast<uint8_t>(((high << 8) | mag[i]) >> shift);
+    }
+  }
+  if (half && (sticky || (mag.back() & 1) != 0)) AddU8(mag, 1);
+  TrimLeadingZeros(mag);
+}
+
+void ShiftLeft(std::vector<uint8_t>& mag, int64_t n) {
+  if (const int shift = static_cast<int>(n % 8); shift != 0) {
+    unsigned carry = 0;
+    for (auto it = mag.rbegin(); it != mag.rend(); ++it) {
+      const unsigned v = (static_cast<unsigned>(*it) << shift) | carry;
+      *it = static_cast<uint8_t>(v & 0xff);
+      carry = v >> 8;
+    }
+    if (carry != 0) mag.insert(mag.begin(), static_cast<uint8_t>(carry));
+  }
+  mag.resize(mag.size() + static_cast<size_t>(n / 8), 0);
 }
 
 std::string FormatMagnitude(const std::vector<uint8_t>& mag) {
@@ -219,8 +266,10 @@ void MarshalDecimalMsg(const Decimal& v, std::vector<uint8_t>& out) {
     wire::AppendBytes(out, v.unscaled);
   }
   if (v.scale != 0) {
+    // `int32 scale = 2`: a plain varint, a negative value sign-extended to 64
+    // bits. Zigzag is sint32, which this field is not.
     wire::AppendTag(out, 2, wire::kVarint);
-    wire::AppendVarint(out, wire::EncodeZigZag(static_cast<int64_t>(v.scale)));
+    wire::AppendVarint(out, static_cast<uint64_t>(static_cast<int64_t>(v.scale)));
   }
   if (v.negative) {
     wire::AppendTag(out, 3, wire::kVarint);
@@ -228,15 +277,57 @@ void MarshalDecimalMsg(const Decimal& v, std::vector<uint8_t>& out) {
   }
 }
 
+// Writes the form protowire-go writes, which is one per value: the mantissa as
+// a prec-bit integer with its top bit set, and a zero with no exponent. A value
+// is rounded to prec first, since that is what prec means.
 void MarshalBigFloatMsg(const BigFloat& v, std::vector<uint8_t>& out) {
-  if (v.prec == 0) return;
-  if (!v.mantissa.empty()) {
-    wire::AppendTag(out, 1, wire::kBytes);
-    wire::AppendBytes(out, v.mantissa);
+  if (v.prec == 0) {
+    // ±0, and its sign is all there is to write (protowire#410).
+    if (v.negative) {
+      wire::AppendTag(out, 4, wire::kVarint);
+      wire::AppendVarint(out, 1);
+    }
+    return;
   }
-  if (v.exponent != 0) {
+  const int64_t prec = v.prec;
+  std::vector<uint8_t> mantissa = v.mantissa;
+  TrimLeadingZeros(mantissa);
+  int64_t exponent = 0;
+  if (!mantissa.empty()) {
+    exponent = v.exponent;
+    if (const int64_t bits = BitLen(mantissa); bits > prec) {
+      ShiftRightRounded(mantissa, bits - prec);
+      exponent += bits - prec;
+    }
+    const int64_t bits = BitLen(mantissa);
+    const int64_t widened = exponent + bits - prec;
+    // Two values have no canonical form, and pb::Marshal cannot refuse them
+    // (#93), so they keep the form they were given, which is the same number.
+    // The exponent can leave int32. And from 2^31 bits Go's Marshal has no
+    // behaviour to match, since it crashes, while widening here would allocate
+    // up to 512 MiB for five bytes of prec.
+    if (prec > std::numeric_limits<int32_t>::max() ||
+        widened < std::numeric_limits<int32_t>::min() ||
+        widened > std::numeric_limits<int32_t>::max()) {
+      mantissa = v.mantissa;
+      exponent = v.exponent;
+    } else {
+      if (bits > prec) {
+        ShiftRightRounded(mantissa, bits - prec);  // the round up carried past the top bit
+      } else {
+        ShiftLeft(mantissa, prec - bits);
+      }
+      exponent = widened;
+    }
+  }
+  if (!mantissa.empty()) {
+    wire::AppendTag(out, 1, wire::kBytes);
+    wire::AppendBytes(out, mantissa);
+  }
+  if (exponent != 0) {
+    // `int32 exponent = 2`: a plain varint, as for Decimal.scale.
     wire::AppendTag(out, 2, wire::kVarint);
-    wire::AppendVarint(out, wire::EncodeZigZag(static_cast<int64_t>(v.exponent)));
+    wire::AppendVarint(out, static_cast<uint64_t>(exponent));
   }
   wire::AppendTag(out, 3, wire::kVarint);
   wire::AppendVarint(out, v.prec);
@@ -275,29 +366,31 @@ Status ReadFields(std::span<const uint8_t> data, const char* message, Msg& out, 
 
 Status UnmarshalBigIntMsg(std::span<const uint8_t> data, BigInt& out) {
   out = {};
-  return ReadFields(data,
-                    "BigInt",
-                    out,
-                    [](std::span<const uint8_t> d,
-                       wire::FieldNumber num,
-                       wire::WireType,
-                       BigInt& v,
-                       int& consumed) -> Status {
-                      if (num == 1) {
-                        std::span<const uint8_t> b;
-                        int n = wire::ConsumeBytes(d, b);
-                        if (n < 0) return Status::Error("corrupt abs in BigInt");
-                        v.abs.assign(b.begin(), b.end());
-                        consumed = n;
-                      } else if (num == 2) {
-                        uint64_t x;
-                        int n = wire::ConsumeVarint(d, x);
-                        if (n < 0) return Status::Error("corrupt negative in BigInt");
-                        v.negative = x != 0;
-                        consumed = n;
-                      }
-                      return Status::OK();
-                    });
+  Status st = ReadFields(data,
+                         "BigInt",
+                         out,
+                         [](std::span<const uint8_t> d,
+                            wire::FieldNumber num,
+                            wire::WireType,
+                            BigInt& v,
+                            int& consumed) -> Status {
+                           if (num == 1) {
+                             std::span<const uint8_t> b;
+                             int n = wire::ConsumeBytes(d, b);
+                             if (n < 0) return Status::Error("corrupt abs in BigInt");
+                             v.abs.assign(b.begin(), b.end());
+                             consumed = n;
+                           } else if (num == 2) {
+                             uint64_t x;
+                             int n = wire::ConsumeVarint(d, x);
+                             if (n < 0) return Status::Error("corrupt negative in BigInt");
+                             v.negative = x != 0;
+                             consumed = n;
+                           }
+                           return Status::OK();
+                         });
+  if (!st.ok()) return st;
+  return Status::OK();
 }
 
 Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out, int max_digits) {
@@ -321,7 +414,8 @@ Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out, int max_
                              uint64_t x;
                              int n = wire::ConsumeVarint(d, x);
                              if (n < 0) return Status::Error("corrupt scale in Decimal");
-                             v.scale = static_cast<int32_t>(wire::DecodeZigZag(x));
+                             // Plain varint: the low 32 bits, read as signed.
+                             v.scale = static_cast<int32_t>(x);
                              consumed = n;
                            } else if (num == 3) {
                              uint64_t x;
@@ -344,43 +438,86 @@ Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out, int max_
   return Status::OK();
 }
 
-Status UnmarshalBigFloatMsg(std::span<const uint8_t> data, BigFloat& out) {
+Status UnmarshalBigFloatMsg(std::span<const uint8_t> data, BigFloat& out, int max_exponent) {
   out = {};
-  return ReadFields(data,
-                    "BigFloat",
-                    out,
-                    [](std::span<const uint8_t> d,
-                       wire::FieldNumber num,
-                       wire::WireType,
-                       BigFloat& v,
-                       int& consumed) -> Status {
-                      if (num == 1) {
-                        std::span<const uint8_t> b;
-                        int n = wire::ConsumeBytes(d, b);
-                        if (n < 0) return Status::Error("corrupt mantissa in BigFloat");
-                        v.mantissa.assign(b.begin(), b.end());
-                        consumed = n;
-                      } else if (num == 2) {
-                        uint64_t x;
-                        int n = wire::ConsumeVarint(d, x);
-                        if (n < 0) return Status::Error("corrupt exponent in BigFloat");
-                        v.exponent = static_cast<int32_t>(wire::DecodeZigZag(x));
-                        consumed = n;
-                      } else if (num == 3) {
-                        uint64_t x;
-                        int n = wire::ConsumeVarint(d, x);
-                        if (n < 0) return Status::Error("corrupt prec in BigFloat");
-                        v.prec = static_cast<uint32_t>(x);
-                        consumed = n;
-                      } else if (num == 4) {
-                        uint64_t x;
-                        int n = wire::ConsumeVarint(d, x);
-                        if (n < 0) return Status::Error("corrupt negative in BigFloat");
-                        v.negative = x != 0;
-                        consumed = n;
-                      }
-                      return Status::OK();
-                    });
+  if (max_exponent <= 0) max_exponent = kMaxBigFloatExponent;
+  Status st = ReadFields(data,
+                         "BigFloat",
+                         out,
+                         [](std::span<const uint8_t> d,
+                            wire::FieldNumber num,
+                            wire::WireType,
+                            BigFloat& v,
+                            int& consumed) -> Status {
+                           if (num == 1) {
+                             std::span<const uint8_t> b;
+                             int n = wire::ConsumeBytes(d, b);
+                             if (n < 0) return Status::Error("corrupt mantissa in BigFloat");
+                             v.mantissa.assign(b.begin(), b.end());
+                             consumed = n;
+                           } else if (num == 2) {
+                             uint64_t x;
+                             int n = wire::ConsumeVarint(d, x);
+                             if (n < 0) return Status::Error("corrupt exponent in BigFloat");
+                             // Plain varint, as for Decimal.scale.
+                             v.exponent = static_cast<int32_t>(x);
+                             consumed = n;
+                           } else if (num == 3) {
+                             uint64_t x;
+                             int n = wire::ConsumeVarint(d, x);
+                             if (n < 0) return Status::Error("corrupt prec in BigFloat");
+                             // big.Float's largest precision, which SetPrec clamps to.
+                             v.prec = static_cast<uint32_t>(
+                                 std::min<uint64_t>(x, std::numeric_limits<uint32_t>::max()));
+                             consumed = n;
+                           } else if (num == 4) {
+                             uint64_t x;
+                             int n = wire::ConsumeVarint(d, x);
+                             if (n < 0) return Status::Error("corrupt negative in BigFloat");
+                             v.negative = x != 0;
+                             consumed = n;
+                           }
+                           return Status::OK();
+                         });
+  if (!st.ok()) return st;
+  // A precision of zero is a zero, signed by negative, whatever else is there.
+  if (out.prec == 0) {
+    out.mantissa.clear();
+    out.exponent = 0;
+    return Status::OK();
+  }
+  TrimLeadingZeros(out.mantissa);
+  const int64_t bits = BitLen(out.mantissa);
+  if (bits == 0) {  // a zero at any exponent
+    out.exponent = 0;
+    return Status::OK();
+  }
+  // Rendering the value costs time that grows with the square of its binary
+  // exponent, and five attacker-written bytes set that, so the bound comes
+  // first (HARDENING.md § Mandatory limits, protowire#281).
+  const int64_t binary = out.exponent + bits;
+  if (binary > max_exponent || binary < -int64_t{max_exponent}) {
+    return Status::Error("pxf.BigFloat binary exponent " + std::to_string(binary) +
+                         " exceeds MaxBigFloatExponent=" + std::to_string(max_exponent));
+  }
+  // The value is the mantissa rounded to prec. The bound was on the wire's
+  // mantissa, so a round up can land one past it, as in protowire-go. Only a
+  // narrowing is done here: widening to prec is Marshal's, because a decode
+  // must not allocate what five bytes of prec ask for.
+  const int64_t prec = out.prec;
+  int64_t exponent = out.exponent;
+  if (bits > prec) {
+    ShiftRightRounded(out.mantissa, bits - prec);
+    exponent += bits - prec;
+  }
+  // Only a bound raised near INT32_MAX reaches this: big.Float's exponent is
+  // an int32, and past it the value would be an infinity (protowire#278).
+  if (exponent + BitLen(out.mantissa) > std::numeric_limits<int32_t>::max()) {
+    return Status::Error("pxf.BigFloat exponent " + std::to_string(out.exponent) + " with a " +
+                         std::to_string(bits) + "-bit mantissa overflows big.Float");
+  }
+  out.exponent = static_cast<int32_t>(exponent);
+  return Status::OK();
 }
 
 }  // namespace detail

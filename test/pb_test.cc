@@ -124,8 +124,8 @@ TEST(Pb, BigNumRoundTrip) {
   orig.price.scale = 4;
   orig.price.negative = false;
 
-  // BigFloat with prec 128 and a synthetic mantissa.
-  orig.coefficient.mantissa = {0x12, 0x34, 0x56, 0x78};
+  // BigFloat with prec 128, its mantissa a 128-bit integer.
+  orig.coefficient.mantissa = std::vector<uint8_t>(16, 0x92);
   orig.coefficient.exponent = 5;
   orig.coefficient.prec = 128;
   orig.coefficient.negative = false;
@@ -419,6 +419,182 @@ TEST(PbHardening, DecimalScaleBound) {
   opts.max_numeric_literal_digits = 8;
   EXPECT_FALSE(Unmarshal(with_scale(9), got, opts).ok());
   EXPECT_TRUE(Unmarshal(with_scale(8), got, opts).ok());
+}
+
+// The tests below are protowire-go's limits_test.go: TestBigFloatExponentBound
+// and TestBigFloatExponentBoundEdges, then the bytes Go writes.
+struct BigFloatHolder {
+  protowire::pb::BigFloat F;
+  std::vector<protowire::pb::BigFloat> R;
+  PROTOWIRE_FIELDS(BigFloatHolder, PROTOWIRE_FIELD(1, F), PROTOWIRE_FIELD(2, R))
+};
+
+// Field 1 as a pxf.BigFloat, by hand, so the decoder sees what no encoder writes.
+std::vector<uint8_t> BigFloatWire(const std::vector<uint8_t>& mant, int32_t exp, uint64_t prec) {
+  namespace wire = protowire::wire;
+  std::vector<uint8_t> sub;
+  wire::AppendTag(sub, 1, wire::kBytes);
+  wire::AppendBytes(sub, mant);
+  wire::AppendTag(sub, 2, wire::kVarint);
+  wire::AppendVarint(sub, static_cast<uint64_t>(static_cast<int64_t>(exp)));
+  wire::AppendTag(sub, 3, wire::kVarint);
+  wire::AppendVarint(sub, prec);
+  std::vector<uint8_t> out;
+  wire::AppendTag(out, 1, wire::kBytes);
+  wire::AppendBytes(out, sub);
+  return out;
+}
+
+int64_t BinaryExponent(const protowire::pb::BigFloat& f) {
+  int64_t bits = static_cast<int64_t>(f.mantissa.size() - 1) * 8;
+  for (uint8_t top = f.mantissa.front(); top != 0; top >>= 1) ++bits;
+  return f.exponent + bits;
+}
+
+TEST(PbHardening, BigFloatExponentBound) {
+  constexpr int32_t kBound = protowire::kMaxBigFloatExponent;
+  const std::vector<uint8_t> mant = {25};  // 5 bits, so the binary exponent is exp + 5
+  for (int32_t exp : {-kBound - 5, -1, 0, 1, kBound - 5}) {
+    BigFloatHolder h;
+    ASSERT_TRUE(Unmarshal(BigFloatWire(mant, exp, 64), h).ok()) << exp;
+    EXPECT_EQ(BinaryExponent(h.F), int64_t{exp} + 5);
+  }
+  for (int32_t exp : {std::numeric_limits<int32_t>::min(),
+                      -kBound - 6,
+                      kBound - 4,
+                      std::numeric_limits<int32_t>::max()}) {
+    BigFloatHolder h;
+    auto st = Unmarshal(BigFloatWire(mant, exp, 64), h);
+    ASSERT_FALSE(st.ok()) << exp;
+    EXPECT_NE(st.message().find("MaxBigFloatExponent"), std::string::npos) << st.ToString();
+  }
+  // The bound is a per-call limit, as the draft's limits are.
+  protowire::pb::UnmarshalOptions opts;
+  opts.max_big_float_exponent = 10;
+  BigFloatHolder h;
+  auto st = Unmarshal(BigFloatWire(mant, 6, 64), h, opts);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("MaxBigFloatExponent=10"), std::string::npos) << st.ToString();
+  EXPECT_TRUE(Unmarshal(BigFloatWire(mant, 5, 64), h, opts).ok());
+}
+
+TEST(PbHardening, BigFloatExponentBoundEdges) {
+  constexpr int32_t kBound = protowire::kMaxBigFloatExponent;
+  constexpr int32_t kMin = std::numeric_limits<int32_t>::min();
+  constexpr int32_t kMax = std::numeric_limits<int32_t>::max();
+  // A zero mantissa is zero at any exponent, and stores none.
+  for (const std::vector<uint8_t>& mant : {std::vector<uint8_t>{}, std::vector<uint8_t>{0, 0}}) {
+    for (int32_t exp : {kMin, kMax}) {
+      BigFloatHolder h;
+      ASSERT_TRUE(Unmarshal(BigFloatWire(mant, exp, 64), h).ok());
+      EXPECT_TRUE(h.F.mantissa.empty());
+      EXPECT_EQ(h.F.exponent, 0);
+      EXPECT_EQ(h.F.prec, 64u);
+    }
+  }
+  {  // prec 0 is zero at any exponent
+    BigFloatHolder h;
+    ASSERT_TRUE(Unmarshal(BigFloatWire({1}, kMin, 0), h).ok());
+    EXPECT_TRUE(h.F.mantissa.empty());
+    EXPECT_EQ(h.F.exponent, 0);
+    EXPECT_TRUE(h.F.IsZero());
+  }
+  {  // Leading zero bytes are not mantissa bits.
+    BigFloatHolder h;
+    EXPECT_TRUE(Unmarshal(BigFloatWire({0, 0, 1}, kBound - 1, 64), h).ok());
+    auto st = Unmarshal(BigFloatWire({0, 0, 1}, kBound, 64), h);
+    ASSERT_FALSE(st.ok());
+    EXPECT_NE(st.message().find("MaxBigFloatExponent"), std::string::npos) << st.ToString();
+  }
+  {  // A raised bound still refuses what big.Float's int32 exponent cannot hold.
+    // Go reaches this with a bound of MaxInt; this port's int stops at INT32_MAX,
+    // so only a round that carries past it gets here.
+    protowire::pb::UnmarshalOptions opts;
+    opts.max_big_float_exponent = kMax;
+    BigFloatHolder h;
+    auto st = Unmarshal(BigFloatWire({0xFF}, kMax - 8, 1), h, opts);
+    ASSERT_FALSE(st.ok());
+    EXPECT_NE(st.message().find("overflows"), std::string::npos) << st.ToString();
+  }
+  // Pinned, as in Go: the bound is on the wire's mantissa, and rounding 0xFF to
+  // one bit carries the decoded value one past it.
+  BigFloatHolder h;
+  ASSERT_TRUE(Unmarshal(BigFloatWire({0xFF}, kBound - 8, 1), h).ok());
+  EXPECT_EQ(BinaryExponent(h.F), kBound + 1);
+  // Pinned divergence, open on #93: Go's Marshal refuses this value, and
+  // pb::Marshal, which returns no Status, writes it. This fails the day that
+  // decision lands.
+  EXPECT_FALSE(Marshal(h).empty());
+}
+
+TEST(PbHardening, BigFloatPrecisionClampsToBigFloatsLargest) {
+  BigFloatHolder h;
+  ASSERT_TRUE(Unmarshal(BigFloatWire({25}, -5, uint64_t{1} << 32), h).ok());
+  EXPECT_EQ(h.F.prec, std::numeric_limits<uint32_t>::max());
+  // Go's Marshal crashes here. This one must not allocate 512 MiB instead: it
+  // keeps the mantissa as it is, and five bytes of prec buy nothing.
+  EXPECT_LT(Marshal(h).size(), 32u);
+}
+
+// Each row's bytes are what protowire-go's Marshal wrote for the row's fields,
+// from the differential's rows in testdata/differential/pb-bignum/wire.txt. The
+// comment on each says why it is a trap for this codec.
+TEST(Pb, BigFloatWireIsGos) {
+  using protowire::pb::BigFloat;
+  struct Row {
+    BigFloat in;
+    std::vector<uint8_t> want;
+  };
+  const std::vector<Row> rows = {
+      // Exponent -5 widens to -64 on the way out, a plain varint of ten bytes.
+      {{{25}, -5, 64, false},
+       {0x0a, 0x17, 0x0a, 0x08, 0xc8, 0,    0,    0,    0,    0,    0,    0,   0x10,
+        0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0x18, 0x40}},
+      // A zero has no exponent and keeps its precision.
+      {{{}, 5, 64, false}, {0x0a, 0x02, 0x18, 0x40}},
+      // -0 at prec 0 is its sign alone (protowire#410).
+      {{{}, 0, 0, true}, {0x0a, 0x02, 0x20, 0x01}},
+      // A tie rounds to even: 0xa8 is 0b101|01000 at three bits, so 0b101.
+      {{{0xa8}, 0, 3, false}, {0x0a, 0x07, 0x0a, 0x01, 0x05, 0x10, 0x05, 0x18, 0x03}},
+      // Past a tie it rounds up: 0xb8 is 0b101|11000, so 0b110.
+      {{{0xb8}, 0, 3, false}, {0x0a, 0x07, 0x0a, 0x01, 0x06, 0x10, 0x05, 0x18, 0x03}},
+  };
+  for (const Row& row : rows) {
+    BigFloatHolder h;
+    h.F = row.in;
+    EXPECT_EQ(Marshal(h), row.want);
+  }
+  // +0 at prec 0 is no field at all, but an element is always written.
+  BigFloatHolder empty;
+  EXPECT_TRUE(Marshal(empty).empty());
+  empty.R.resize(1);
+  EXPECT_EQ(Marshal(empty), (std::vector<uint8_t>{0x12, 0x00}));
+}
+
+TEST(Pb, DecimalScaleIsAPlainVarint) {
+  BigNumStruct v;
+  v.price.unscaled = {5};
+  v.price.scale = -2;
+  EXPECT_EQ(Marshal(v),
+            (std::vector<uint8_t>{0x12,
+                                  0x0e,
+                                  0x0a,
+                                  0x01,
+                                  0x05,
+                                  0x10,
+                                  0xfe,
+                                  0xff,
+                                  0xff,
+                                  0xff,
+                                  0xff,
+                                  0xff,
+                                  0xff,
+                                  0xff,
+                                  0xff,
+                                  0x01}));
+  BigNumStruct got;
+  ASSERT_TRUE(Unmarshal(Marshal(v), got).ok());
+  EXPECT_EQ(got.price.scale, -2);
 }
 
 // proto3 packs repeated numerics by default; the reference's pb.Marshal
