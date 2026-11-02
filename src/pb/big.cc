@@ -390,6 +390,9 @@ Status UnmarshalBigIntMsg(std::span<const uint8_t> data, BigInt& out) {
                            return Status::OK();
                          });
   if (!st.ok()) return st;
+  // A value, as in protowire-go: no leading zeros, and no -0.
+  TrimLeadingZeros(out.abs);
+  if (out.abs.empty()) out.negative = false;
   return Status::OK();
 }
 
@@ -435,6 +438,9 @@ Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out, int max_
     return Status::Error("pxf.Decimal scale " + std::to_string(out.scale) +
                          " exceeds MaxNumericLiteralDigits=" + std::to_string(max_digits));
   }
+  // A value, as in protowire-go: no leading zeros, and no -0.
+  TrimLeadingZeros(out.unscaled);
+  if (out.unscaled.empty()) out.negative = false;
   return Status::OK();
 }
 

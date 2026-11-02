@@ -597,6 +597,47 @@ TEST(Pb, DecimalScaleIsAPlainVarint) {
   EXPECT_EQ(got.price.scale, -2);
 }
 
+TEST(Pb, BigNumbersDecodeToValues) {
+  BigNumStruct got;
+  // BigInt {abs: 00 00 05}, and Decimal {unscaled: 00 05, negative}.
+  ASSERT_TRUE(Unmarshal(std::vector<uint8_t>{0x0a,
+                                             0x05,
+                                             0x0a,
+                                             0x03,
+                                             0,
+                                             0,
+                                             5,  //
+                                             0x12,
+                                             0x06,
+                                             0x0a,
+                                             0x02,
+                                             0,
+                                             5,
+                                             0x18,
+                                             0x01},
+                        got)
+                  .ok());
+  EXPECT_EQ(got.balance.abs, (std::vector<uint8_t>{5}));
+  EXPECT_EQ(got.price.unscaled, (std::vector<uint8_t>{5}));
+  // -0 is 0: BigInt {abs: 00, negative}, and Decimal {negative}.
+  ASSERT_TRUE(Unmarshal(std::vector<uint8_t>{0x0a,
+                                             0x05,
+                                             0x0a,
+                                             0x01,
+                                             0,
+                                             0x10,
+                                             0x01,  //
+                                             0x12,
+                                             0x02,
+                                             0x18,
+                                             0x01},
+                        got)
+                  .ok());
+  EXPECT_TRUE(got.balance.IsZero());
+  EXPECT_FALSE(got.balance.negative);
+  EXPECT_FALSE(got.price.negative);
+}
+
 // proto3 packs repeated numerics by default; the reference's pb.Marshal
 // and protoc-generated encoders write ListHolder { values: [1, 2, 3] } as
 // `0a 03 01 02 03`, and this codec wrote `08 01 08 02 08 03` (#32). Every
