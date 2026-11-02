@@ -3,6 +3,7 @@
 #include "protowire/pxf/parser.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
@@ -1051,7 +1052,7 @@ StatusOr<std::optional<ValuePtr>> Parser::ParseRowCell() {
 }
 
 int FindMatchingBrace(std::string_view input, int open_offset) {
-  enum class Mode { kCode, kString, kTripleString, kBytes, kLineComment, kBlockComment };
+  enum class Mode : uint8_t { kCode, kString, kTripleString, kBytes, kLineComment, kBlockComment };
   Mode mode = Mode::kCode;
   int depth = 1;
   bool esc = false;

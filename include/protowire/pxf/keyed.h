@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,7 +37,7 @@ namespace protowire::pxf {
 void CanonicalizeKeyed(Document* doc, const google::protobuf::Descriptor* desc);
 
 // KeyedErrorKind classifies the keyed-repeated-field errors of draft -01 §3.13.
-enum class KeyedErrorKind {
+enum class KeyedErrorKind : uint8_t {
   // Two entries in one keyed block whose names are equal after unquoting.
   kDuplicateKey = 1,
   // An explicit key-field assignment in a named entry that disagrees with the

@@ -296,7 +296,7 @@ void DiagKeyedBlock(const std::vector<EntryPtr>& entries,
                     const pb::FieldDescriptor* fd,
                     const pb::FieldDescriptor* key_fd,
                     std::vector<KeyedError>* out) {
-  const std::string field(fd->name());
+  const std::string_view field = fd->name();
   std::unordered_set<std::string> seen;
   for (const auto& e : entries) {
     std::string name;
@@ -319,7 +319,7 @@ void DiagKeyedBlock(const std::vector<EntryPtr>& entries,
     if (name.empty()) {
       out->push_back(KeyedError{pos,
                                 KeyedErrorKind::kEmptyKey,
-                                field,
+                                std::string(field),
                                 "",
                                 "empty entry name in keyed field " + detail::GoQuote(field) +
                                     ": the empty string is not a valid key"});
@@ -327,11 +327,11 @@ void DiagKeyedBlock(const std::vector<EntryPtr>& entries,
       out->push_back(KeyedError{
           pos,
           KeyedErrorKind::kDuplicateKey,
-          field,
+          std::string(field),
           name,
           "duplicate key " + detail::GoQuote(name) + " in keyed field " + detail::GoQuote(field)});
     }
-    const KeyedElem elem{field, key_fd, name, true};
+    const KeyedElem elem{std::string(field), key_fd, name, true};
     DiagEntries(*body, fd->message_type(), &elem, out);
   }
 }

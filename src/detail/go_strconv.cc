@@ -3,6 +3,7 @@
 #include "protowire/detail/go_strconv.h"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -30,7 +31,7 @@ std::string NumError(const char* fn, std::string_view s, const char* why) {
 constexpr const char* kSyntax = "invalid syntax";
 constexpr const char* kRange = "value out of range";
 
-enum class Uint { kOk, kSyntax, kRange };
+enum class Uint : uint8_t { kOk, kSyntax, kRange };
 
 // ParseUint's loop: a bad byte past the point of overflow is never reached.
 Uint ReadUint(std::string_view s, int bits, uint64_t* out) {
@@ -258,7 +259,7 @@ bool GoParseFloat(std::string_view s, int bits, double* out, std::string* err) {
 }
 
 std::string GoDurationError(std::string_view orig) {
-  const std::string invalid = "time: invalid duration " + TimeQuote(orig);
+  std::string invalid = "time: invalid duration " + TimeQuote(orig);
   std::string_view s = orig;
   if (!s.empty() && (s[0] == '-' || s[0] == '+')) s.remove_prefix(1);
   if (s.empty()) return invalid;
