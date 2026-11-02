@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"unicode/utf8"
 
 	"github.com/trendvidia/protowire-go/encoding/pb"
 	"github.com/trendvidia/protowire-go/encoding/pxf"
@@ -77,13 +76,8 @@ func pbStreams(w io.Writer) {
 	}
 }
 
-// decoded prints a message that decoded. Go does not check UTF-8 here, and
-// HARDENING.md § UTF-8 says a decoder must, so this applies the rule until
-// protowire-cpp#94 is decided. Remove it then.
+// decoded prints a message that decoded.
 func decoded(m *dynamicpb.Message) string {
-	if fd := m.Descriptor().Fields().ByName("symbol"); fd != nil && !utf8.ValidString(m.Get(fd).String()) {
-		return "sbe: invalid UTF-8 in string field symbol"
-	}
 	out, err := pxf.Marshal(m)
 	if err != nil {
 		return "ok " + status(err)

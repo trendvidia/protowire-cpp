@@ -54,6 +54,7 @@
 
 #include "protowire/detail/status.h"
 #include "protowire/detail/stream.h"
+#include "protowire/detail/utf8.h"
 #include "protowire/detail/wire.h"
 #include "protowire/limits.h"
 #include "protowire/pb_big.h"
@@ -471,7 +472,12 @@ inline Status UnmarshalScalar(std::span<const uint8_t> data,
     int n = wire::ConsumeBytes(data, bytes);
     if (n < 0) return Status::Error("corrupt string");
     consumed = n;
-    v.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    // HARDENING.md § UTF-8. Every string reaches this case: a singular field, a
+    // list element, a map key and a map value. Declare a proto bytes field as
+    // std::vector<uint8_t>.
+    std::string_view text(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    if (!::protowire::detail::IsValidUTF8(text)) return Status::Error("invalid UTF-8 in string");
+    v.assign(text);
   } else if constexpr (std::is_same_v<T, std::vector<uint8_t>>) {
     std::span<const uint8_t> bytes;
     int n = wire::ConsumeBytes(data, bytes);

@@ -17,7 +17,7 @@ target_link_libraries(protowire_detail_test PRIVATE
 gtest_discover_tests(protowire_detail_test)
 
 if(TARGET protowire_pb AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pb_test.cc)
-  add_executable(protowire_pb_test pb_test.cc pb_stream_test.cc)
+  add_executable(protowire_pb_test pb_test.cc pb_stream_test.cc pb_utf8_test.cc)
   target_link_libraries(protowire_pb_test PRIVATE
     protowire_pb GTest::gtest GTest::gtest_main)
   gtest_discover_tests(protowire_pb_test)
