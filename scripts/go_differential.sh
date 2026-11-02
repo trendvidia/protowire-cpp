@@ -139,6 +139,27 @@ if [ "$variants" -lt 900 ] || [ "$decoded" -lt 100 ] || [ "$framing" -lt 100 ]; 
 fi
 echo "$variants damaged streams decoded alike: $decoded messages, $framing framing errors"
 
+# Big numbers on the pb wire: hand-built messages and every damaged form of them,
+# each decoded under three bounds and written back.
+"$work/godiff.bin" --pb-big "$here/testdata/differential/pb-bignum/wire.txt" > "$work/go.pbbig"
+"$pxf_diff" --pb-big "$here/testdata/differential/pb-bignum/wire.txt" > "$work/cpp.pbbig"
+if ! cmp -s "$work/go.pbbig" "$work/cpp.pbbig"; then
+  echo "pb big numbers differ:" >&2
+  diff "$work/go.pbbig" "$work/cpp.pbbig" | head -"${PBBIG_DIFF_LINES:-40}" >&2 || true
+  [ -n "${DIFF_OUT:-}" ] && cp "$work/go.pbbig" "$DIFF_OUT.go.pbbig" &&
+    cp "$work/cpp.pbbig" "$DIFF_OUT.cpp.pbbig"
+  exit 1
+fi
+rows=$(LC_ALL=C awk '/^=== /{n++} END{print n+0}' "$work/go.pbbig")
+damaged=$(LC_ALL=C awk '/^--- /{n++} END{print n+0}' "$work/go.pbbig")
+accepted=$(LC_ALL=C awk '/^ok /{n++} END{print n+0}' "$work/go.pbbig")
+bounded=$(LC_ALL=C awk '/MaxBigFloatExponent=/{n++} END{print n+0}' "$work/go.pbbig")
+if [ "$rows" -lt 150 ] || [ "$damaged" -lt 2000 ] || [ "$bounded" -lt 10 ]; then
+  echo "pb big numbers ran only $rows rows, $damaged damaged, $bounded bounded" >&2
+  exit 2
+fi
+echo "$rows big-number decodes and $damaged damaged ones alike: $accepted accepted, $bounded past the bound"
+
 docs=$(wc -l < "$manifest" | tr -d ' ')
 for f in go cpp; do
   ran=$(LC_ALL=C awk '/^=== /{n++} END{print n+0}' "$work/$f.out")
