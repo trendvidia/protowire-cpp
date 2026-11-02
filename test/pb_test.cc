@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 TrendVidia, LLC.
 #include "protowire/pb.h"
-#include "protowire/check.h"
 
 #include <gtest/gtest.h>
 
