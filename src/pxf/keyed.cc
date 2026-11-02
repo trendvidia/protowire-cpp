@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "format_internal.h"
 #include "protowire/detail/go_quote.h"
 #include "protowire/pxf/annotations.h"
 
@@ -60,28 +61,6 @@ void DropKeyAssignments(std::vector<EntryPtr>& entries,
     out.push_back(std::move(e));
   }
   entries = std::move(out);
-}
-
-// ExplicitKeyOf returns the value of the single explicit `key_name = "…"`
-// assignment among entries; false when there is none, more than one, or
-// it is not a string.
-bool ExplicitKeyOf(const std::vector<EntryPtr>& entries,
-                   std::string_view key_name,
-                   std::string* key) {
-  bool found = false;
-  for (const auto& e : entries) {
-    const auto* a = std::holds_alternative<std::unique_ptr<Assignment>>(e)
-                        ? std::get<std::unique_ptr<Assignment>>(e).get()
-                        : nullptr;
-    if (!a || a->key != key_name) continue;
-    const auto* sv = std::holds_alternative<std::unique_ptr<StringVal>>(a->value)
-                         ? std::get<std::unique_ptr<StringVal>>(a->value).get()
-                         : nullptr;
-    if (!sv || a->key_quoted || found) return false;
-    *key = sv->value;
-    found = true;
-  }
-  return found;
 }
 
 // CanonKeyedEntries normalizes the entries of a keyed block in place:
@@ -495,6 +474,25 @@ bool IsIdentifierSafeEntryName(std::string_view s) {
 void CanonicalizeKeyed(Document* doc, const pb::Descriptor* desc) {
   if (doc == nullptr || desc == nullptr) return;
   CanonEntries(doc->entries, desc);
+}
+
+bool ExplicitKeyOf(const std::vector<EntryPtr>& entries,
+                   std::string_view key_name,
+                   std::string* key) {
+  bool found = false;
+  for (const auto& e : entries) {
+    const auto* a = std::holds_alternative<std::unique_ptr<Assignment>>(e)
+                        ? std::get<std::unique_ptr<Assignment>>(e).get()
+                        : nullptr;
+    if (!a || a->key != key_name) continue;
+    const auto* sv = std::holds_alternative<std::unique_ptr<StringVal>>(a->value)
+                         ? std::get<std::unique_ptr<StringVal>>(a->value).get()
+                         : nullptr;
+    if (!sv || a->key_quoted || found) return false;
+    *key = sv->value;
+    found = true;
+  }
+  return found;
 }
 
 }  // namespace protowire::pxf
