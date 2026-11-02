@@ -1,0 +1,4 @@
+@type diff.v1.Plain
+name = null
+leaf { label = null }
+items = [ { wrapped = null } ]

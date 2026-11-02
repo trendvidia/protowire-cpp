@@ -1,0 +1,32 @@
+@type wire.v1.All
+f_double = 1.5
+f_float = 2.5
+f_int64 = -3
+f_uint64 = 4
+f_int32 = -5
+f_fixed64 = 6
+f_fixed32 = 7
+f_bool = true
+f_string = "s"
+f_bytes = b"AQID"
+f_uint32 = 8
+f_enum = E_ONE
+f_sfixed32 = -9
+f_sfixed64 = -10
+f_sint32 = -11
+f_sint64 = -12
+f_msg { a = 1 y = "why" z = 2 }
+unpacked = [1, 2]
+packed = [1, -2, 300]
+packed_s = [-1, 1]
+packed_d = [1.5, -2.5]
+packed_e = [E_ONE, E_ZERO]
+strs = ["a", ""]
+msgs = [ { x = 1 z = 2 }, { } ]
+m_str = { b: 1 a: 2 "": 0 }
+m_int = { 10: "t" 9: "n" -1: "m" }
+m_bool = { true: { x = 0 } false: { } }
+m_u64 = { 18446744073709551615: b"AA==" 1: b"" }
+q = "first"
+s { x = 3 a = 1 }
+late = 9

@@ -21,4 +21,14 @@ inline std::string Base64EncodeStd(const std::vector<uint8_t>& v) {
 // Decodes standard or RawStd (un-padded) base64. Returns nullopt on error.
 std::optional<std::vector<uint8_t>> Base64DecodeStd(std::string_view s);
 
+// Base64DecodeProto takes a @proto descriptor body, padded standard or URL
+// base64. On failure *offset is the byte Go's CorruptInputError names for the
+// URL decode, the last one protowire-go tries.
+std::optional<std::vector<uint8_t>> Base64DecodeProto(std::string_view s, size_t* offset);
+
+// Base64DecodeLenient takes standard or URL base64, padded or not, as PXF
+// bytes literals do (protowire-go's decodeBase64Lenient). On failure *offset
+// is where StdEncoding failed.
+std::optional<std::vector<uint8_t>> Base64DecodeLenient(std::string_view s, size_t* offset);
+
 }  // namespace protowire::detail

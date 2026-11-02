@@ -1,0 +1,3 @@
+@type diff.v1.Root
+any { @type = "diff.v1.Leaf" text = "t" after = "z" child { number = 3 after = "y" } }
+anys = [ { @type = "diff.v1.Leaf" number = 1 after = "q" } ]

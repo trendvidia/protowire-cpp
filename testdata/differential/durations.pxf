@@ -1,0 +1,2 @@
+@type diff.v1.Root
+any { @type = "diff.v1.Times" d = 1h2m3.5s ds = [90s, 1ms, 1us, 1ns, 0s, -1.5h] m = { a: 2m } }

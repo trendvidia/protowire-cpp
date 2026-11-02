@@ -1,0 +1,2 @@
+@type diff.v1.Root
+named = [ { label = "ok" } { label = "needs quote" } { label = "true" } { label = "a.b" } { label = "é" } ]

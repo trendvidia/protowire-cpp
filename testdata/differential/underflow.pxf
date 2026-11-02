@@ -1,0 +1,2 @@
+@type diff.v1.Root
+numbers { d = 1e-999 f = 1e-60 }

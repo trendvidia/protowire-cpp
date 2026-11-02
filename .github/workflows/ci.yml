@@ -133,6 +133,49 @@ jobs:
           ctest --test-dir build-asan --output-on-failure
 
   # ---------------------------------------------------------------------
+  # protowire-go is the reference for every port: run both over the spec's
+  # fixtures and testdata/differential, and fail on any difference. On
+  # macOS because the nulls fixtures need editions, which Ubuntu's
+  # libprotobuf 3.21 cannot compile.
+  # ---------------------------------------------------------------------
+  go-differential:
+    name: Differential against protowire-go
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/checkout@v7
+        with:
+          repository: trendvidia/protowire
+          path: .deps/protowire
+
+      - uses: actions/checkout@v7
+        with:
+          repository: trendvidia/protowire-go
+          path: .deps/protowire-go
+
+      - uses: actions/setup-go@v6
+        with:
+          # The release that generated src/detail/go_isprint.inc: strconv's
+          # Unicode tables follow the toolchain, not go.mod.
+          go-version: '1.27.x'
+          cache: false
+
+      - name: Install protobuf
+        run: brew install protobuf
+
+      - name: Build pxf_diff
+        run: |
+          cmake -S . -B build -DPROTOWIRE_BUILD_TESTS=OFF
+          cmake --build build --target pxf_diff -j
+
+      - name: Compare
+        env:
+          SPEC_DIR: .deps/protowire
+          GO_DIR: .deps/protowire-go
+        run: scripts/go_differential.sh
+
+  # ---------------------------------------------------------------------
   # clang-format check: every staged change must already be formatted.
   # ---------------------------------------------------------------------
   clang-format:

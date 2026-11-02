@@ -170,9 +170,9 @@ TEST_F(PxfSecret, EncodesBlockWithEitherMetadataField) {
                              msg_.get())
                   .ok());
   const std::string out = Encoded();
-  EXPECT_TRUE(Has(out, "db_password = {")) << out;
+  EXPECT_TRUE(Has(out, "db_password {")) << out;
   EXPECT_TRUE(Has(out, "hint = \"h\"")) << out;
-  EXPECT_TRUE(Has(out, "api_token = {")) << out;
+  EXPECT_TRUE(Has(out, "api_token {")) << out;
   EXPECT_TRUE(Has(out, "fingerprint = \"fp\"")) << out;
 }
 

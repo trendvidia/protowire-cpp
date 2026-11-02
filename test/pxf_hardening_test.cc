@@ -248,7 +248,7 @@ TEST_F(Hardening, InvalidUTF8RejectedOnStringAcceptedOnBytes) {
   }
   // The same bytes into a bytes field are fine, and valid multi-byte
   // UTF-8 in a string field is fine.
-  EXPECT_TRUE(Decode(holder_, "raw = \"\\xFF\\xFE\"\n").ok());
+  EXPECT_TRUE(Decode(holder_, "raw = b\"//4=\"\n").ok());
   EXPECT_TRUE(Decode(holder_, "text = \"caf\\u00e9 \xE6\x97\xA5\"\n").ok());
   // Surrogates and out-of-range escapes are already refused by the lexer.
   EXPECT_FALSE(Decode(holder_, "text = \"\\uD800\"\n").ok());

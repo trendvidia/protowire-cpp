@@ -8,6 +8,7 @@
 
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
+#include "protowire/detail/go_quote.h"
 #include "protowire/detail/rfc3339.h"
 
 namespace protowire::pxf {
@@ -252,10 +253,14 @@ Token Lexer::Next() {
     case '@':
       return LexDirective(pos);
   }
-  if (c == '-' || IsDigit(c)) return LexNumber(pos);
+  if (c == '-' || c == '+' || IsDigit(c)) return LexNumber(pos);
   if (IsIdentStart(c)) return LexIdent(pos);
-  Advance();
-  return Token{TokenKind::kIllegal, Store(std::string(1, static_cast<char>(c))), pos};
+  // A whole rune, so that a multi-byte character gives one diagnostic that
+  // names what the author typed.
+  size_t width = 1;
+  std::string msg = detail::GoIllegalRune(input_.substr(pos_), &width);
+  for (size_t i = 0; i < width; ++i) Advance();
+  return Token{TokenKind::kIllegal, Store(std::move(msg)), pos};
 }
 
 Token Lexer::LexLineComment(Position pos) {
@@ -487,7 +492,8 @@ Token Lexer::LexBytes(Position pos) {
     if (c == '"') {
       std::string_view raw = input_.substr(start, pos_ - start);
       Advance();  // closing "
-      if (!detail::Base64DecodeStd(raw).has_value()) {
+      size_t offset = 0;
+      if (!detail::Base64DecodeLenient(raw, &offset).has_value()) {
         return Token{TokenKind::kIllegal, "invalid base64 in bytes literal", pos};
       }
       return Token{TokenKind::kBytes, raw, pos};
@@ -507,7 +513,9 @@ Token Lexer::LexDirective(Position pos) {
     Advance();
   }
   std::string_view name = input_.substr(start, pos_ - start);
-  if (name.empty()) return Token{TokenKind::kIllegal, "@", pos};
+  if (name.empty()) {
+    return Token{TokenKind::kIllegal, R"("@" must be followed by a directive name)", pos};
+  }
   if (name == "type") return Token{TokenKind::kAtType, "@type", pos};
   if (name == "dataset") return Token{TokenKind::kAtDataset, "@dataset", pos};
   if (name == "proto") return Token{TokenKind::kAtProto, "@proto", pos};
@@ -519,12 +527,22 @@ Token Lexer::LexDirective(Position pos) {
 Token Lexer::LexNumber(Position pos) {
   size_t start = pos_;
   bool neg = false;
-  if (Peek() == '-') {
-    neg = true;
+  if (const char sign = Peek(); sign == '-' || sign == '+') {
     Advance();
-    if (pos_ >= input_.size() || !IsDigit(Peek())) {
-      return Token{TokenKind::kIllegal, "-", pos};
+    // Spec §3.8: "+inf" and "-inf" are the only signed identifier literals.
+    // A '+' sign is valid for nothing else.
+    if (input_.substr(pos_, 3) == "inf" &&
+        (pos_ + 3 >= input_.size() || !IsIdentPart(static_cast<uint8_t>(input_[pos_ + 3])))) {
+      for (int i = 0; i < 3; ++i) Advance();
+      return Token{TokenKind::kFloat, input_.substr(start, pos_ - start), pos};
     }
+    if (sign == '+') {
+      return Token{TokenKind::kIllegal, R"("+" is valid only in "+inf")", pos};
+    }
+    if (pos_ >= input_.size() || !IsDigit(Peek())) {
+      return Token{TokenKind::kIllegal, R"("-" must be followed by a digit or "inf")", pos};
+    }
+    neg = true;
   }
 
   size_t digit_start = pos_;

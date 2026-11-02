@@ -273,12 +273,12 @@ TEST_F(MapKeys, MarshalQuotesKeywordAndIntegerStringKeys) {
             "by_label = {\n"
             "  \"\": \"v\"\n"
             "  \"123\": \"v\"\n"
-            "  _ok9: \"v\"\n"
             "  \"false\": \"v\"\n"
             "  \"my key\": \"v\"\n"
             "  \"null\": \"v\"\n"
-            "  plain: \"v\"\n"
             "  \"true\": \"v\"\n"
+            "  _ok9: \"v\"\n"
+            "  plain: \"v\"\n"
             "}\n");
   // What the marshaller writes, the decoder reads back to the same keys,
   // and the formatter leaves alone.

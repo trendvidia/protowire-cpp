@@ -1,0 +1,4 @@
+@type diff.v1.Root
+by_flag = { true: "t" false: "f" }
+by_num = { 10: {} 9: {} -1: {} }
+labels = { b: "1" a: "2" "true": "3" "1x": "4" "a.b": "5" "": "6" }

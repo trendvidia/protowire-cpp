@@ -1,0 +1,6 @@
+@dataset dsw.v1.Nulls (w, dw, n, o, inner)
+( null, null, 3, null, null )
+( "w", 4, 0, 1, { x = 1 } )
+( , , , , )
+@dataset dsw.v1.CellHolder (body, bodies, by_key)
+( { r = 1 }, [ { r = 2 }, { r = 3 od = 1 } ], { k: { r = 4 dw = 5 } } )

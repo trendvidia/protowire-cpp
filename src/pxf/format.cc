@@ -11,6 +11,7 @@
 // Multi-byte UTF-8 above 0x20 is passed through literally.
 
 #include "protowire/pxf/format.h"
+#include "protowire/detail/go_quote.h"
 
 #include <string>
 #include <string_view>
@@ -33,37 +34,7 @@ bool IsIdentifierSafe(std::string_view s) {
 namespace {
 
 void WriteQuotedString(std::string_view s, std::string& out) {
-  static constexpr char kHex[] = "0123456789abcdef";
-  out.push_back('"');
-  for (unsigned char c : s) {
-    switch (c) {
-      case '"':
-        out += "\\\"";
-        break;
-      case '\\':
-        out += "\\\\";
-        break;
-      case '\n':
-        out += "\\n";
-        break;
-      case '\r':
-        out += "\\r";
-        break;
-      case '\t':
-        out += "\\t";
-        break;
-      default:
-        if (c < 0x20) {
-          out += "\\x";
-          out.push_back(kHex[c >> 4]);
-          out.push_back(kHex[c & 0xF]);
-        } else {
-          out.push_back(static_cast<char>(c));
-        }
-        break;
-    }
-  }
-  out.push_back('"');
+  out += detail::GoQuote(s);
 }
 
 // LexesAsBareMapKey reports whether s reads back as exactly one bare

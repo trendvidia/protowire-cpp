@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -32,6 +33,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -39,18 +41,18 @@
 
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/dynamic_message.h>
-#include <google/protobuf/io/coded_stream.h>
-#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/message.h>
 
 #include "carrier.h"
 #include "parser_internal.h"
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
+#include "protowire/detail/go_quote.h"
 #include "protowire/detail/rfc3339.h"
 #include "protowire/detail/utf8.h"
 #include "protowire/limits.h"
 #include "protowire/pxf/annotations.h"
+#include "protowire/pxf/go_wire.h"
 #include "protowire/pxf/lexer.h"
 #include "protowire/pxf/wellknown.h"
 
@@ -77,11 +79,27 @@ bool ParseInteger(std::string_view s, T& out) {
   return r.ec == std::errc() && r.ptr == last;
 }
 
-bool ParseDouble(std::string_view s, double& out) {
+// ParseFinite reads a number as strconv.ParseFloat does: a finite literal too
+// large for T is an error, where strtod would give an infinity, and `inf` and
+// `nan` are the spellings of those values.
+template <class T>
+bool ParseFinite(std::string_view s, T& out) {
   std::string buf(s);
   char* end = nullptr;
-  out = std::strtod(buf.c_str(), &end);
-  return end != buf.c_str() && static_cast<size_t>(end - buf.c_str()) == buf.size();
+  if constexpr (std::is_same_v<T, float>) {
+    out = std::strtof(buf.c_str(), &end);
+  } else {
+    out = std::strtod(buf.c_str(), &end);
+  }
+  if (end == buf.c_str() || static_cast<size_t>(end - buf.c_str()) != buf.size()) return false;
+  if constexpr (std::is_same_v<T, double>) {
+    // Go's math.NaN(), so that a nan has one set of bytes.
+    if (std::isnan(out)) {
+      const uint64_t bits = 0x7FF8000000000001ULL;
+      std::memcpy(&out, &bits, sizeof(out));
+    }
+  }
+  return !std::isinf(out) || s == "inf" || s == "+inf" || s == "-inf";
 }
 
 // Limits is UnmarshalOptions' five limits with the defaults of
@@ -115,6 +133,20 @@ int CountDigits(std::string_view literal) {
     if (c >= '0' && c <= '9') ++n;
   }
   return n;
+}
+
+constexpr const char* kTypeEntryMisplaced =
+    "@type is allowed only as the first entry of a block bound to google.protobuf.Any "
+    "(draft -01 \"Any Blocks\")";
+
+// LiteralFields names the fields a literal of type d sets.
+std::vector<const char*> LiteralFields(const Descriptor* d) {
+  if (IsTimestamp(d) || IsDuration(d)) return {"seconds", "nanos"};
+  if (WrapperInnerCppType(d) != -1 || IsSecret(d)) return {"value"};
+  if (IsBigInt(d)) return {"abs", "negative"};
+  if (IsDecimal(d)) return {"unscaled", "scale", "negative"};
+  if (IsBigFloat(d)) return {"mantissa", "exponent", "prec", "negative"};
+  return {};
 }
 
 // BodyScope is what one message body has bound so far (draft -01 § Entries
@@ -175,55 +207,6 @@ class BodyScope {
   std::vector<MapKeys> maps_;
 };
 
-// QuoteKey quotes a string as protowire-go's strconv.Quote does, so the ports
-// name one map key alike. The difference left: strconv.Quote also escapes
-// non-printable runes above ASCII, which takes Unicode tables.
-std::string QuoteKey(const std::string& key) {
-  static constexpr char kHex[] = "0123456789abcdef";
-  std::string out = "\"";
-  for (unsigned char c : key) {
-    switch (c) {
-      case '"':
-        out += "\\\"";
-        break;
-      case '\\':
-        out += "\\\\";
-        break;
-      case '\a':
-        out += "\\a";
-        break;
-      case '\b':
-        out += "\\b";
-        break;
-      case '\f':
-        out += "\\f";
-        break;
-      case '\n':
-        out += "\\n";
-        break;
-      case '\r':
-        out += "\\r";
-        break;
-      case '\t':
-        out += "\\t";
-        break;
-      case '\v':
-        out += "\\v";
-        break;
-      default:
-        if (c < 0x20 || c == 0x7f) {
-          out += "\\x";
-          out += kHex[c >> 4];
-          out += kHex[c & 0xF];
-        } else {
-          out += static_cast<char>(c);
-        }
-    }
-  }
-  out += '"';
-  return out;
-}
-
 // MapKeyText renders the key an entry ended up with, so that two spellings
 // of one value (`1` and `"1"` on an int-keyed map) compare equal. It is also
 // how a key appears in an error message and a presence path, `by_key["k"]`.
@@ -241,7 +224,7 @@ std::string MapKeyText(const Message& entry, const FieldDescriptor* key_fd) {
     case FieldDescriptor::CPPTYPE_BOOL:
       return r->GetBool(entry, key_fd) ? "true" : "false";
     default:
-      return QuoteKey(r->GetString(entry, key_fd));
+      return detail::GoQuote(r->GetString(entry, key_fd));
   }
 }
 
@@ -283,19 +266,16 @@ class PostDecoder {
 
 class DirectDecoder {
  public:
-  DirectDecoder(std::string_view input,
-                Message* root,
-                Result* result,
-                TypeResolver* resolver,
-                bool discard_unknown,
-                const Limits& lim)
+  DirectDecoder(std::string_view input, Message* root, Result* result, const UnmarshalOptions& opts)
       : lex_(input),
         root_(root),
         result_(result),
         post_(result),
-        resolver_(resolver),
-        discard_unknown_(discard_unknown),
-        lim_(lim) {
+        resolver_(opts.type_resolver),
+        discard_unknown_(opts.discard_unknown),
+        skip_post_decode_(opts.skip_post_decode),
+        on_secret_(opts.on_secret_field),
+        lim_(ResolveLimits(opts)) {
     lex_.SetMaxBytesLiteral(lim_.max_bytes_literal);
     if (result_) {
       null_mask_fd_ = FindNullMaskField(root_->GetDescriptor());
@@ -373,7 +353,7 @@ class DirectDecoder {
         saw_type = true;
         Advance();  // consume @type
         if (current_.kind != TokenKind::kIdent && current_.kind != TokenKind::kString) {
-          return PosError(current_.pos, "expected type name after @type");
+          return PosError(current_.pos, "expected type name after @type, got " + TokenErrMsg());
         }
         Advance();
       } else if (current_.kind == TokenKind::kAtDirective) {
@@ -480,8 +460,9 @@ class DirectDecoder {
             pd.type_name = std::string(current_.value);
             Advance();
             if (current_.kind != TokenKind::kLBrace) {
-              return PosError(current_.pos,
-                              std::string("expected '{' after @proto ") + pd.type_name);
+              return PosError(
+                  current_.pos,
+                  "expected '{' after @proto " + pd.type_name + ", got " + TokenErrMsg());
             }
             auto s = capture_brace_body(std::string("@proto ") + pd.type_name, &pd.body);
             if (!s.ok()) return s;
@@ -495,9 +476,13 @@ class DirectDecoder {
           }
           case TokenKind::kBytes: {
             pd.shape = ProtoShape::kDescriptor;
-            auto decoded = detail::Base64DecodeStd(current_.value);
+            size_t offset = 0;
+            auto decoded = detail::Base64DecodeProto(current_.value, &offset);
             if (!decoded.has_value()) {
-              return PosError(current_.pos, "@proto descriptor body: invalid base64");
+              return PosError(
+                  current_.pos,
+                  "@proto descriptor body: invalid base64: illegal base64 data at input byte " +
+                      std::to_string(offset));
             }
             pd.body = std::string(decoded->begin(), decoded->end());
             Advance();
@@ -506,7 +491,9 @@ class DirectDecoder {
           default:
             return PosError(
                 current_.pos,
-                "expected '{', dotted identifier, triple-quoted string, or b\"...\" after @proto");
+                "expected '{', dotted identifier, triple-quoted string, or b\"...\" after @proto, "
+                "got " +
+                    TokenErrMsg());
         }
         if (result_ != nullptr) result_->AddProto(std::move(pd));
       } else {
@@ -532,10 +519,27 @@ class DirectDecoder {
   Status DecodeMapInline(Message* msg, const FieldDescriptor* fd, BodyScope* scope);
   Status DecodeBlockInto(Message* sub, const FieldDescriptor* fd);
   Status DecodeAnyInner(Message* any_msg);
+  // RouteSecret hands a pxf.Secret at the current token to on_secret_, in
+  // either form. *routed stays false when nothing is to be routed. path is
+  // only read when something is.
+  Status RouteSecret(Message* sub,
+                     const FieldDescriptor* fd,
+                     const std::string& path,
+                     bool mark_value,
+                     bool* routed);
+  Status DecodeSecretBlock(Message* sub, const std::string& path);
 
-  Status SetScalar(Message* msg, const FieldDescriptor* fd);
-  Status AddRepeatedScalar(Message* msg, const FieldDescriptor* fd);
-  Status SetEnum(Message* msg, const FieldDescriptor* fd, bool repeated);
+  // ConsumeScalar binds the current token to fd, adding to it when repeated.
+  // Errors name `named`, which differs from fd for a wrapper's shorthand:
+  // the document wrote the wrapper's field, not its `value`.
+  Status ConsumeScalar(Message* msg,
+                       const FieldDescriptor* fd,
+                       const FieldDescriptor* named,
+                       bool repeated);
+  Status ConsumeEnum(Message* msg,
+                     const FieldDescriptor* fd,
+                     const FieldDescriptor* named,
+                     bool repeated);
   Status SetMapKey(Message* entry,
                    const FieldDescriptor* map_fd,
                    std::string_view key,
@@ -568,13 +572,16 @@ class DirectDecoder {
   std::string EnterElement(const FieldDescriptor* fd, const std::string& suffix) {
     std::string saved = path_prefix_;
     ++elem_depth_;
-    if (result_) {
+    if (TracksPaths()) {
       path_prefix_ += std::string(fd->name());
       path_prefix_ += suffix;
       path_prefix_ += '.';
     }
     return saved;
   }
+  // TracksPaths is whether anything reads the path: the Result, or the
+  // secret hook, which is given it.
+  bool TracksPaths() const { return result_ != nullptr || static_cast<bool>(on_secret_); }
   void LeaveElement(std::string saved) {
     path_prefix_ = std::move(saved);
     --elem_depth_;
@@ -593,18 +600,46 @@ class DirectDecoder {
   // would read back as its zero value, and a proto2 `required` field left
   // unset makes the message invalid in protobuf binary.
   Status CheckNullable(const FieldDescriptor* fd, Position pos) {
-    auto refuse = [&](const char* kind, const char* why) {
+    const std::string name = detail::GoQuote(fd->name());
+    if (fd->is_map()) return PosError(pos, "null is not allowed on map field " + name);
+    if (fd->is_repeated()) return PosError(pos, "null is not allowed on repeated field " + name);
+    if (fd->is_required()) {
+      if (fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
+        return PosError(pos, "null is not allowed on required field " + name + ": it must be set");
+      }
       return PosError(pos,
-                      std::string("null is not allowed on ") + kind + " field \"" +
-                          std::string(fd->name()) + "\"" + why);
-    };
-    if (fd->is_map()) return refuse("map", "");
-    if (fd->is_repeated()) return refuse("repeated", "");
-    if (fd->is_required()) return refuse("required", ": it must be set");
+                      "null is not allowed on scalar field " + name +
+                          ": the field is required, so it must be set");
+    }
     if (!fd->has_presence()) {
-      return refuse("scalar", ": declare it optional, or as a wrapper type, to make it nullable");
+      return PosError(pos,
+                      "null is not allowed on scalar field " + name +
+                          ": declare it optional, or as a wrapper type (google.protobuf." +
+                          WrapperStem(fd) + "Value or similar), to make it nullable");
     }
     return Status::OK();
+  }
+
+  // WrapperStem names the wrapper that holds fd's type, for CheckNullable.
+  static const char* WrapperStem(const FieldDescriptor* fd) {
+    switch (fd->cpp_type()) {
+      case FieldDescriptor::CPPTYPE_BOOL:
+        return "Bool";
+      case FieldDescriptor::CPPTYPE_STRING:
+        return fd->type() == FieldDescriptor::TYPE_BYTES ? "Bytes" : "String";
+      case FieldDescriptor::CPPTYPE_FLOAT:
+        return "Float";
+      case FieldDescriptor::CPPTYPE_DOUBLE:
+        return "Double";
+      case FieldDescriptor::CPPTYPE_INT64:
+        return "Int64";
+      case FieldDescriptor::CPPTYPE_UINT32:
+        return "UInt32";
+      case FieldDescriptor::CPPTYPE_UINT64:
+        return "UInt64";
+      default:
+        return "Int32";
+    }
   }
 
   // CheckRepeatedCount refuses the next element of a repeated or map
@@ -691,8 +726,7 @@ class DirectDecoder {
   // TokenErrMsg describes the current token for "expected X, got Y".
   std::string TokenErrMsg() const {
     if (current_.kind == TokenKind::kIllegal) return std::string(current_.value);
-    return std::string(TokenKindName(current_.kind)) + " (" +
-           QuoteKey(std::string(current_.value)) + ")";
+    return std::string(TokenKindName(current_.kind)) + " (" + detail::GoQuote(current_.value) + ")";
   }
 
   // Skipping for unknown fields.
@@ -765,6 +799,8 @@ class DirectDecoder {
   const FieldDescriptor* null_mask_fd_ = nullptr;
   TypeResolver* resolver_ = nullptr;
   bool discard_unknown_ = false;
+  bool skip_post_decode_ = false;
+  SecretFieldHook on_secret_;
   Limits lim_;
   int depth_ = 0;
   std::string path_prefix_;
@@ -809,19 +845,30 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
     }
 
     Position pos = current_.pos;
-    if (Status s = IllegalError(); !s.ok()) return s;
+    if (current_.kind == TokenKind::kAtType) return PosError(pos, kTypeEntryMisplaced);
+    // The grammar's key set, so that a bool or integer key before '=' or '{'
+    // gets the error below that names the field, not this one.
     if (current_.kind != TokenKind::kIdent && current_.kind != TokenKind::kString &&
-        current_.kind != TokenKind::kInt) {
-      return PosError(pos,
-                      std::string("expected identifier, string, or integer, got ") +
-                          TokenKindName(current_.kind));
+        current_.kind != TokenKind::kInt && current_.kind != TokenKind::kBool) {
+      return PosError(pos, "expected identifier, string, integer, or bool, got " + TokenErrMsg());
     }
-    const bool key_quoted = current_.kind == TokenKind::kString;
+    const TokenKind key_kind = current_.kind;
+    const bool key_quoted = key_kind == TokenKind::kString;
+    const bool key_is_name = key_kind == TokenKind::kIdent || key_quoted;
     std::string key(current_.value);
+    const std::string written =
+        key + (current_.prec.empty() ? "" : "p" + std::string(current_.prec));
     Advance();
 
     switch (current_.kind) {
       case TokenKind::kEquals: {
+        if (!key_is_name) {
+          return PosError(pos,
+                          std::string("field assignment with '=' requires an identifier or string "
+                                      "key, got ") +
+                              TokenKindName(key_kind) + " (" + detail::GoQuote(written) +
+                              "); use ':' for map entries");
+        }
         Advance();
         if (key_quoted) {
           // The grammar accepts a string at entry-name position
@@ -836,8 +883,9 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
             SkipValue();
             continue;
           }
-          return PosError(pos,
-                          "unknown field \"" + key + "\" in " + std::string(desc->full_name()));
+          return PosError(
+              pos,
+              "unknown field " + detail::GoQuote(key) + " in " + std::string(desc->full_name()));
         }
         Status st = CheckKeyBinding(ke, fd, current_.kind == TokenKind::kNull, pos);
         if (!st.ok()) return st;
@@ -871,6 +919,12 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
         break;
       }
       case TokenKind::kLBrace: {
+        if (!key_is_name) {
+          return PosError(pos,
+                          std::string("submessage block requires an identifier or string key, "
+                                      "got ") +
+                              TokenKindName(key_kind) + " (" + detail::GoQuote(written) + ")");
+        }
         Advance();
         if (key_quoted) return QuotedNameUnkeyedError(pos, key);
         const FieldDescriptor* fd = desc->FindFieldByName(key);
@@ -879,14 +933,19 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
             SkipBraced();
             continue;
           }
-          return PosError(pos,
-                          "unknown field \"" + key + "\" in " + std::string(desc->full_name()));
+          return PosError(
+              pos,
+              "unknown field " + detail::GoQuote(key) + " in " + std::string(desc->full_name()));
         }
         if (fd->cpp_type() != FieldDescriptor::CPPTYPE_MESSAGE) {
-          return PosError(pos, "field \"" + key + "\" is not a message — block syntax forbidden");
+          return PosError(
+              pos,
+              "field " + detail::GoQuote(key) + " is not a message type, cannot use block syntax");
         }
         if (fd->is_map()) {
-          return PosError(pos, "map field \"" + key + "\" must use 'name = { ... }' syntax");
+          return PosError(pos,
+                          "map field " + detail::GoQuote(key) +
+                              " must use assignment syntax: " + key + " = { ... }");
         }
         if (fd->is_repeated()) {
           // Keyed repeated field (draft -01 §3.13): the block form is a
@@ -903,7 +962,9 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
             // schema violation — rather than the generic shape error.
             return QuotedNameUnkeyedError(current_.pos, current_.value);
           }
-          return PosError(pos, "repeated field \"" + key + "\" must use list syntax");
+          return PosError(pos,
+                          "repeated field " + detail::GoQuote(key) +
+                              " must use list syntax: " + key + " = [...]");
         }
         Status st = CheckKeyBinding(ke, fd, /*is_null=*/false, pos);
         if (!st.ok()) return st;
@@ -917,10 +978,15 @@ Status DirectDecoder::DecodeFieldsBody(Message* msg, bool in_block) {
         break;
       }
       case TokenKind::kColon:
-        return PosError(pos, "unexpected ':' in message context, use '=' for fields");
+        if (!in_block) {
+          return PosError(pos,
+                          "map entry (':' form) is only allowed inside a '{ … }' block; use '=' "
+                          "for top-level field assignments");
+        }
+        return PosError(pos, "unexpected ':' in message context, use '=' for field assignments");
       default:
         return PosError(current_.pos,
-                        std::string("expected '=', ':', or '{' after \"") + key + "\", got " +
+                        "expected '=', ':', or '{' after " + detail::GoQuote(key) + ", got " +
                             TokenKindName(current_.kind));
     }
   }
@@ -963,7 +1029,7 @@ Status DirectDecoder::DecodeFieldValue(Message* msg, const FieldDescriptor* fd, 
   if (fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
     return DecodeMsgValue(msg, fd);
   }
-  return SetScalar(msg, fd);
+  return ConsumeScalar(msg, fd, fd, /*repeated=*/false);
 }
 
 // DecodeLiteral binds the current token to sub when it is a literal of
@@ -996,11 +1062,11 @@ Status DirectDecoder::DecodeLiteral(Message* sub, const FieldDescriptor* fd, boo
   if (WrapperInnerCppType(d) != -1 && kind != TokenKind::kLBrace) {
     const FieldDescriptor* inner = d->FindFieldByName("value");
     if (!inner) return PosError(current_.pos, "wrapper missing 'value' field");
-    return SetScalar(sub, inner);
+    return ConsumeScalar(sub, inner, fd, /*repeated=*/false);
   }
   // pxf.Secret sugar: a string → secret.value.
   if (IsSecret(d) && kind == TokenKind::kString) {
-    return SetScalar(sub, d->FindFieldByName("value"));
+    return ConsumeScalar(sub, d->FindFieldByName("value"), fd, /*repeated=*/false);
   }
   // Big-number sugar. The digit cap runs before the literal reaches the
   // arbitrary-precision parser.
@@ -1026,13 +1092,20 @@ Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
   const Descriptor* d = fd->message_type();
   Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
 
+  if (current_.kind == TokenKind::kString) {
+    bool routed = false;
+    Status st =
+        RouteSecret(sub, fd, path_prefix_ + std::string(fd->name()), /*mark_value=*/true, &routed);
+    if (routed || !st.ok()) return st;
+  }
   bool bound = false;
   if (Status s = DecodeLiteral(sub, fd, &bound); !s.ok()) return s;
   if (bound) {
-    // A block marks each field it binds, so the scalar form marks the one
-    // it stands for.
-    if (result_ && IsSecret(d)) {
-      result_->MarkPresent(path_prefix_ + std::string(fd->name()) + ".value");
+    // A block marks each field it binds, so a literal marks the ones it
+    // stands for. Elements and map values don't: the element is the unit.
+    if (result_) {
+      const std::string base = path_prefix_ + std::string(fd->name()) + ".";
+      for (const char* name : LiteralFields(d)) result_->MarkPresent(base + name);
     }
     return Status::OK();
   }
@@ -1050,6 +1123,9 @@ Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
 // opens with a type entry is a body of the type it names (draft -01 "Any
 // Blocks"); without one it is the Any's own fields.
 Status DirectDecoder::DecodeBlockInto(Message* sub, const FieldDescriptor* fd) {
+  if (on_secret_ && IsSecret(sub->GetDescriptor())) {
+    return DecodeSecretBlock(sub, path_prefix_ + std::string(fd->name()));
+  }
   std::string saved = path_prefix_;
   path_prefix_ += std::string(fd->name());
   path_prefix_ += '.';
@@ -1058,6 +1134,91 @@ Status DirectDecoder::DecodeBlockInto(Message* sub, const FieldDescriptor* fd) {
                   : DecodeFields(sub, /*in_block=*/true);
   path_prefix_ = std::move(saved);
   return st;
+}
+
+Status DirectDecoder::RouteSecret(Message* sub,
+                                  const FieldDescriptor* fd,
+                                  const std::string& path,
+                                  bool mark_value,
+                                  bool* routed) {
+  if (!on_secret_ || !IsSecret(sub->GetDescriptor())) return Status::OK();
+  if (current_.kind == TokenKind::kLBrace) {
+    *routed = true;
+    Advance();
+    return DecodeSecretBlock(sub, path);
+  }
+  if (current_.kind != TokenKind::kString) return Status::OK();
+  *routed = true;
+  const Position pos = current_.pos;
+  if (!detail::IsValidUTF8(current_.value)) {
+    return PosError(pos,
+                    "invalid UTF-8 in pxf.Secret value for field " + detail::GoQuote(fd->name()));
+  }
+  if (Status st = on_secret_(path, current_.value); !st.ok()) {
+    return PosError(pos, "pxf.Secret hook for " + detail::GoQuote(path) + ": " + st.message());
+  }
+  Advance();
+  if (mark_value && result_) result_->MarkPresent(path + ".value");
+  return Status::OK();
+}
+
+// DecodeSecretBlock decodes a pxf.Secret body, its '{' consumed. `value` goes
+// to on_secret_; `hint` and `fingerprint` to the message, as they are not
+// sensitive. pxf.Secret is a closed shape, so any other name is an error.
+Status DirectDecoder::DecodeSecretBlock(Message* sub, const std::string& path) {
+  if (Status s = Descend(); !s.ok()) return s;
+  const Descriptor* desc = sub->GetDescriptor();
+  BodyScope scope;
+  for (;;) {
+    if (current_.kind == TokenKind::kRBrace) {
+      Advance();
+      Ascend();
+      return Status::OK();
+    }
+    if (current_.kind == TokenKind::kEOF) {
+      return PosError(current_.pos, "expected '}' to close pxf.Secret block, got EOF");
+    }
+    if (current_.kind != TokenKind::kIdent) {
+      return PosError(
+          current_.pos,
+          "expected pxf.Secret field name (value/hint/fingerprint), got " + TokenErrMsg());
+    }
+    const std::string name(current_.value);
+    const Position name_pos = current_.pos;
+    Advance();
+    if (current_.kind != TokenKind::kEquals) {
+      return PosError(current_.pos,
+                      "expected '=' after pxf.Secret field " + detail::GoQuote(name) + ", got " +
+                          TokenKindName(current_.kind));
+    }
+    Advance();
+    if (Status s = IllegalError(); !s.ok()) return s;
+    if (current_.kind != TokenKind::kString) {
+      return PosError(
+          current_.pos,
+          "expected string value for pxf.Secret " + name + ", got " + TokenKindName(current_.kind));
+    }
+    if (!detail::IsValidUTF8(current_.value)) {
+      return PosError(current_.pos, "invalid UTF-8 in pxf.Secret " + name);
+    }
+    if (name != "value" && name != "hint" && name != "fingerprint") {
+      return PosError(name_pos,
+                      "unknown pxf.Secret field " + detail::GoQuote(name) +
+                          " (expected value/hint/fingerprint)");
+    }
+    const FieldDescriptor* fd = desc->FindFieldByName(name);
+    if (Status s = CheckBindOnce(fd, name_pos, &scope); !s.ok()) return s;
+    if (name == "value") {
+      if (Status st = on_secret_(path, current_.value); !st.ok()) {
+        return PosError(current_.pos,
+                        "pxf.Secret hook for " + detail::GoQuote(path) + ": " + st.message());
+      }
+    } else {
+      sub->GetReflection()->SetString(sub, fd, std::string(current_.value));
+    }
+    if (result_) result_->MarkPresent(path + "." + name);
+    Advance();
+  }
 }
 
 // On entry current_ is the @type of an Any block's type entry, the block's
@@ -1076,13 +1237,13 @@ Status DirectDecoder::DecodeAnyInner(Message* any_msg) {
   Advance();
   if (resolver_ == nullptr) {
     return PosError(url_pos,
-                    "cannot resolve Any type " + QuoteKey(type_url) +
+                    "cannot resolve Any type " + detail::GoQuote(type_url) +
                         ": no TypeResolver (UnmarshalOptions::type_resolver)");
   }
 
   const Descriptor* inner_desc = resolver_->FindMessageByURL(type_url);
   if (!inner_desc) {
-    return PosError(url_pos, "cannot resolve Any type " + QuoteKey(type_url));
+    return PosError(url_pos, "cannot resolve Any type " + detail::GoQuote(type_url));
   }
   pb::DynamicMessageFactory factory(inner_desc->file()->pool());
   std::unique_ptr<Message> inner(factory.GetPrototype(inner_desc)->New());
@@ -1090,19 +1251,11 @@ Status DirectDecoder::DecodeAnyInner(Message* any_msg) {
   // It is packed to bytes below, out of the root pass's reach, so it takes
   // the post-decode pass here.
   Status st = DecodeFields(inner.get(), /*in_block=*/true);
-  if (st.ok() && result_) st = post_.Run(inner.get(), nullptr, path_prefix_);
+  if (st.ok() && result_ && !skip_post_decode_) st = post_.Run(inner.get(), nullptr, path_prefix_);
   if (!st.ok()) return st;
-  // Deterministic, so one document always packs to the same bytes: map
-  // entries have no fixed order otherwise.
-  std::string packed;
-  {
-    pb::io::StringOutputStream stream(&packed);
-    pb::io::CodedOutputStream coded(&stream);
-    coded.SetSerializationDeterministic(true);
-    if (!inner->SerializeToCodedStream(&coded) || coded.HadError()) {
-      return Status::Error("cannot marshal Any inner message");
-    }
-  }
+  // In protowire-go's byte order, so that a document packs to the same bytes
+  // in every port.
+  std::string packed = SerializeGoOrder(*inner);
   any_msg->GetReflection()->SetString(
       any_msg, any_msg->GetDescriptor()->FindFieldByName("type_url"), std::move(type_url));
   any_msg->GetReflection()->SetString(
@@ -1132,8 +1285,16 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
     if (fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
       const Descriptor* d = fd->message_type();
       Message* sub = msg->GetReflection()->AddMessage(msg, fd);
-      bool bound = false;
-      if (Status s = DecodeLiteral(sub, fd, &bound); !s.ok()) return s;
+      bool routed = false;
+      if (on_secret_) {
+        const std::string path = path_prefix_ + std::string(fd->name()) +
+                                 IndexSuffix(msg->GetReflection()->FieldSize(*msg, fd) - 1);
+        if (Status s = RouteSecret(sub, fd, path, /*mark_value=*/false, &routed); !s.ok()) return s;
+      }
+      bool bound = routed;
+      if (!routed) {
+        if (Status s = DecodeLiteral(sub, fd, &bound); !s.ok()) return s;
+      }
       if (!bound) {
         if (current_.kind != TokenKind::kLBrace) {
           return PosError(current_.pos,
@@ -1145,7 +1306,7 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
           keyed_elem_ = KeyedElem{std::string(fd->name()), key_fd, "", false};
         }
         const int index = msg->GetReflection()->FieldSize(*msg, fd) - 1;
-        std::string saved = EnterElement(fd, result_ ? IndexSuffix(index) : "");
+        std::string saved = EnterElement(fd, TracksPaths() ? IndexSuffix(index) : "");
         Status st = current_.kind == TokenKind::kAtType && IsAny(d)
                         ? DecodeAnyInner(sub)
                         : DecodeFields(sub, /*in_block=*/true);
@@ -1153,10 +1314,10 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
         if (!st.ok()) return st;
       }
     } else if (fd->cpp_type() == FieldDescriptor::CPPTYPE_ENUM) {
-      Status st = SetEnum(msg, fd, /*repeated=*/true);
+      Status st = ConsumeEnum(msg, fd, fd, /*repeated=*/true);
       if (!st.ok()) return st;
     } else {
-      Status st = AddRepeatedScalar(msg, fd);
+      Status st = ConsumeScalar(msg, fd, fd, /*repeated=*/true);
       if (!st.ok()) return st;
     }
     if (current_.kind == TokenKind::kComma) Advance();
@@ -1238,7 +1399,8 @@ Status DirectDecoder::DecodeKeyedBlockBody(Message* msg,
     Message* sub = r->AddMessage(msg, fd);
     sub->GetReflection()->SetString(sub, key_fd, name);
     keyed_elem_ = KeyedElem{std::string(fd->name()), key_fd, name, true};
-    std::string saved = EnterElement(fd, result_ ? IndexSuffix(r->FieldSize(*msg, fd) - 1) : "");
+    std::string saved =
+        EnterElement(fd, TracksPaths() ? IndexSuffix(r->FieldSize(*msg, fd) - 1) : "");
     // The entry name supplies the key field, so the post-decode pass, which
     // reads presence only, must not treat it as absent: a default would
     // replace the name.
@@ -1270,7 +1432,7 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd, B
     TokenKind key_kind = current_.kind;
     if (key_kind != TokenKind::kIdent && key_kind != TokenKind::kString &&
         key_kind != TokenKind::kInt && key_kind != TokenKind::kBool) {
-      return PosError(pos, std::string("expected map key, got ") + TokenKindName(current_.kind));
+      return PosError(pos, "expected map key, got " + TokenErrMsg());
     }
     std::string key(current_.value);
     if (!current_.prec.empty()) {
@@ -1291,12 +1453,6 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd, B
             current_.pos,
             std::string("expected ':' after map key, got ") + TokenKindName(current_.kind));
     }
-    if (current_.kind == TokenKind::kNull) {
-      return PosError(
-          current_.pos,
-          "null is not allowed as map value in field \"" + std::string(fd->name()) + "\"");
-    }
-    if (Status s = IllegalError(); !s.ok()) return s;
     Message* entry = r->AddMessage(msg, fd);
     Status st = SetMapKey(entry, fd, key, key_kind, pos);
     if (!st.ok()) return st;
@@ -1307,8 +1463,20 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd, B
           pos,
           "map field \"" + std::string(fd->name()) + "\": key " + key_text + " is already set");
     }
+    if (current_.kind == TokenKind::kNull) {
+      return PosError(
+          current_.pos,
+          "null is not allowed as map value in field \"" + std::string(fd->name()) + "\"");
+    }
+    if (Status s = IllegalError(); !s.ok()) return s;
     if (val_fd->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE) {
       Message* value = entry->GetReflection()->MutableMessage(entry, val_fd);
+      if (on_secret_) {
+        bool routed = false;
+        const std::string path = path_prefix_ + std::string(fd->name()) + "[" + key_text + "]";
+        if (st = RouteSecret(value, fd, path, /*mark_value=*/false, &routed); !st.ok()) return st;
+        if (routed) continue;
+      }
       bool bound = false;
       if (st = DecodeLiteral(value, fd, &bound); !st.ok()) return st;
       if (bound) continue;
@@ -1325,10 +1493,10 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd, B
       LeaveElement(std::move(saved));
       if (!st.ok()) return st;
     } else if (val_fd->cpp_type() == FieldDescriptor::CPPTYPE_ENUM) {
-      st = SetEnum(entry, val_fd, /*repeated=*/false);
+      st = ConsumeEnum(entry, val_fd, val_fd, /*repeated=*/false);
       if (!st.ok()) return st;
     } else {
-      st = SetScalar(entry, val_fd);
+      st = ConsumeScalar(entry, val_fd, val_fd, /*repeated=*/false);
       if (!st.ok()) return st;
     }
   }
@@ -1425,207 +1593,164 @@ Status DirectDecoder::SetMapKey(Message* entry,
 
 // --- scalars ---------------------------------------------------------------
 
-Status DirectDecoder::SetScalar(Message* msg, const FieldDescriptor* fd) {
-  Position pos = current_.pos;
-  if (Status s = CheckNoPrecision(fd); !s.ok()) return s;
+Status DirectDecoder::ConsumeScalar(Message* msg,
+                                    const FieldDescriptor* fd,
+                                    const FieldDescriptor* named,
+                                    bool repeated) {
+  const Position pos = current_.pos;
+  if (Status s = CheckNoPrecision(named); !s.ok()) return s;
   const Reflection* r = msg->GetReflection();
+  const std::string_view value = current_.value;
+  const auto expected = [&](const char* what) {
+    return PosError(
+        pos, std::string("expected ") + what + " for field " + detail::GoQuote(named->name()));
+  };
+  const auto invalid = [&](const char* what) {
+    return PosError(pos, std::string("invalid ") + what + ": " + std::string(value));
+  };
+  const bool non_finite = current_.kind == TokenKind::kIdent && (value == "inf" || value == "nan");
+  const bool number =
+      current_.kind == TokenKind::kFloat || current_.kind == TokenKind::kInt || non_finite;
   switch (fd->cpp_type()) {
     case FieldDescriptor::CPPTYPE_STRING: {
-      if (current_.kind == TokenKind::kString) {
-        if (fd->type() == FieldDescriptor::TYPE_STRING) {
-          if (Status s = CheckUTF8(current_.value, fd, pos); !s.ok()) return s;
+      std::string bytes;
+      if (fd->type() == FieldDescriptor::TYPE_BYTES) {
+        if (current_.kind != TokenKind::kBytes) return expected("bytes");
+        size_t offset = 0;
+        auto decoded = detail::Base64DecodeLenient(value, &offset);
+        if (!decoded.has_value()) {
+          return PosError(pos,
+                          "invalid base64 for field " + detail::GoQuote(named->name()) +
+                              ": illegal base64 data at input byte " + std::to_string(offset));
         }
-        r->SetString(msg, fd, std::string(current_.value));
-        Advance();
-        return Status::OK();
+        bytes.assign(decoded->begin(), decoded->end());
+      } else {
+        if (current_.kind != TokenKind::kString) return expected("string");
+        if (Status s = CheckUTF8(value, named, pos); !s.ok()) return s;
+        bytes.assign(value);
       }
-      if (current_.kind == TokenKind::kBytes) {
-        auto decoded = detail::Base64DecodeStd(current_.value);
-        if (!decoded.has_value()) return PosError(pos, "invalid base64 in bytes literal");
-        r->SetString(msg, fd, std::string(decoded->begin(), decoded->end()));
-        Advance();
-        return Status::OK();
+      if (repeated) {
+        r->AddString(msg, fd, std::move(bytes));
+      } else {
+        r->SetString(msg, fd, std::move(bytes));
       }
-      return PosError(pos, "expected string for field \"" + std::string(fd->name()) + "\"");
+      break;
     }
-    case FieldDescriptor::CPPTYPE_BOOL: {
-      if (current_.kind != TokenKind::kBool) return PosError(pos, "expected bool");
-      r->SetBool(msg, fd, current_.value == "true");
-      Advance();
-      return Status::OK();
-    }
+    case FieldDescriptor::CPPTYPE_BOOL:
+      if (current_.kind != TokenKind::kBool) return expected("bool");
+      if (repeated) {
+        r->AddBool(msg, fd, value == "true");
+      } else {
+        r->SetBool(msg, fd, value == "true");
+      }
+      break;
     case FieldDescriptor::CPPTYPE_INT32: {
-      if (current_.kind != TokenKind::kInt)
-        return PosError(pos, "expected integer for " + std::string(fd->name()));
+      if (current_.kind != TokenKind::kInt) return expected("integer");
       int32_t n;
-      if (!ParseInteger(current_.value, n))
-        return PosError(pos, "invalid int32: " + std::string(current_.value));
-      r->SetInt32(msg, fd, n);
-      Advance();
-      return Status::OK();
+      if (!ParseInteger(value, n)) return invalid("int32");
+      if (repeated) {
+        r->AddInt32(msg, fd, n);
+      } else {
+        r->SetInt32(msg, fd, n);
+      }
+      break;
     }
     case FieldDescriptor::CPPTYPE_INT64: {
-      if (current_.kind != TokenKind::kInt) return PosError(pos, "expected integer");
+      if (current_.kind != TokenKind::kInt) return expected("integer");
       int64_t n;
-      if (!ParseInteger(current_.value, n))
-        return PosError(pos, "invalid int64: " + std::string(current_.value));
-      r->SetInt64(msg, fd, n);
-      Advance();
-      return Status::OK();
+      if (!ParseInteger(value, n)) return invalid("int64");
+      if (repeated) {
+        r->AddInt64(msg, fd, n);
+      } else {
+        r->SetInt64(msg, fd, n);
+      }
+      break;
     }
     case FieldDescriptor::CPPTYPE_UINT32: {
-      if (current_.kind != TokenKind::kInt) return PosError(pos, "expected integer");
+      if (current_.kind != TokenKind::kInt) return expected("integer");
       uint32_t n;
-      if (!ParseInteger(current_.value, n))
-        return PosError(pos, "invalid uint32: " + std::string(current_.value));
-      r->SetUInt32(msg, fd, n);
-      Advance();
-      return Status::OK();
+      if (!ParseInteger(value, n)) return invalid("uint32");
+      if (repeated) {
+        r->AddUInt32(msg, fd, n);
+      } else {
+        r->SetUInt32(msg, fd, n);
+      }
+      break;
     }
     case FieldDescriptor::CPPTYPE_UINT64: {
-      if (current_.kind != TokenKind::kInt) return PosError(pos, "expected integer");
+      if (current_.kind != TokenKind::kInt) return expected("integer");
       uint64_t n;
-      if (!ParseInteger(current_.value, n))
-        return PosError(pos, "invalid uint64: " + std::string(current_.value));
-      r->SetUInt64(msg, fd, n);
-      Advance();
-      return Status::OK();
-    }
-    case FieldDescriptor::CPPTYPE_FLOAT:
-    case FieldDescriptor::CPPTYPE_DOUBLE: {
-      if (current_.kind != TokenKind::kFloat && current_.kind != TokenKind::kInt) {
-        return PosError(pos, "expected number");
+      if (!ParseInteger(value, n)) return invalid("uint64");
+      if (repeated) {
+        r->AddUInt64(msg, fd, n);
+      } else {
+        r->SetUInt64(msg, fd, n);
       }
+      break;
+    }
+    case FieldDescriptor::CPPTYPE_FLOAT: {
+      if (!number) return expected("number");
+      float f;
+      if (!ParseFinite(value, f)) return invalid("float");
+      if (repeated) {
+        r->AddFloat(msg, fd, f);
+      } else {
+        r->SetFloat(msg, fd, f);
+      }
+      break;
+    }
+    case FieldDescriptor::CPPTYPE_DOUBLE: {
+      if (!number) return expected("number");
       double d;
-      if (!ParseDouble(current_.value, d))
-        return PosError(pos, "invalid number: " + std::string(current_.value));
-      if (fd->cpp_type() == FieldDescriptor::CPPTYPE_FLOAT) {
-        r->SetFloat(msg, fd, static_cast<float>(d));
+      if (!ParseFinite(value, d)) return invalid("double");
+      if (repeated) {
+        r->AddDouble(msg, fd, d);
       } else {
         r->SetDouble(msg, fd, d);
       }
-      Advance();
-      return Status::OK();
+      break;
     }
     case FieldDescriptor::CPPTYPE_ENUM:
-      return SetEnum(msg, fd, /*repeated=*/false);
+      return ConsumeEnum(msg, fd, named, repeated);
     default:
       return PosError(pos, "unsupported scalar kind");
   }
+  Advance();
+  return Status::OK();
 }
 
-Status DirectDecoder::AddRepeatedScalar(Message* msg, const FieldDescriptor* fd) {
+Status DirectDecoder::ConsumeEnum(Message* msg,
+                                  const FieldDescriptor* fd,
+                                  const FieldDescriptor* named,
+                                  bool repeated) {
   Position pos = current_.pos;
-  if (Status s = CheckNoPrecision(fd); !s.ok()) return s;
-  const Reflection* r = msg->GetReflection();
-  switch (fd->cpp_type()) {
-    case FieldDescriptor::CPPTYPE_STRING: {
-      if (current_.kind == TokenKind::kString) {
-        if (fd->type() == FieldDescriptor::TYPE_STRING) {
-          if (Status s = CheckUTF8(current_.value, fd, pos); !s.ok()) return s;
-        }
-        r->AddString(msg, fd, std::string(current_.value));
-        Advance();
-        return Status::OK();
-      }
-      if (current_.kind == TokenKind::kBytes) {
-        auto decoded = detail::Base64DecodeStd(current_.value);
-        if (!decoded.has_value()) return PosError(pos, "invalid base64");
-        r->AddString(msg, fd, std::string(decoded->begin(), decoded->end()));
-        Advance();
-        return Status::OK();
-      }
-      return PosError(pos, "expected string in repeated field");
-    }
-    case FieldDescriptor::CPPTYPE_BOOL:
-      if (current_.kind != TokenKind::kBool)
-        return PosError(pos, "expected bool in repeated field");
-      r->AddBool(msg, fd, current_.value == "true");
-      Advance();
-      return Status::OK();
-    case FieldDescriptor::CPPTYPE_INT32: {
-      int32_t n;
-      if (current_.kind != TokenKind::kInt || !ParseInteger(current_.value, n))
-        return PosError(pos, "expected int32 in repeated field");
-      r->AddInt32(msg, fd, n);
-      Advance();
-      return Status::OK();
-    }
-    case FieldDescriptor::CPPTYPE_INT64: {
-      int64_t n;
-      if (current_.kind != TokenKind::kInt || !ParseInteger(current_.value, n))
-        return PosError(pos, "expected int64 in repeated field");
-      r->AddInt64(msg, fd, n);
-      Advance();
-      return Status::OK();
-    }
-    case FieldDescriptor::CPPTYPE_UINT32: {
-      uint32_t n;
-      if (current_.kind != TokenKind::kInt || !ParseInteger(current_.value, n))
-        return PosError(pos, "expected uint32 in repeated field");
-      r->AddUInt32(msg, fd, n);
-      Advance();
-      return Status::OK();
-    }
-    case FieldDescriptor::CPPTYPE_UINT64: {
-      uint64_t n;
-      if (current_.kind != TokenKind::kInt || !ParseInteger(current_.value, n))
-        return PosError(pos, "expected uint64 in repeated field");
-      r->AddUInt64(msg, fd, n);
-      Advance();
-      return Status::OK();
-    }
-    case FieldDescriptor::CPPTYPE_FLOAT:
-    case FieldDescriptor::CPPTYPE_DOUBLE: {
-      if (current_.kind != TokenKind::kFloat && current_.kind != TokenKind::kInt)
-        return PosError(pos, "expected number in repeated field");
-      double d;
-      if (!ParseDouble(current_.value, d)) return PosError(pos, "invalid number");
-      if (fd->cpp_type() == FieldDescriptor::CPPTYPE_FLOAT) {
-        r->AddFloat(msg, fd, static_cast<float>(d));
-      } else {
-        r->AddDouble(msg, fd, d);
-      }
-      Advance();
-      return Status::OK();
-    }
-    default:
-      return PosError(pos, "AddRepeatedScalar called for non-scalar kind");
-  }
-}
-
-Status DirectDecoder::SetEnum(Message* msg, const FieldDescriptor* fd, bool repeated) {
-  Position pos = current_.pos;
-  if (Status s = CheckNoPrecision(fd); !s.ok()) return s;
+  if (Status s = CheckNoPrecision(named); !s.ok()) return s;
   const Reflection* r = msg->GetReflection();
   const auto* enum_d = fd->enum_type();
+  int32_t n = 0;
   if (current_.kind == TokenKind::kIdent) {
     const auto* ev = enum_d->FindValueByName(std::string(current_.value));
     if (!ev) {
       return PosError(pos,
-                      "unknown enum value \"" + std::string(current_.value) + "\" for " +
+                      "unknown enum value " + detail::GoQuote(current_.value) + " for " +
                           std::string(enum_d->full_name()));
     }
-    if (repeated)
-      r->AddEnumValue(msg, fd, ev->number());
-    else
-      r->SetEnumValue(msg, fd, ev->number());
-    Advance();
-    return Status::OK();
-  }
-  if (current_.kind == TokenKind::kInt) {
-    int32_t n;
+    n = ev->number();
+  } else if (current_.kind == TokenKind::kInt) {
     if (!ParseInteger(current_.value, n)) {
-      return PosError(pos, "invalid enum number");
+      return PosError(pos, "invalid enum number: " + std::string(current_.value));
     }
-    if (repeated)
-      r->AddEnumValue(msg, fd, n);
-    else
-      r->SetEnumValue(msg, fd, n);
-    Advance();
-    return Status::OK();
+  } else {
+    return PosError(pos,
+                    "expected enum name or number for field " + detail::GoQuote(named->name()));
   }
-  return PosError(pos, "expected enum name or number");
+  if (repeated) {
+    r->AddEnumValue(msg, fd, n);
+  } else {
+    r->SetEnumValue(msg, fd, n);
+  }
+  Advance();
+  return Status::OK();
 }
 
 // --- skip helpers (for discard_unknown) ----------------------------------
@@ -1720,7 +1845,8 @@ Status ApplyMessageDefault(Message* msg, const FieldDescriptor* fd, std::string_
     switch (inner) {
       case FieldDescriptor::CPPTYPE_STRING:
         if (value_fd->type() == FieldDescriptor::TYPE_BYTES) {
-          auto decoded = detail::Base64DecodeStd(def);
+          size_t offset = 0;
+          auto decoded = detail::Base64DecodeLenient(def, &offset);
           if (!decoded.has_value())
             return Status::Error("invalid default bytes \"" + std::string(def) + "\" for field \"" +
                                  std::string(fd->name()) + "\"");
@@ -1768,16 +1894,16 @@ Status ApplyMessageDefault(Message* msg, const FieldDescriptor* fd, std::string_
         return Status::OK();
       }
       case FieldDescriptor::CPPTYPE_FLOAT: {
-        double d;
-        if (!ParseDouble(def, d))
+        float d;
+        if (!ParseFinite(def, d))
           return Status::Error("invalid default float \"" + std::string(def) + "\" for field \"" +
                                std::string(fd->name()) + "\"");
-        sr->SetFloat(sub, value_fd, static_cast<float>(d));
+        sr->SetFloat(sub, value_fd, d);
         return Status::OK();
       }
       case FieldDescriptor::CPPTYPE_DOUBLE: {
         double d;
-        if (!ParseDouble(def, d))
+        if (!ParseFinite(def, d))
           return Status::Error("invalid default double \"" + std::string(def) + "\" for field \"" +
                                std::string(fd->name()) + "\"");
         sr->SetDouble(sub, value_fd, d);
@@ -1837,7 +1963,8 @@ Status ApplyDefault(Message* msg, const FieldDescriptor* fd, std::string_view de
   switch (fd->cpp_type()) {
     case FieldDescriptor::CPPTYPE_STRING: {
       if (fd->type() == FieldDescriptor::TYPE_BYTES) {
-        auto decoded = detail::Base64DecodeStd(def);
+        size_t offset = 0;
+        auto decoded = detail::Base64DecodeLenient(def, &offset);
         if (!decoded.has_value()) {
           return Status::Error("invalid default bytes for field \"" + std::string(fd->name()) +
                                "\"");
@@ -1887,16 +2014,16 @@ Status ApplyDefault(Message* msg, const FieldDescriptor* fd, std::string_view de
       return Status::OK();
     }
     case FieldDescriptor::CPPTYPE_FLOAT: {
-      double d;
-      if (!ParseDouble(def, d))
+      float d;
+      if (!ParseFinite(def, d))
         return Status::Error("invalid default float \"" + std::string(def) + "\" for field \"" +
                              std::string(fd->name()) + "\"");
-      r->SetFloat(msg, fd, static_cast<float>(d));
+      r->SetFloat(msg, fd, d);
       return Status::OK();
     }
     case FieldDescriptor::CPPTYPE_DOUBLE: {
       double d;
-      if (!ParseDouble(def, d))
+      if (!ParseFinite(def, d))
         return Status::Error("invalid default double \"" + std::string(def) + "\" for field \"" +
                              std::string(fd->name()) + "\"");
       r->SetDouble(msg, fd, d);
@@ -1992,7 +2119,8 @@ Status PostDecoder::Run(Message* msg,
     if (null_mask_fd != nullptr && fd->number() == null_mask_fd->number()) continue;
     std::string path = prefix + std::string(fd->name());
     if (!result_->Has(path)) {
-      if (p.required) return Status::Error(1, 1, "required field " + QuoteKey(path) + " is absent");
+      if (p.required)
+        return Status::Error(1, 1, "required field " + detail::GoQuote(path) + " is absent");
       if (p.def.has_value() && !OneofChosen(fd, prefix)) {
         if (Status st = ApplyDefault(msg, fd, *p.def); !st.ok()) return st;
       }
@@ -2055,17 +2183,17 @@ Status CheckSchema(const Message* msg, const UnmarshalOptions& opts) {
 
 Status Unmarshal(std::string_view data, Message* msg, UnmarshalOptions opts) {
   if (Status s = CheckSchema(msg, opts); !s.ok()) return s;
-  DirectDecoder d(
-      data, msg, /*result=*/nullptr, opts.type_resolver, opts.discard_unknown, ResolveLimits(opts));
+  DirectDecoder d(data, msg, /*result=*/nullptr, opts);
   return d.Run();
 }
 
 StatusOr<Result> UnmarshalFull(std::string_view data, Message* msg, UnmarshalOptions opts) {
   if (Status s = CheckSchema(msg, opts); !s.ok()) return s;
   Result r;
-  DirectDecoder d(data, msg, &r, opts.type_resolver, opts.discard_unknown, ResolveLimits(opts));
+  DirectDecoder d(data, msg, &r, opts);
   Status st = d.Run();
   if (!st.ok()) return st;
+  if (opts.skip_post_decode) return r;
   const auto* null_mask_fd = FindNullMaskField(msg->GetDescriptor());
   if (Status pst = d.RunPostDecode(null_mask_fd); !pst.ok()) return pst;
   return r;

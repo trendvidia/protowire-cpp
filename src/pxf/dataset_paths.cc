@@ -4,6 +4,7 @@
 
 #include <string_view>
 
+#include "protowire/detail/go_quote.h"
 #include "protowire/pxf/wellknown.h"
 
 namespace protowire::pxf {
@@ -13,7 +14,8 @@ namespace {
 namespace pb = google::protobuf;
 
 bool HasEmptySegment(std::string_view c) {
-  return c.empty() || c.front() == '.' || c.back() == '.' || c.find("..") != std::string_view::npos;
+  if (c.empty()) return false;  // no segment at all: it names no field, a later error
+  return c.front() == '.' || c.back() == '.' || c.find("..") != std::string_view::npos;
 }
 
 // IsPathPrefix reports whether path goes inside the field prefix names:
@@ -31,7 +33,7 @@ bool IsLiteralType(const pb::Descriptor* d) {
 }
 
 std::string Quoted(std::string_view s) {
-  return "\"" + std::string(s) + "\"";
+  return detail::GoQuote(s);
 }
 
 }  // namespace

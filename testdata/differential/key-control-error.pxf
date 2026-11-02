@@ -1,0 +1,2 @@
+@type diff.v1.Root
+labels = { "\u0085": "x" "\u0085": "y" }

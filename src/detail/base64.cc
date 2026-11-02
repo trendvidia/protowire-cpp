@@ -3,6 +3,7 @@
 #include "protowire/detail/base64.h"
 
 #include <array>
+#include <utility>
 
 namespace protowire::detail {
 
@@ -94,6 +95,89 @@ std::optional<std::vector<uint8_t>> Base64DecodeStd(std::string_view s) {
     if (pad != 1 && pad != 2) return std::nullopt;
   }
   return out;
+}
+
+namespace {
+
+// DecodeGo ports encoding/base64's decodeQuantum loop, with its newline
+// skipping and its error offsets. Non-strict, as Go's encodings are by
+// default: trailing bits of the last quantum are dropped.
+std::optional<std::vector<uint8_t>> DecodeGo(std::string_view src,
+                                             bool url,
+                                             bool padded,
+                                             size_t* offset) {
+  const auto value = [url](char c) -> int {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == (url ? '-' : '+')) return 62;
+    if (c == (url ? '_' : '/')) return 63;
+    return -1;
+  };
+  const auto newline = [](char c) { return c == '\n' || c == '\r'; };
+  std::vector<uint8_t> out;
+  out.reserve(src.size() * 3 / 4);
+  const auto fail = [offset](size_t at) {
+    *offset = at;
+    return std::nullopt;
+  };
+  size_t si = 0;
+  while (si < src.size()) {
+    uint32_t val = 0;
+    int dlen = 4;
+    for (int j = 0; j < 4; ++j) {
+      if (si == src.size()) {
+        if (j == 0) return out;
+        if (j == 1 || padded) return fail(si - static_cast<size_t>(j));
+        dlen = j;
+        break;
+      }
+      const char in = src[si++];
+      const int v = value(in);
+      if (v >= 0) {
+        val |= static_cast<uint32_t>(v) << (6 * (3 - j));
+        continue;
+      }
+      if (newline(in)) {
+        --j;
+        continue;
+      }
+      if (!padded || in != '=') return fail(si - 1);
+      if (j < 2) return fail(si - 1);
+      if (j == 2) {
+        while (si < src.size() && newline(src[si])) ++si;
+        if (si == src.size()) return fail(src.size());
+        if (src[si] != '=') return fail(si - 1);
+        ++si;
+      }
+      while (si < src.size() && newline(src[si])) ++si;
+      if (si < src.size()) return fail(si);
+      dlen = j;
+      break;
+    }
+    if (dlen >= 2) out.push_back(static_cast<uint8_t>(val >> 16));
+    if (dlen >= 3) out.push_back(static_cast<uint8_t>(val >> 8));
+    if (dlen >= 4) out.push_back(static_cast<uint8_t>(val));
+  }
+  return out;
+}
+
+}  // namespace
+
+std::optional<std::vector<uint8_t>> Base64DecodeProto(std::string_view s, size_t* offset) {
+  if (auto d = DecodeGo(s, /*url=*/false, /*padded=*/true, offset)) return d;
+  return DecodeGo(s, /*url=*/true, /*padded=*/true, offset);
+}
+
+std::optional<std::vector<uint8_t>> Base64DecodeLenient(std::string_view s, size_t* offset) {
+  auto decoded = DecodeGo(s, /*url=*/false, /*padded=*/true, offset);
+  if (decoded.has_value()) return decoded;
+  size_t ignored = 0;
+  const std::pair<bool, bool> kVariants[] = {{false, false}, {true, true}, {true, false}};
+  for (const auto& [url, padded] : kVariants) {
+    if (auto d = DecodeGo(s, url, padded, &ignored)) return d;
+  }
+  return decoded;
 }
 
 }  // namespace protowire::detail

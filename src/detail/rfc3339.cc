@@ -86,7 +86,11 @@ std::optional<Timestamp> ParseRFC3339(std::string_view s) {
   }
 
   // Validate ranges.
-  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 60) {
+  static constexpr int kDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  const bool leap = month == 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+  // No leap second: Go's time.Parse refuses :60 as well.
+  if (month < 1 || month > 12 || day < 1 || day > kDays[month - 1] + (leap ? 1 : 0) || hour > 23 ||
+      minute > 59 || second > 59) {
     return std::nullopt;
   }
 
@@ -138,12 +142,12 @@ std::string FormatRFC3339Nano(int64_t seconds, int32_t nanos) {
                   ss);
     return std::string(buf);
   }
-  // Trim trailing zeros to 3/6/9 width.
+  // Trim every trailing zero, as Go's time.RFC3339Nano does.
   int width = 9;
   int n = nanos;
-  while (width > 3 && n % 1000 == 0) {
-    n /= 1000;
-    width -= 3;
+  while (n % 10 == 0) {
+    n /= 10;
+    --width;
   }
   std::snprintf(buf,
                 sizeof(buf),
