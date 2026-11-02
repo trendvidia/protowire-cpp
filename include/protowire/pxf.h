@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -29,7 +30,8 @@
 #include "protowire/pxf/options.h"
 #include "protowire/pxf/parser.h"  // Document, Parse
 #include "protowire/pxf/result.h"
-#include "protowire/pxf/schema.h"  // ValidateDescriptor, Violation
+#include "protowire/pxf/rewriter.h"  // Rewriter
+#include "protowire/pxf/schema.h"    // ValidateDescriptor, Violation
 
 namespace protowire::pxf {
 
@@ -40,6 +42,29 @@ Status Unmarshal(std::string_view data, google::protobuf::Message* msg, Unmarsha
 StatusOr<Result> UnmarshalFull(std::string_view data,
                                google::protobuf::Message* msg,
                                UnmarshalOptions opts = {});
+
+// UnmarshalDescriptor decodes into a new message of type desc, for a caller with
+// a descriptor and no generated class. The message owns what it needs and desc
+// must outlive it.
+StatusOr<std::shared_ptr<google::protobuf::Message>> UnmarshalDescriptor(
+    std::string_view data, const google::protobuf::Descriptor* desc, UnmarshalOptions opts = {});
+
+// UnmarshalFullDescriptor is UnmarshalFull into a new message of type desc.
+struct DescriptorResult {
+  std::shared_ptr<google::protobuf::Message> message;
+  Result result;
+};
+StatusOr<DescriptorResult> UnmarshalFullDescriptor(std::string_view data,
+                                                   const google::protobuf::Descriptor* desc,
+                                                   UnmarshalOptions opts = {});
+
+// ApplyDefault parses def, a (pxf.default) literal, and writes it to fd of msg.
+// A caller running its own post-decode pass, as a layered config does after
+// merging (UnmarshalOptions::skip_post_decode), reads the literal with
+// GetDefault. A rejected literal leaves msg unchanged.
+Status ApplyDefault(google::protobuf::Message* msg,
+                    const google::protobuf::FieldDescriptor* fd,
+                    std::string_view def);
 
 // --- Encoding --------------------------------------------------------------
 

@@ -26,6 +26,12 @@ struct BigFloatFields {
   bool negative = false;
 };
 
+// CountLiteralDigits is what MaxNumericLiteralDigits counts: the significant
+// digits of a literal's mantissa, either side of the point, leading zeros
+// excluded (draft -01 § Mandatory Limits, protowire#410). An exponent and a
+// precision suffix are bounded on their own, so the count stops at either.
+int CountLiteralDigits(std::string_view literal);
+
 // ParseBigFloatLiteral reads a literal at the precision its suffix states,
 // or at 256 bits without one, rounding half to even. prec_digits is the
 // suffix's digits, empty for none. The mantissa is the significand as a

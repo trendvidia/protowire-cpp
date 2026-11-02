@@ -12,6 +12,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -36,6 +37,7 @@ struct TimestampVal;
 struct DurationVal;
 struct ListVal;
 struct BlockVal;
+struct BadVal;
 
 // `Value` is a tagged pointer-variant; use std::unique_ptr to own the data
 // and std::variant to discriminate.
@@ -49,64 +51,91 @@ using ValuePtr = std::variant<std::unique_ptr<StringVal>,
                               std::unique_ptr<TimestampVal>,
                               std::unique_ptr<DurationVal>,
                               std::unique_ptr<ListVal>,
-                              std::unique_ptr<BlockVal>>;
+                              std::unique_ptr<BlockVal>,
+                              std::unique_ptr<BadVal>>;
 
 struct StringVal {
   Position pos;
+  Position end;  // just past the closing quote
   std::string value;
 };
 struct IntVal {
   Position pos;
+  Position end;      // just past the literal's last byte, its suffix included
   std::string raw;   // raw text — decoded later by schema
   std::string prec;  // precision suffix digits, empty for none
 };
 struct FloatVal {
   Position pos;
+  Position end;  // just past the literal's last byte, its suffix included
   std::string raw;
   std::string prec;
 };
 struct BoolVal {
   Position pos;
+  Position end;  // just past the literal's last byte
   bool value = false;
 };
 struct BytesVal {
   Position pos;
+  Position end;  // just past the closing quote
   std::vector<uint8_t> value;
 };
 struct NullVal {
   Position pos;
+  Position end;  // just past the literal's last byte
 };
 struct IdentVal {
   Position pos;
+  Position end;  // just past the identifier's last byte
   std::string name;
 };
 struct TimestampVal {
   Position pos;
+  Position end;  // just past the literal's last byte
   int64_t seconds = 0;
   int32_t nanos = 0;
   std::string raw;
 };
 struct DurationVal {
   Position pos;
+  Position end;  // just past the literal's last byte
   int64_t seconds = 0;
   int32_t nanos = 0;
   std::string raw;
 };
 struct ListVal {
   Position pos;
+  Position end;  // just past the closing ']'
   std::vector<ValuePtr> elements;
+};
+
+// BadVal stands for a value that was required but missing or malformed. Only
+// ParseTolerant produces one; Parse never does. For a missing value, pos is
+// just past the token that required it (after a dangling '=' or key), where
+// the value would be typed; for a malformed literal, pos is the offending
+// token. The syntax error is among those ParseTolerant returns. It spans no
+// source, and FormatDocument writes nothing for it, so formatting a tolerant
+// AST holding one may not reparse.
+struct BadVal {
+  Position pos;
+  Position end;  // == pos
 };
 
 // --- Entry types ----
 struct Assignment;
 struct MapEntry;
 struct Block;
+struct TypeEntry;
 
-using EntryPtr =
-    std::variant<std::unique_ptr<Assignment>, std::unique_ptr<MapEntry>, std::unique_ptr<Block>>;
+using EntryPtr = std::variant<std::unique_ptr<Assignment>,
+                              std::unique_ptr<MapEntry>,
+                              std::unique_ptr<Block>,
+                              std::unique_ptr<TypeEntry>>;
 
 struct Assignment {
   Position pos;
+  Position end;  // just past the value's last byte
   std::string key;
   // key_quoted records that key was written as a string literal
   // (`"name" = { ... }`, the quoted entry-name form of draft -01 §3.13).
@@ -121,6 +150,7 @@ struct Assignment {
 };
 struct MapEntry {
   Position pos;
+  Position end;  // just past the value's last byte
   std::string key;
   // key_quoted records that key was written as a string literal
   // (`"true": v` rather than `true: v`). key always holds the unquoted
@@ -140,6 +170,7 @@ struct MapEntry {
 };
 struct Block {
   Position pos;
+  Position end;  // just past the closing '}'
   std::string name;
   // name_quoted records that name was written as a string literal
   // (`"us-east-1" { ... }`, draft -01 §3.13). name always holds the
@@ -151,8 +182,21 @@ struct Block {
   std::vector<EntryPtr> entries;
   std::vector<Comment> leading_comments;
 };
+// TypeEntry is `@type = "<type-url>"` opening a block bound to
+// google.protobuf.Any (draft -01 "Any Blocks"). The rest of the block is a
+// body of the type the URL names. A parser cannot tell which blocks the schema
+// binds to Any, so it accepts one as the first entry of any block, and only
+// there; binding checks the rest.
+struct TypeEntry {
+  Position pos;
+  Position end;     // just past the URL string
+  std::string url;  // the type URL as written, unquoted
+  std::vector<Comment> leading_comments;
+  std::string trailing_comment;
+};
 struct BlockVal {
   Position pos;
+  Position end;  // just past the closing '}'
   std::vector<EntryPtr> entries;
 };
 
@@ -268,5 +312,16 @@ struct Document {
 
 Position EntryPos(const EntryPtr& e);
 Position ValuePos(const ValuePtr& v);
+
+// EntrySpan is the source span [first, second) of an entry from Parse or
+// ParseTolerant: first is its key, second just past its value, or past the
+// closing '}' of a Block. Leading comments and surrounding whitespace are not
+// in it. An entry built by hand has a default end.
+std::pair<Position, Position> EntrySpan(const EntryPtr& e);
+
+// ValueSpan is the source span [first, second) of a value from Parse or
+// ParseTolerant. A BadVal spans nothing. A value built by hand has a default
+// end.
+std::pair<Position, Position> ValueSpan(const ValuePtr& v);
 
 }  // namespace protowire::pxf

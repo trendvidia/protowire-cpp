@@ -1,0 +1,344 @@
+# Split bindings and the anonymous list form: the inputs of protowire-go's
+# rewrite_keyed_forms_test.go.
+
+doc split.pxf
+setkeyed children c type "Grid"
+bytes
+
+doc split.pxf
+rmelem children c
+bytes
+
+doc split.pxf
+rename children c z
+rename children a c
+bytes
+
+doc split.pxf
+insert children a "" !none
+bytes
+
+doc split.pxf
+insert children d "" type = "X"
+bytes
+
+doc split.pxf
+insert children a2 b type = "X"
+bytes
+
+doc split.pxf
+move children c a
+bytes
+
+doc split.pxf
+move children a c
+bytes
+
+doc split.pxf
+move children a ""
+bytes
+
+doc anon.pxf
+setkeyed regions us-east-1 replicas 5
+rmkeyed regions us-east-1 replicas
+rmelem regions us-east-1
+insert regions x "" !none
+rename regions us-east-1 x
+move regions us-east-1 ""
+bytes
+
+doc anon.pxf
+keyedby regions name
+setkeyed regions us-east-1 replicas 5
+bytes
+
+doc anon.pxf
+keyedby regions name
+setkeyed regions eu-west-2 tier "edge"
+bytes
+
+doc anon.pxf
+keyedby regions name
+rmkeyed regions us-east-1 replicas
+bytes
+
+doc anon.pxf
+keyedby regions name
+rename regions us-east-1 us-east-2
+bytes
+
+doc anon.pxf
+keyedby regions name
+rename regions us-east-1 "a\"b"
+bytes
+
+doc anon.pxf
+keyedby regions name
+rmelem regions us-east-1
+bytes
+
+doc anon.pxf
+keyedby regions name
+rmelem regions eu-west-2
+bytes
+
+doc anon.pxf
+keyedby regions name
+insert regions ap-south-1 "" replicas = 2
+bytes
+
+doc anon.pxf
+keyedby regions name
+insert regions ca-central-1 eu-west-2 replicas = 4
+bytes
+
+doc anon.pxf
+keyedby regions name
+insert regions ca-central-1 us-east-1 replicas = 4 z { w = 1 }
+bytes
+
+doc anon.pxf
+keyedby regions name
+move regions eu-west-2 us-east-1
+bytes
+
+doc anon.pxf
+keyedby regions name
+move regions us-east-1 ""
+bytes
+
+doc anon.pxf
+keyedby regions name
+move regions us-east-1 eu-west-2
+bytes
+
+doc anon.pxf
+keyedby regions name
+move regions eu-west-2 ""
+bytes
+
+doc anon.pxf
+keyedby regions name
+setkeyed regions new-one tier "edge"
+setkeyed regions new-two a.b 1
+bytes
+
+doc anon.pxf
+keyedby regions name
+setkeyed regions us-east-1 "" 1
+rmkeyed regions us-east-1 nope
+rmelem regions nope
+rename regions nope x
+rename regions us-east-1 eu-west-2
+move regions nope ""
+move regions us-east-1 nope
+insert regions us-east-1 "" !none
+insert regions x nope !none
+bytes
+
+# A later declaration replaces the earlier one.
+doc anon.pxf
+keyedby regions replicas
+setkeyed regions us-east-1 replicas 5
+keyedby regions name
+setkeyed regions us-east-1 replicas 6
+bytes
+
+src "children {\n  a { type = \"L\" }\n}\nchildren = [\n  {\n    id = \"b\"\n  }\n]\n"
+keyedby children id
+move children a b
+move children b a
+setkeyed children b type "H"
+setkeyed children a type "I"
+bytes
+
+src "children {\n  a { type = \"L\" }\n}\nchildren = [\n  {\n    id = \"b\"\n  }\n]\n"
+keyedby children id
+insert children c a id2 = 1
+insert children d b id2 = 2
+insert children e "" id2 = 3
+bytes
+
+src "children {\n  a { type = \"L\" }\n}\nchildren = [\n  {\n    id = \"b\"\n  }\n]\n"
+insert children e "" id2 = 3
+setkeyed children b x 1
+bytes
+
+src "children = [\n  {\n    id = \"b\"\n  }\n]\nchildren {\n  a { type = \"L\" }\n}\n"
+keyedby children id
+insert children e "" id2 = 3
+setkeyed children f x 1
+bytes
+
+# Inline lists.
+src "r = [ { n = \"a\" }, { n = \"b\" }, { n = \"c\" } ]\n"
+keyedby r n
+rmelem r a
+bytes
+
+src "r = [ { n = \"a\" }, { n = \"b\" }, { n = \"c\" } ]\n"
+keyedby r n
+rmelem r b
+bytes
+
+src "r = [ { n = \"a\" }, { n = \"b\" }, { n = \"c\" } ]\n"
+keyedby r n
+rmelem r c
+bytes
+
+src "r = [ { n = \"a\" }, { n = \"b\" }, { n = \"c\" } ]\n"
+keyedby r n
+insert r x "" v = 1
+insert r y b v = 2
+bytes
+
+src "r = [ { n = \"a\" }, { n = \"b\" }, { n = \"c\" } ]\n"
+keyedby r n
+move r a ""
+bytes
+
+src "r = [ { n = \"a\" }, { n = \"b\" }, { n = \"c\" } ]\n"
+keyedby r n
+move r c a
+bytes
+
+src "r = [ { n = \"a\" }, { n = \"b\" }, { n = \"c\" } ]\n"
+keyedby r n
+move r a b
+bytes
+
+src "r = [ { n = \"a\" }, { n = \"b\" }, { n = \"c\" } ]\n"
+keyedby r n
+move r b ""
+bytes
+
+src "r = [ { n = \"a\" }, { n = \"b\" }, { n = \"c\" } ]\n"
+keyedby r n
+setkeyed r b v 1
+setkeyed r c w.x 2
+rename r a z
+bytes
+
+src "r = [ { n = \"a\" } ]\n"
+keyedby r n
+rmelem r a
+bytes
+
+src "r = [\n  { n = \"a\" }\n]\n"
+keyedby r n
+rmelem r a
+bytes
+
+src "r = [\n  { n = \"a\" }\n]\n"
+keyedby r n
+move r a ""
+bytes
+
+# An empty list, top level and nested.
+src "r = []\n"
+keyedby r n
+insert r a "" v = 1
+bytes
+
+src "s {\n    r = []\n    t {\n        y = 1\n    }\n}\n"
+keyedby s.r n
+insert s.r a "" v = 1
+setkeyed s.r b c.d 1
+bytes
+
+src "s {\n\tr = [\n\t]\n}\n"
+keyedby s.r n
+setkeyed s.r b c 1
+bytes
+
+# Elements the anonymous form cannot address: no key, an empty key, a repeated
+# key field, a quoted key field, a key that is not a string, not a block.
+src "r = [\n  { v = 1 },\n  { n = \"\" },\n  { n = \"a\" n = \"b\" },\n  { \"n\" = \"q\" },\n  { n = 5 },\n  7,\n  { n = \"ok\" }\n]\n"
+keyedby r n
+setkeyed r ok v 1
+setkeyed r a v 1
+setkeyed r b v 1
+setkeyed r q v 1
+rmelem r ok
+bytes
+
+src "r = [\n  { v = 1 },\n  { n = \"ok\" }\n]\n"
+keyedby r n
+rename r ok new
+move r ok ""
+bytes
+
+src "r = [\n  { v = 1 },\n  { n = \"ok\" },\n  7\n]\n"
+keyedby r n
+move r ok ""
+bytes
+
+# A key field that is a block, and an element without its key field declared
+# at the same path.
+src "s {\n  r = [\n    { n = \"a\" }\n  ]\n}\nr = [ { n = \"b\" } ]\n"
+keyedby r n
+setkeyed r b v 1
+setkeyed s.r a v 1
+bytes
+
+# Elements on shared lines inside a multi-line list.
+src "r = [\n  { n = \"a\" }, { n = \"b\" },\n  { n = \"c\" }\n]\n"
+keyedby r n
+rmelem r a
+bytes
+
+src "r = [\n  { n = \"a\" }, { n = \"b\" },\n  { n = \"c\" }\n]\n"
+keyedby r n
+rmelem r b
+bytes
+
+src "r = [\n  { n = \"a\" }, { n = \"b\" },\n  { n = \"c\" }\n]\n"
+keyedby r n
+insert r x b v = 1
+insert r y c v = 1
+bytes
+
+src "r = [\n  { n = \"a\" }, { n = \"b\" },\n  { n = \"c\" }\n]\n"
+keyedby r n
+move r c b
+bytes
+
+src "r = [\n  { n = \"a\" }, { n = \"b\" },\n  { n = \"c\" }\n]\n"
+keyedby r n
+move r a ""
+bytes
+
+# Comments between elements stay where they are.
+src "r = [\n  # first\n  { n = \"a\" }, # after a\n  // second\n  { n = \"b\" }\n]\n"
+keyedby r n
+rmelem r a
+bytes
+
+src "r = [\n  # first\n  { n = \"a\" }, # after a\n  // second\n  { n = \"b\" }\n]\n"
+keyedby r n
+rmelem r b
+bytes
+
+src "r = [\n  # first\n  { n = \"a\" }, # after a\n  // second\n  { n = \"b\" }\n]\n"
+keyedby r n
+move r b a
+bytes
+
+src "r = [\n  { n = \"a\" },\n  { n = \"b\" }, # trailing comma comment\n]\n"
+keyedby r n
+insert r x "" v = 1
+rmelem r a
+bytes
+
+src "r = [\n  { n = \"a\" },\n  { n = \"b\" },\n]\n"
+keyedby r n
+rmelem r b
+bytes
+
+# Multi-line element bodies under a list inside a block.
+src "s {\n  r = [\n    {\n      n = \"a\"\n    }\n  ]\n}\n"
+keyedby s.r n
+setkeyed s.r a x { y = 1 }
+setkeyed s.r a z.w 1
+insert s.r b "" x = [1] y { z = 1 }
+bytes

@@ -553,7 +553,9 @@ Status Encoder::EncodeMessage(const Message& msg, int level) {
       out_ += "null\n";
       continue;
     }
-    if (cell_bodies_ && !fd->is_repeated() && !msg.GetReflection()->HasField(msg, fd)) {
+    const pb::Reflection* refl = msg.GetReflection();
+    const bool has = fd->is_repeated() ? refl->FieldSize(msg, fd) > 0 : refl->HasField(msg, fd);
+    if (cell_bodies_ && !has) {
       bool write = false;
       bool null = false;
       if (Status st = CellUnset(msg, fd, path_prefix_ + std::string(fd->name()), &write, &null);
@@ -565,7 +567,11 @@ Status Encoder::EncodeMessage(const Message& msg, int level) {
         out_ += "null\n";
       } else if (write) {  // the zero value, written out
         WriteFieldPrefix(level, fd->name());
-        EncodeScalarValue(msg, fd, /*idx=*/-1);
+        if (fd->is_repeated()) {
+          out_ += EmptyCollection(fd);
+        } else {
+          EncodeScalarValue(msg, fd, /*idx=*/-1);
+        }
         out_ += '\n';
       }
       continue;

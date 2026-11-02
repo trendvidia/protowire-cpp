@@ -2,7 +2,6 @@
 // Copyright (c) 2026 TrendVidia, LLC.
 #include "protowire/detail/rfc3339.h"
 
-#include <cctype>
 #include <charconv>
 #include <cstdio>
 
@@ -33,36 +32,39 @@ bool ParseUInt(std::string_view s, int& out) {
 
 }  // namespace
 
+// ParseRFC3339 takes what Go's time.Parse takes for time.RFC3339, which is
+// looser than the RFC in four ways: the hour may be one digit, the fraction may
+// open with ',', a fraction past nine digits is cut, and an offset runs to
+// 24:60. It is stricter in one: 'T' and 'Z' are upper-case only.
 std::optional<Timestamp> ParseRFC3339(std::string_view s) {
-  // Minimum: YYYY-MM-DDTHH:MM:SSZ → 20 chars
-  if (s.size() < 20) return std::nullopt;
-  // Components.
-  int year, month, day, hour, minute, second;
-  if (s[4] != '-' || s[7] != '-' || (s[10] != 'T' && s[10] != 't') || s[13] != ':' ||
-      s[16] != ':') {
+  const auto digit = [&](size_t i) { return i < s.size() && s[i] >= '0' && s[i] <= '9'; };
+  // YYYY-MM-DDTH:MM:SSZ is the shortest.
+  if (s.size() < 19) return std::nullopt;
+  if (s[4] != '-' || s[7] != '-' || s[10] != 'T') return std::nullopt;
+  const size_t hour_digits = digit(12) ? 2 : 1;
+  const size_t minutes = 11 + hour_digits + 1;
+  if (s.size() < minutes + 6 || s[minutes - 1] != ':' || s[minutes + 2] != ':') {
     return std::nullopt;
   }
+  int year, month, day, hour, minute, second;
   if (!ParseUInt(s.substr(0, 4), year) || !ParseUInt(s.substr(5, 2), month) ||
-      !ParseUInt(s.substr(8, 2), day) || !ParseUInt(s.substr(11, 2), hour) ||
-      !ParseUInt(s.substr(14, 2), minute) || !ParseUInt(s.substr(17, 2), second)) {
+      !ParseUInt(s.substr(8, 2), day) || !ParseUInt(s.substr(11, hour_digits), hour) ||
+      !ParseUInt(s.substr(minutes, 2), minute) || !ParseUInt(s.substr(minutes + 3, 2), second)) {
     return std::nullopt;
   }
 
-  size_t pos = 19;
+  size_t pos = minutes + 5;
   int32_t nanos = 0;
-  if (pos < s.size() && s[pos] == '.') {
+  if (pos < s.size() && (s[pos] == '.' || s[pos] == ',') && digit(pos + 1)) {
     ++pos;
-    size_t digits_start = pos;
-    while (pos < s.size() && std::isdigit(static_cast<unsigned char>(s[pos]))) {
-      ++pos;
-    }
-    size_t digits = pos - digits_start;
-    if (digits == 0 || digits > 9) return std::nullopt;
     int frac = 0;
-    for (size_t i = 0; i < digits; ++i) {
-      frac = frac * 10 + (s[digits_start + i] - '0');
+    int digits = 0;
+    for (; digit(pos); ++pos) {
+      if (digits == 9) continue;
+      frac = frac * 10 + (s[pos] - '0');
+      ++digits;
     }
-    for (size_t i = digits; i < 9; ++i) frac *= 10;
+    for (; digits < 9; ++digits) frac *= 10;
     nanos = frac;
   }
 
@@ -71,7 +73,7 @@ std::optional<Timestamp> ParseRFC3339(std::string_view s) {
   // Timezone designator.
   int tz_offset_sec = 0;
   char tz = s[pos];
-  if (tz == 'Z' || tz == 'z') {
+  if (tz == 'Z') {
     if (pos + 1 != s.size()) return std::nullopt;
   } else if (tz == '+' || tz == '-') {
     if (s.size() - pos != 6 || s[pos + 3] != ':') return std::nullopt;
@@ -79,6 +81,7 @@ std::optional<Timestamp> ParseRFC3339(std::string_view s) {
     if (!ParseUInt(s.substr(pos + 1, 2), oh) || !ParseUInt(s.substr(pos + 4, 2), om)) {
       return std::nullopt;
     }
+    if (oh > 24 || om > 60) return std::nullopt;
     tz_offset_sec = oh * 3600 + om * 60;
     if (tz == '-') tz_offset_sec = -tz_offset_sec;
   } else {

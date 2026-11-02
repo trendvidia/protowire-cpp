@@ -53,6 +53,13 @@ struct Position {
   std::string ToString() const { return std::to_string(line) + ":" + std::to_string(column); }
 };
 
+// Error is a syntax error at a position, as ParseTolerant returns them.
+struct Error {
+  Position pos;
+  std::string msg;
+  std::string ToString() const { return pos.ToString() + ": " + msg; }
+};
+
 // A Token's `value` is owned by the lexer's input buffer for non-allocated
 // tokens (numbers, idents, durations, timestamps) and points into it via
 // string_view. STRING / BYTES tokens that required escape decoding own

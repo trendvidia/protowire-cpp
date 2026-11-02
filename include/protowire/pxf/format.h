@@ -27,7 +27,13 @@ bool IsIdentifierSafe(std::string_view s);
 std::string FormatDocument(const Document& doc);
 
 // FormatValue renders one value as FormatDocument would write it on the
-// right of `=`.
+// right of `=`, for a tool splicing a value into a buffer. A list or block
+// spans lines at two-space indent with no trailing newline, and its first line
+// has no indent, so a caller in an indented context re-indents the rest.
+// Rewriter does this itself. A BadVal renders as nothing.
 std::string FormatValue(const ValuePtr& value);
+
+// AppendValue is FormatValue, appending to *out.
+void AppendValue(std::string* out, const ValuePtr& value);
 
 }  // namespace protowire::pxf

@@ -24,6 +24,7 @@
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/message.h>
 
+#include "protowire/check.h"
 #include "protowire/detail/status.h"
 #include "protowire/limits.h"
 #include "protowire/sbe/template.h"
@@ -38,10 +39,12 @@ class GroupView;
 // decoders enforce, configurable per codec; 0 selects the default in
 // protowire/limits.h. max_message_size caps the input to one Unmarshal or
 // NewView call; max_repeated_count caps a repeating group's numInGroup,
-// checked before any entry is allocated.
+// checked before any entry is allocated. validator, if non-null, runs on every
+// message Unmarshal decodes and must outlive the codec.
 struct CodecOptions {
   int max_message_size = 0;
   int max_repeated_count = 0;
+  check::Validator* validator = nullptr;
 };
 
 class Codec {
@@ -79,6 +82,7 @@ class Codec {
   std::unordered_map<uint16_t, MessageTemplate*> by_id_;
   int max_message_size_ = kMaxMessageSize;
   int max_repeated_ = kMaxRepeatedCount;
+  check::Validator* validator_ = nullptr;
 };
 
 // Zero-allocation read-only view over an SBE-encoded message.

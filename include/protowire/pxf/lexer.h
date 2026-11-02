@@ -5,6 +5,7 @@
 #include <deque>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "protowire/limits.h"
 #include "protowire/pxf/token.h"
@@ -23,6 +24,27 @@ class Lexer {
   // scanned so it is neither scanned to its end nor decoded before it is
   // refused. The parser and decoder set it from their per-call limits.
   void SetMaxBytesLiteral(int n) { max_bytes_literal_ = n; }
+
+  // Turns on the recovery ParseTolerant needs. An unterminated string ends at
+  // the newline or EOF; an unterminated triple-quoted string, block comment
+  // or bytes literal ends at EOF, a bytes literal at the newline; a bad escape
+  // is kept literally; base64 is left to the parser. Each recovery appends to
+  // *errors, which must outlive the lexer.
+  void SetTolerant(std::vector<Error>* errors) { errors_ = errors; }
+
+  // A place to come back to, for a parser's lookahead. Unlike a copy of the
+  // lexer, going back leaves the strings of tokens already produced alone.
+  struct Mark {
+    size_t pos;
+    int line;
+    int column;
+  };
+  Mark GetMark() const { return Mark{pos_, line_, column_}; }
+  void Rewind(const Mark& m) {
+    pos_ = m.pos;
+    line_ = m.line;
+    column_ = m.column;
+  }
 
   Position CurrentPos() const { return Position{line_, column_, static_cast<int>(pos_)}; }
 
@@ -59,6 +81,11 @@ class Lexer {
   }
   uint8_t Advance();
   void SkipSpaces();
+  bool Tolerant() const { return errors_ != nullptr; }
+  void Report(Position pos, std::string msg) { errors_->push_back(Error{pos, std::move(msg)}); }
+  bool ReadHexByte(uint8_t* out);
+  bool ReadHexRune(int n, uint32_t* out);
+  bool ReadOctRest(uint8_t first, uint8_t* out);
 
   Token LexLineComment(Position pos);
   Token LexBlockComment(Position pos);
@@ -84,6 +111,7 @@ class Lexer {
   int column_ = 1;
   int max_bytes_literal_ = kMaxBytesLiteralLength;
   std::deque<std::string> owned_;  // pointer-stable storage
+  std::vector<Error>* errors_ = nullptr;
 };
 
 }  // namespace protowire::pxf

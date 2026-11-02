@@ -306,20 +306,20 @@ struct Literal {
   bool negative = false;
   std::string digits;  // no leading or trailing zero; empty for zero
   int64_t exp10 = 0;
-  size_t mantissa_digits = 0;  // as written, for MaxNumericLiteralDigits
 };
 
 // SplitLiteral accepts the numeric literal grammar. The exponent saturates:
 // a value that far out is refused on its magnitude, not its spelling.
 bool SplitLiteral(std::string_view s, Literal* out) {
   size_t i = 0;
-  if (i < s.size() && s[i] == '-') {
-    out->negative = true;
+  if (i < s.size() && (s[i] == '-' || s[i] == '+')) {
+    out->negative = s[i] == '-';
     ++i;
   }
   const size_t int_start = i;
   while (i < s.size() && IsDigit(s[i])) ++i;
-  if (i == int_start) return false;
+  // big.Float.Parse takes ".5": a digit on either side of the point will do.
+  if (i == int_start && !(i + 1 < s.size() && s[i] == '.' && IsDigit(s[i + 1]))) return false;
   std::string digits(s.substr(int_start, i - int_start));
   int64_t exp10 = 0;
   if (i < s.size() && s[i] == '.') {
@@ -329,7 +329,6 @@ bool SplitLiteral(std::string_view s, Literal* out) {
     digits.append(s.substr(frac_start, i - frac_start));
     exp10 = -static_cast<int64_t>(i - frac_start);
   }
-  out->mantissa_digits = digits.size();
   if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
     ++i;
     bool neg = false;
@@ -361,6 +360,18 @@ bool SplitLiteral(std::string_view s, Literal* out) {
 
 }  // namespace
 
+int CountLiteralDigits(std::string_view literal) {
+  int n = 0;
+  bool leading = true;
+  for (char c : literal) {
+    if (c == 'e' || c == 'E' || c == 'p') break;
+    if (!IsDigit(c) || (leading && c == '0')) continue;
+    leading = false;
+    ++n;
+  }
+  return n;
+}
+
 Status ParseBigFloatLiteral(std::string_view literal,
                             std::string_view prec_digits,
                             int max_digits,
@@ -382,13 +393,21 @@ Status ParseBigFloatLiteral(std::string_view literal,
                            " digits; MaxNumericLiteralDigits=" + std::to_string(max_digits));
     }
   }
+  if (const int n = CountLiteralDigits(literal); n > max_digits) {
+    return Status::Error("numeric literal has " + std::to_string(n) +
+                         " digits; MaxNumericLiteralDigits=" + std::to_string(max_digits));
+  }
+  // big.Float.Parse reads these spellings of infinity, and no value here has
+  // a magnitude that large.
+  if (std::string_view unsigned_part = !literal.empty() && (literal[0] == '+' || literal[0] == '-')
+                                           ? literal.substr(1)
+                                           : literal;
+      unsigned_part == "inf" || unsigned_part == "Inf") {
+    return Status::Error("big float literal " + Clip(literal) + " is above big.Float's range");
+  }
   Literal lit;
   if (!SplitLiteral(literal, &lit)) {
-    return Status::Error("invalid big float: " + Clip(literal));
-  }
-  if (lit.mantissa_digits > static_cast<size_t>(max_digits)) {
-    return Status::Error("numeric literal has " + std::to_string(lit.mantissa_digits) +
-                         " digits; MaxNumericLiteralDigits=" + std::to_string(max_digits));
+    return Status::Error("invalid big float: " + std::string(literal));
   }
   *out = BigFloatFields{};
   out->negative = lit.negative;

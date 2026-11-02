@@ -57,7 +57,7 @@ endfunction()
 # --- Foundation -----------------------------------------------------------
 add_library(protowire_detail STATIC
   src/detail/base64.cc
-  src/detail/go_quote.cc
+  src/detail/go_quote.cc src/detail/go_strconv.cc
   src/detail/rfc3339.cc
   src/detail/duration.cc
   src/detail/status.cc)
@@ -81,10 +81,10 @@ endif()
 
 # protobuf is only required for pxf, sbe, and the CLI.
 _pwx_existing_sources(_pxf_srcs
-  src/pxf/lexer.cc src/pxf/ast.cc src/pxf/parser.cc src/pxf/decode_fast.cc
+  src/check.cc src/pxf/lexer.cc src/pxf/ast.cc src/pxf/parser.cc src/pxf/decode_fast.cc
   src/pxf/encode.cc src/pxf/format.cc src/pxf/wellknown.cc
   src/pxf/annotations.cc src/pxf/result.cc src/pxf/options.cc src/pxf/schema.cc
-  src/pxf/bigfloat.cc src/pxf/carrier.cc src/pxf/dataset_reader.cc src/pxf/dataset_paths.cc src/pxf/dataset_writer.cc src/pxf/go_wire.cc src/pxf/keyed.cc)
+  src/pxf/bigfloat.cc src/pxf/carrier.cc src/pxf/dataset_reader.cc src/pxf/dataset_paths.cc src/pxf/dataset_writer.cc src/pxf/go_wire.cc src/pxf/keyed.cc src/pxf/rewriter.cc)
 _pwx_existing_sources(_sbe_srcs
   src/sbe/annotations.cc src/sbe/template.cc src/sbe/codec.cc
   src/sbe/marshal.cc src/sbe/unmarshal.cc src/sbe/view.cc

@@ -1,0 +1,13 @@
+children {
+  a {
+    type = "L"
+  }
+  b {
+    type = "H"
+  }
+}
+children {
+  c {
+    type = "V"
+  }
+}

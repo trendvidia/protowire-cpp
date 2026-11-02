@@ -2,6 +2,9 @@
 // Copyright (c) 2026 TrendVidia, LLC.
 #include "protowire/pxf/parser.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -19,11 +22,38 @@ namespace protowire::pxf {
 
 namespace {
 
+constexpr const char* kTypeEntryMisplaced =
+    "@type is allowed only as the first entry of a block bound to google.protobuf.Any "
+    "(draft -01 \"Any Blocks\")";
+
+// Clip shortens a literal for an error message: it can be thousands of digits
+// long, and an error is read, not parsed.
+std::string Clip(std::string_view s) {
+  if (s.size() <= 24) return std::string(s);
+  return std::string(s.substr(0, 24)) + "…";
+}
+
+std::string WrittenKey(const std::string& key, std::string_view prec) {
+  if (prec.empty()) return key;
+  return key + "p" + Clip(prec);
+}
+
+// The parser mirrors protowire-go's parser.go function for function. In
+// tolerant mode, ParseTolerant's, it records an error and recovers at the
+// nearest entry or block boundary. Strict mode returns the first error.
 class Parser {
  public:
   Parser(std::string_view input, int max_depth, int max_bytes_literal)
       : lex_(input), max_depth_(max_depth) {
     lex_.SetMaxBytesLiteral(max_bytes_literal);
+    Advance();
+  }
+
+  struct TolerantTag {};
+  Parser(TolerantTag, std::string_view input, int max_depth, int max_bytes_literal)
+      : lex_(input), max_depth_(max_depth), tolerant_(true) {
+    lex_.SetMaxBytesLiteral(max_bytes_literal);
+    lex_.SetTolerant(&errs_);
     Advance();
   }
 
@@ -40,9 +70,37 @@ class Parser {
   StatusOr<DatasetDirective> ParseTableDirective(int* end_offset);
   StatusOr<DatasetRow> ParseTableRow(int expected, int* end_offset);
 
+  std::vector<Error> TakeErrors() {
+    std::stable_sort(errs_.begin(), errs_.end(), [](const Error& a, const Error& b) {
+      return a.pos.offset < b.pos.offset;
+    });
+    return std::move(errs_);
+  }
+  // Records a failure that reached the top of a tolerant parse.
+  void Record(const Status& s) { errs_.push_back(Error{err_pos_, s.message()}); }
+
  private:
   void Advance();
   std::vector<Comment> FlushComments();
+  std::string TakeTrailingComment(const Position& end);
+
+  // Err makes a failure at pos. Status keeps no byte offset, so the last one
+  // is kept here for Record.
+  Status Err(Position pos, std::string msg) {
+    err_pos_ = pos;
+    return Status::Error(pos.line, pos.column, std::move(msg));
+  }
+  // Soft routes a recoverable error: strict mode returns it, tolerant mode
+  // records it and returns OK so the call site can recover.
+  Status Soft(Position pos, std::string msg) {
+    if (!tolerant_) return Err(pos, std::move(msg));
+    errs_.push_back(Error{pos, std::move(msg)});
+    return Status::OK();
+  }
+
+  // TokenEnd is just past the current token: the lexer sits there, since
+  // Advance reads only as far as the token it returns.
+  Position TokenEnd() const { return lex_.CurrentPos(); }
 
   // TokenErrMsg renders the current token for "expected X, got Y".
   std::string TokenErrMsg() const {
@@ -55,45 +113,60 @@ class Parser {
     return for_decoder_ ? TokenErrMsg() : std::string(TokenKindName(current_.kind));
   }
 
-  StatusOr<EntryPtr> ParseEntry(bool allow_map_entry, bool allow_type_entry);
-  StatusOr<ValuePtr> ParseValue();
-  StatusOr<ValuePtr> ParseList();
-  StatusOr<ValuePtr> ParseBlockVal();
-  StatusOr<std::vector<EntryPtr>> ParseBody();
+  // A skipped entry is nullopt: tolerant mode has moved past a token that
+  // starts none.
+  StatusOr<std::optional<EntryPtr>> ParseEntry(int depth, bool allow_map_entry);
+  StatusOr<std::optional<EntryPtr>> ParseTypeEntry(bool first);
+  StatusOr<ValuePtr> ParseValue(int depth);
+  StatusOr<ValuePtr> ParseList(int depth);
+  StatusOr<ValuePtr> ParseBlockVal(int depth);
+  StatusOr<std::vector<EntryPtr>> ParseBody(int depth, Position* end);
   StatusOr<Directive> ParseDirective(int* end_offset);
   StatusOr<ProtoDirective> ParseProtoDirective(int* end_offset);
   StatusOr<std::optional<ValuePtr>> ParseRowCell();
   TokenKind PeekKind();
+  Position SkipBalanced(TokenKind open, TokenKind close);
+  bool CurrentStartsEntry();
+  void SyncTopLevel();
+  // A ')' is in no value, so tolerant mode reads one inside a list or block
+  // as the end of the @dataset row the value is a cell of. Strict mode never
+  // stops there; the ')' is its error.
+  bool TolerantRowClose() const { return tolerant_ && current_.kind == TokenKind::kRParen; }
 
-  // One `{` or `[` is one descent (HARDENING.md § Recursion; the decoder
-  // counts the same way). The root is depth 0, so a document exactly
-  // max_depth_ deep parses and one deeper does not.
-  Status Descend() {
-    if (++depth_ > max_depth_) {
-      --depth_;
-      return Status::Error(current_.pos.line,
-                           current_.pos.column,
-                           "nesting depth exceeds MaxNestingDepth=" + std::to_string(max_depth_));
-    }
-    return Status::OK();
+  ValuePtr BadValue(Position pos) {
+    auto b = std::make_unique<BadVal>();
+    b->pos = pos;
+    b->end = pos;
+    return ValuePtr(std::move(b));
   }
-  void Ascend() { --depth_; }
+  template <class T>
+  std::unique_ptr<T> Literal(Position pos) {
+    auto v = std::make_unique<T>();
+    v->pos = pos;
+    v->end = TokenEnd();
+    return v;
+  }
 
   Lexer lex_;
   Token current_;
   std::vector<Comment> comments_;
-  int depth_ = 0;
   int max_depth_ = kMaxNestingDepth;
   bool for_decoder_ = false;
+  bool tolerant_ = false;
+  std::vector<Error> errs_;
+  Position err_pos_;
+  // Just past the last significant token consumed: where a missing value
+  // would have been typed, so where a BadVal anchors.
+  Position prev_end_;
 };
 
-// FindMatchingBrace returns the offset of the `}` that matches the `{`
-// at openOffset, mirroring lexer string/comment handling so braces
-// inside literals don't confuse the brace count. Returns -1 on
-// unterminated input. Mirrors protowire-go's parser.findMatchingBrace.
+// FindMatchingBrace returns the offset of the `}` matching the `{` at
+// open_offset, or -1 if there is none. Mirrors protowire-go's braceMatch, so
+// braces inside literals and comments don't count.
 int FindMatchingBrace(std::string_view input, int open_offset);
 
 void Parser::Advance() {
+  prev_end_ = lex_.CurrentPos();
   for (;;) {
     current_ = lex_.Next();
     if (current_.kind == TokenKind::kNewline) continue;
@@ -111,145 +184,205 @@ std::vector<Comment> Parser::FlushComments() {
   return out;
 }
 
+// TakeTrailingComment removes and returns the comment written after a value on
+// its line. A newline ends every line, so there is at most one and it is the
+// first pending. Empty when that one starts on a later line, a leading comment
+// of the next entry, or before the value.
+std::string Parser::TakeTrailingComment(const Position& end) {
+  if (comments_.empty()) return {};
+  const Comment& c = comments_.front();
+  if (c.pos.line != end.line || c.pos.offset < end.offset) return {};
+  std::string text = c.text;
+  comments_.erase(comments_.begin());
+  return text;
+}
+
+// SkipBalanced consumes the open token it stands on through its matching close
+// or EOF, and returns the position just past the close. Tolerant recovery for
+// what is too deep to descend into.
+Position Parser::SkipBalanced(TokenKind open, TokenKind close) {
+  int depth = 0;
+  for (;;) {
+    if (current_.kind == open) {
+      ++depth;
+    } else if (current_.kind == close) {
+      if (--depth <= 0) {
+        Position end = TokenEnd();
+        Advance();
+        return end;
+      }
+    } else if (current_.kind == TokenKind::kEOF) {
+      return current_.pos;
+    }
+    Advance();
+  }
+}
+
+// CurrentStartsEntry reports whether the current token is the key of a new
+// entry, not part of what is being parsed.
+bool Parser::CurrentStartsEntry() {
+  switch (current_.kind) {
+    case TokenKind::kIdent:
+    case TokenKind::kString:
+    case TokenKind::kInt:
+    case TokenKind::kBool: {
+      TokenKind next = PeekKind();
+      return next == TokenKind::kEquals || next == TokenKind::kColon || next == TokenKind::kLBrace;
+    }
+    default:
+      return false;
+  }
+}
+
+// SyncTopLevel advances to a directive, a token that can start a body entry,
+// or EOF.
+void Parser::SyncTopLevel() {
+  for (;;) {
+    switch (current_.kind) {
+      case TokenKind::kEOF:
+      case TokenKind::kAtType:
+      case TokenKind::kAtDirective:
+      case TokenKind::kAtDataset:
+      case TokenKind::kAtProto:
+      case TokenKind::kIdent:
+      case TokenKind::kString:
+      case TokenKind::kInt:
+        return;
+      default:
+        Advance();
+    }
+  }
+}
+
 StatusOr<Document> Parser::ParseDocument() {
   Document doc;
   doc.leading_comments = FlushComments();
 
-  // Top-of-document directives. @type, @<name>, and @dataset may interleave
-  // in any order; @type populates type_url, @<name> appends to directives,
-  // @dataset appends to tables. body_offset tracks the byte immediately
-  // after the last directive's last token so consumers (e.g. chameleon)
-  // can hash from there; it stays 0 when no directives are present.
-  bool saw_type = false;
-  Position first_table_pos{};
-  bool has_table = false;
-  for (;;) {
-    if (current_.kind == TokenKind::kAtType) {
-      if (has_table) {
-        return Status::Error(current_.pos.line,
-                             current_.pos.column,
-                             "@dataset directive cannot coexist with @type; the @dataset header "
-                             "declares the document's type (draft §3.4.4)");
+  // Top-of-document directives. @type and @<name> may interleave in any
+  // order. body_offset tracks the byte after the last directive's last token
+  // so consumers (e.g. chameleon) can hash from there; it stays 0 when there
+  // are no directives.
+  for (bool in_directives = true; in_directives;) {
+    switch (current_.kind) {
+      case TokenKind::kAtType: {
+        Advance();
+        bool missing_name = current_.kind != TokenKind::kIdent;
+        // A dangling `@type` with the body right after it: an identifier
+        // followed by '=', ':' or '{' is the first entry's key.
+        if (!missing_name && tolerant_ && CurrentStartsEntry()) missing_name = true;
+        if (missing_name) {
+          if (Status s = Soft(current_.pos,
+                              std::string("expected type name after @type, got ") +
+                                  TokenKindName(current_.kind));
+              !s.ok()) {
+            return s;
+          }
+          SyncTopLevel();
+          continue;
+        }
+        doc.type_url = std::string(current_.value);
+        doc.body_offset = current_.pos.offset + static_cast<int>(current_.value.size());
+        Advance();
+        break;
       }
-      saw_type = true;
-      Advance();
-      if (current_.kind != TokenKind::kIdent) {
-        return Status::Error(
-            current_.pos.line,
-            current_.pos.column,
-            std::string("expected type name after @type, got ") + TokenKindName(current_.kind));
+      case TokenKind::kAtDirective: {
+        int end = 0;
+        auto d = ParseDirective(&end);
+        if (!d.ok()) {
+          if (!tolerant_) return d.status();
+          Record(d.status());
+          SyncTopLevel();
+          continue;
+        }
+        doc.directives.push_back(std::move(d).consume());
+        doc.body_offset = end;
+        break;
       }
-      doc.type_url = std::string(current_.value);
-      doc.body_offset = current_.pos.offset + static_cast<int>(current_.value.size());
-      Advance();
-    } else if (current_.kind == TokenKind::kAtDirective) {
-      int end = 0;
-      auto d = ParseDirective(&end);
-      if (!d.ok()) return d.status();
-      doc.directives.push_back(std::move(d).consume());
-      doc.body_offset = end;
-    } else if (current_.kind == TokenKind::kAtDataset) {
-      if (saw_type) {
-        return Status::Error(current_.pos.line,
-                             current_.pos.column,
-                             "@dataset directive cannot coexist with @type; the @dataset header "
-                             "declares the document's type (draft §3.4.4)");
+      case TokenKind::kAtDataset: {
+        int end = 0;
+        auto tbl = ParseTableDirective(&end);
+        if (!tbl.ok()) {
+          if (!tolerant_) return tbl.status();
+          Record(tbl.status());
+          SyncTopLevel();
+          continue;
+        }
+        doc.datasets.push_back(std::move(tbl).consume());
+        doc.body_offset = end;
+        break;
       }
-      int end = 0;
-      auto tbl = ParseTableDirective(&end);
-      if (!tbl.ok()) return tbl.status();
-      if (!has_table) {
-        first_table_pos = tbl->pos;
-        has_table = true;
+      case TokenKind::kAtProto: {
+        int end = 0;
+        auto pd = ParseProtoDirective(&end);
+        if (!pd.ok()) {
+          if (!tolerant_) return pd.status();
+          Record(pd.status());
+          SyncTopLevel();
+          continue;
+        }
+        doc.protos.push_back(std::move(pd).consume());
+        doc.body_offset = end;
+        break;
       }
-      doc.datasets.push_back(std::move(tbl).consume());
-      doc.body_offset = end;
-    } else if (current_.kind == TokenKind::kAtProto) {
-      int end = 0;
-      auto pd = ParseProtoDirective(&end);
-      if (!pd.ok()) return pd.status();
-      doc.protos.push_back(std::move(pd).consume());
-      doc.body_offset = end;
-    } else {
-      break;
+      default:
+        in_directives = false;
     }
   }
 
-  // Standalone constraint (draft §3.4.4): a document containing any
-  // @dataset directive MUST NOT also carry top-level field entries; the
-  // @dataset header IS the document's type declaration.
-  if (has_table && current_.kind != TokenKind::kEOF) {
-    return Status::Error(
-        current_.pos.line,
-        current_.pos.column,
-        "@dataset directive cannot coexist with top-level field entries; the document's "
-        "payload is the @dataset rows (draft §3.4.4)");
+  // Standalone constraint (draft §3.4.4): a document with any @dataset MUST
+  // NOT also carry @type or top-level field entries; the @dataset header IS
+  // the document's type declaration.
+  if (!doc.datasets.empty()) {
+    if (!doc.type_url.empty()) {
+      if (Status s = Soft(doc.datasets[0].pos,
+                          "@dataset directive cannot coexist with @type; the @dataset header "
+                          "declares the document's type (draft §3.4.4)");
+          !s.ok()) {
+        return s;
+      }
+    }
+    if (current_.kind != TokenKind::kEOF) {
+      if (Status s = Soft(current_.pos,
+                          "@dataset directive cannot coexist with top-level field entries; the "
+                          "document's payload is the @dataset rows (draft §3.4.4)");
+          !s.ok()) {
+        return s;
+      }
+    }
   }
 
   while (current_.kind != TokenKind::kEOF) {
     // Top-level: only field_entry is allowed. The document represents a
     // proto message, never a map<K,V>; map_entry (`:` form) is reserved
     // for the inside of a '{ ... }' block. See docs/grammar.ebnf -> document.
-    auto e = ParseEntry(/*allow_map_entry=*/false, /*allow_type_entry=*/false);
+    auto e = ParseEntry(/*depth=*/0, /*allow_map_entry=*/false);
     if (!e.ok()) return e.status();
-    doc.entries.push_back(std::move(e).consume());
+    auto entry = std::move(e).consume();
+    if (entry.has_value()) doc.entries.push_back(std::move(*entry));
   }
   return doc;
 }
 
-StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry, bool allow_type_entry) {
+StatusOr<std::optional<EntryPtr>> Parser::ParseEntry(int depth, bool allow_map_entry) {
   auto leading = FlushComments();
   Position pos = current_.pos;
-  // The type entry of an Any block (draft -01 "Any Blocks"): `@type = "<url>"`
-  // as a block's first entry. A parser has no schema, so it accepts one in
-  // any block; a decoder rejects it where the block is not an Any. It is an
-  // Assignment whose key is the literal "@type".
-  if (current_.kind == TokenKind::kAtType) {
-    if (!allow_type_entry) {
-      return Status::Error(
-          pos.line,
-          pos.column,
-          "@type is allowed only as the first entry of a block bound to google.protobuf.Any "
-          "(draft -01 \"Any Blocks\")");
-    }
-    Advance();
-    if (current_.kind != TokenKind::kEquals) {
-      return Status::Error(
-          current_.pos.line, current_.pos.column, "expected '=' after @type, got " + TokenErrMsg());
-    }
-    Advance();
-    if (current_.kind != TokenKind::kString) {
-      return Status::Error(current_.pos.line,
-                           current_.pos.column,
-                           "expected a string type URL after @type =, got " + TokenErrMsg());
-    }
-    auto v = ParseValue();
-    if (!v.ok()) return v.status();
-    auto a = std::make_unique<Assignment>();
-    a->pos = pos;
-    a->key = "@type";
-    a->value = std::move(v).consume();
-    a->leading_comments = std::move(leading);
-    return EntryPtr(std::move(a));
-  }
-  // map-key = identifier / string / integer / bool (draft -01 § Entries
-  // and Keys; the keyword spelling landed in protowire#284). A bool
-  // token is only ever a map key: `true = v` / `true { }` get the errors
-  // below that say so.
+  // map-key = identifier / string / integer / bool (draft -01 § Entries and
+  // Keys; the keyword spelling landed in protowire#284). Only the ':' tail
+  // takes a bool key, like an integer key.
   if (current_.kind != TokenKind::kIdent && current_.kind != TokenKind::kString &&
       current_.kind != TokenKind::kInt && current_.kind != TokenKind::kBool) {
-    return Status::Error(pos.line,
-                         pos.column,
-                         "expected identifier, string, integer, or bool, got " + TokenErrMsg());
+    std::string msg = "expected identifier, string, integer, or bool, got " + TokenErrMsg();
+    if (!tolerant_) return Err(pos, std::move(msg));
+    // Skip the token and let the caller's loop try the next. The leading
+    // comments go back, for the next real entry.
+    errs_.push_back(Error{pos, std::move(msg)});
+    comments_.insert(comments_.begin(), leading.begin(), leading.end());
+    Advance();
+    return std::optional<EntryPtr>{};
   }
   TokenKind key_kind = current_.kind;
   std::string key(current_.value);
-  if (!current_.prec.empty()) {
-    return Status::Error(pos.line,
-                         pos.column,
-                         "map key " + key + ": a key cannot carry a precision suffix (p" +
-                             std::string(current_.prec) + ")");
-  }
+  std::string key_prec(current_.prec);
   Advance();
 
   switch (current_.kind) {
@@ -258,120 +391,178 @@ StatusOr<EntryPtr> Parser::ParseEntry(bool allow_map_entry, bool allow_type_entr
       // identifier, or a string — the quoted entry name of draft -01
       // §3.13, which the grammar accepts everywhere and the schema layer
       // restricts to keyed repeated fields' blocks. An integer key is
-      // only valid with `:`.
-      if (key_kind != TokenKind::kIdent && key_kind != TokenKind::kString) {
-        return Status::Error(
-            pos.line,
-            pos.column,
-            std::string("field assignment with '=' requires an identifier or string key, got ") +
-                TokenKindName(key_kind) + " (" + detail::GoQuote(key) +
-                "); use ':' for map entries");
+      // only valid with `:`. Tolerant mode keeps the entry as an assignment.
+      if (key_kind == TokenKind::kInt || key_kind == TokenKind::kBool) {
+        if (Status s =
+                Soft(pos,
+                     std::string("field assignment with '=' requires an identifier or string key, "
+                                 "got ") +
+                         TokenKindName(key_kind) + " (" +
+                         detail::GoQuote(WrittenKey(key, key_prec)) + "); use ':' for map entries");
+            !s.ok()) {
+          return s;
+        }
       }
       Advance();
-      auto v = ParseValue();
+      auto v = ParseValue(depth);
       if (!v.ok()) return v.status();
       auto a = std::make_unique<Assignment>();
       a->pos = pos;
+      a->value = std::move(v).consume();
+      a->end = ValueSpan(a->value).second;
       a->key = std::move(key);
       a->key_quoted = (key_kind == TokenKind::kString);
-      a->value = std::move(v).consume();
       a->leading_comments = std::move(leading);
-      return EntryPtr(std::move(a));
+      a->trailing_comment = TakeTrailingComment(a->end);
+      return std::optional<EntryPtr>(EntryPtr(std::move(a)));
     }
     case TokenKind::kColon: {
-      // Map entry. Only allowed inside a '{ ... }' block, never at
-      // document top level.
+      // Map entry. Only allowed inside a '{ ... }' block, never at document
+      // top level. Tolerant mode keeps the entry as a map entry.
       if (!allow_map_entry) {
-        return Status::Error(pos.line,
-                             pos.column,
-                             "map entry (':' form) is only allowed inside a '{ … }' block; "
-                             "use '=' for top-level field assignments");
+        if (Status s = Soft(pos,
+                            "map entry (':' form) is only allowed inside a '{ … }' block; "
+                            "use '=' for top-level field assignments");
+            !s.ok()) {
+          return s;
+        }
+      }
+      // An integer key takes no precision suffix (draft -01 ABNF,
+      // protowire#406). MapEntry has nowhere to keep one.
+      if (!key_prec.empty()) {
+        if (Status s = Soft(pos,
+                            "map key " + key + ": a key cannot carry a precision suffix (p" +
+                                Clip(key_prec) + ")");
+            !s.ok()) {
+          return s;
+        }
       }
       Advance();
-      auto v = ParseValue();
+      auto v = ParseValue(depth);
       if (!v.ok()) return v.status();
       auto m = std::make_unique<MapEntry>();
       m->pos = pos;
+      m->value = std::move(v).consume();
+      m->end = ValueSpan(m->value).second;
       m->key = std::move(key);
       m->key_quoted = (key_kind == TokenKind::kString);
-      m->value = std::move(v).consume();
       m->leading_comments = std::move(leading);
-      return EntryPtr(std::move(m));
+      m->trailing_comment = TakeTrailingComment(m->end);
+      return std::optional<EntryPtr>(EntryPtr(std::move(m)));
     }
     case TokenKind::kLBrace: {
       // `{ ... }` denotes a submessage field; the same identifier-or-
       // string rule as `=` applies.
-      if (key_kind != TokenKind::kIdent && key_kind != TokenKind::kString) {
-        return Status::Error(
-            pos.line,
-            pos.column,
-            std::string("submessage block requires an identifier or string key, got ") +
-                TokenKindName(key_kind) + " (" + detail::GoQuote(key) + ")");
+      if (key_kind == TokenKind::kInt || key_kind == TokenKind::kBool) {
+        if (Status s =
+                Soft(pos,
+                     std::string("submessage block requires an identifier or string key, got ") +
+                         TokenKindName(key_kind) + " (" +
+                         detail::GoQuote(WrittenKey(key, key_prec)) + ")");
+            !s.ok()) {
+          return s;
+        }
       }
-      Advance();
-      auto entries = ParseBody();
-      if (!entries.ok()) return entries.status();
       auto b = std::make_unique<Block>();
       b->pos = pos;
-      b->name = std::move(key);
       b->name_quoted = (key_kind == TokenKind::kString);
-      b->entries = std::move(entries).consume();
+      b->name = std::move(key);
       b->leading_comments = std::move(leading);
-      return EntryPtr(std::move(b));
+      if (depth + 1 > max_depth_) {
+        if (Status s = Soft(current_.pos,
+                            "nesting depth exceeds MaxNestingDepth=" + std::to_string(max_depth_));
+            !s.ok()) {
+          return s;
+        }
+        // Too deep to descend; skip the whole block, keep the entry.
+        b->end = SkipBalanced(TokenKind::kLBrace, TokenKind::kRBrace);
+        return std::optional<EntryPtr>(EntryPtr(std::move(b)));
+      }
+      Advance();  // consume {
+      auto entries = ParseBody(depth + 1, &b->end);
+      if (!entries.ok()) return entries.status();
+      b->entries = std::move(entries).consume();
+      return std::optional<EntryPtr>(EntryPtr(std::move(b)));
     }
-    default:
-      return Status::Error(current_.pos.line,
-                           current_.pos.column,
-                           "expected '=', ':', or '{' after " + detail::GoQuote(key) + ", got " +
-                               TokenKindName(current_.kind));
+    default: {
+      if (Status s = Soft(current_.pos,
+                          "expected '=', ':', or '{' after " + detail::GoQuote(key) + ", got " +
+                              TokenKindName(current_.kind));
+          !s.ok()) {
+        return s;
+      }
+      // A dangling key, the shape completion fires on. Keep it with a BadVal
+      // just past the key so tooling sees it, and leave the current token: it
+      // is most likely the next entry's key.
+      auto a = std::make_unique<Assignment>();
+      a->pos = pos;
+      a->end = prev_end_;
+      a->key = std::move(key);
+      a->value = BadValue(prev_end_);
+      a->leading_comments = std::move(leading);
+      return std::optional<EntryPtr>(EntryPtr(std::move(a)));
+    }
   }
 }
 
-StatusOr<ValuePtr> Parser::ParseValue() {
+StatusOr<ValuePtr> Parser::ParseValue(int depth) {
   Position pos = current_.pos;
+
+  if (tolerant_ && CurrentStartsEntry()) {
+    // The current token is the next entry's key, so the value is missing
+    // (`key =` dangling mid-edit). Leave it, and anchor just past the
+    // separator, where the value belongs.
+    errs_.push_back(Error{prev_end_, "missing value"});
+    return BadValue(prev_end_);
+  }
+
   switch (current_.kind) {
     case TokenKind::kString: {
-      auto v = std::make_unique<StringVal>();
-      v->pos = pos;
+      auto v = Literal<StringVal>(pos);
       v->value = std::string(current_.value);
       Advance();
       return ValuePtr(std::move(v));
     }
     case TokenKind::kInt: {
-      auto v = std::make_unique<IntVal>();
-      v->pos = pos;
+      auto v = Literal<IntVal>(pos);
       v->raw = std::string(current_.value);
       v->prec = std::string(current_.prec);
       Advance();
       return ValuePtr(std::move(v));
     }
     case TokenKind::kFloat: {
-      auto v = std::make_unique<FloatVal>();
-      v->pos = pos;
+      auto v = Literal<FloatVal>(pos);
       v->raw = std::string(current_.value);
       v->prec = std::string(current_.prec);
       Advance();
       return ValuePtr(std::move(v));
     }
     case TokenKind::kBool: {
-      auto v = std::make_unique<BoolVal>();
-      v->pos = pos;
+      auto v = Literal<BoolVal>(pos);
       v->value = (current_.value == "true");
       Advance();
       return ValuePtr(std::move(v));
     }
     case TokenKind::kBytes: {
-      auto v = std::make_unique<BytesVal>();
-      v->pos = pos;
+      // The lexer has already checked this, outside tolerant mode.
       size_t offset = 0;
       auto decoded = detail::Base64DecodeLenient(current_.value, &offset);
-      if (decoded.has_value()) v->value = std::move(*decoded);
+      if (!decoded.has_value()) {
+        if (Status s = Soft(
+                pos, "invalid base64: illegal base64 data at input byte " + std::to_string(offset));
+            !s.ok()) {
+          return s;
+        }
+        Advance();
+        return BadValue(pos);
+      }
+      auto v = Literal<BytesVal>(pos);
+      v->value = std::move(*decoded);
       Advance();
       return ValuePtr(std::move(v));
     }
     case TokenKind::kTimestamp: {
-      auto v = std::make_unique<TimestampVal>();
-      v->pos = pos;
+      auto v = Literal<TimestampVal>(pos);
       v->raw = std::string(current_.value);
       auto t = detail::ParseRFC3339(current_.value);
       if (t.has_value()) {
@@ -382,8 +573,7 @@ StatusOr<ValuePtr> Parser::ParseValue() {
       return ValuePtr(std::move(v));
     }
     case TokenKind::kDuration: {
-      auto v = std::make_unique<DurationVal>();
-      v->pos = pos;
+      auto v = Literal<DurationVal>(pos);
       v->raw = std::string(current_.value);
       auto d = detail::ParseDuration(current_.value);
       if (d.has_value()) {
@@ -394,105 +584,196 @@ StatusOr<ValuePtr> Parser::ParseValue() {
       return ValuePtr(std::move(v));
     }
     case TokenKind::kNull: {
-      auto v = std::make_unique<NullVal>();
-      v->pos = pos;
+      auto v = Literal<NullVal>(pos);
       Advance();
       return ValuePtr(std::move(v));
     }
     case TokenKind::kIdent: {
-      auto v = std::make_unique<IdentVal>();
-      v->pos = pos;
+      auto v = Literal<IdentVal>(pos);
       v->name = std::string(current_.value);
       Advance();
       return ValuePtr(std::move(v));
     }
     case TokenKind::kLBracket:
-      return ParseList();
+      return ParseList(depth);
     case TokenKind::kLBrace:
-      return ParseBlockVal();
-    case TokenKind::kIllegal:
+      return ParseBlockVal(depth);
+    default: {
       // The lexer's own diagnostic beats a generic "got ILLEGAL".
-      return Status::Error(pos.line, pos.column, std::string(current_.value));
-    default:
-      return Status::Error(pos.line, pos.column, "expected value, got " + TokenErrMsg());
+      std::string msg = current_.kind == TokenKind::kIllegal
+                            ? std::string(current_.value)
+                            : "expected value, got " + TokenErrMsg();
+      if (!tolerant_) return Err(pos, std::move(msg));
+      errs_.push_back(Error{pos, std::move(msg)});
+      switch (current_.kind) {
+        case TokenKind::kEOF:
+        case TokenKind::kRBrace:
+        case TokenKind::kRBracket:
+        case TokenKind::kRParen:
+          // Closers are the enclosing construct's. A ')' closes the
+          // @dataset row around an unclosed cell.
+          break;
+        default:
+          Advance();
+      }
+      return BadValue(pos);
+    }
   }
 }
 
-StatusOr<ValuePtr> Parser::ParseList() {
+StatusOr<ValuePtr> Parser::ParseList(int depth) {
   Position pos = current_.pos;
-  if (Status s = Descend(); !s.ok()) return s;
-  Advance();  // [
   auto list = std::make_unique<ListVal>();
   list->pos = pos;
-  while (current_.kind != TokenKind::kRBracket && current_.kind != TokenKind::kEOF) {
-    auto e = ParseValue();
+  if (depth + 1 > max_depth_) {
+    if (Status s = Soft(current_.pos,
+                        "nesting depth exceeds MaxNestingDepth=" + std::to_string(max_depth_));
+        !s.ok()) {
+      return s;
+    }
+    list->end = SkipBalanced(TokenKind::kLBracket, TokenKind::kRBracket);
+    return ValuePtr(std::move(list));
+  }
+  Advance();  // [
+  while (current_.kind != TokenKind::kRBracket && current_.kind != TokenKind::kEOF &&
+         !TolerantRowClose()) {
+    const int before = current_.pos.offset;
+    auto e = ParseValue(depth + 1);
     if (!e.ok()) return e.status();
-    list->elements.push_back(std::move(e).consume());
+    auto elem = std::move(e).consume();
+    // ParseValue recovered without consuming anything: a stray '}' closing
+    // an enclosing block, or the next entry's key. Leave the list so the
+    // enclosing construct can resynchronize.
+    if (tolerant_ && current_.pos.offset == before &&
+        std::holds_alternative<std::unique_ptr<BadVal>>(elem)) {
+      break;
+    }
+    list->elements.push_back(std::move(elem));
     if (current_.kind == TokenKind::kComma) Advance();
   }
   if (current_.kind != TokenKind::kRBracket) {
-    return Status::Error(current_.pos.line,
-                         current_.pos.column,
-                         std::string("expected ']', got ") + TokenKindName(current_.kind));
+    // Tolerant mode closes the list here, keeping the elements so far.
+    if (Status s =
+            Soft(current_.pos, std::string("expected ']', got ") + TokenKindName(current_.kind));
+        !s.ok()) {
+      return s;
+    }
+    list->end = current_.pos;
+    return ValuePtr(std::move(list));
   }
+  list->end = TokenEnd();
   Advance();
-  Ascend();
   return ValuePtr(std::move(list));
 }
 
-StatusOr<ValuePtr> Parser::ParseBlockVal() {
+StatusOr<ValuePtr> Parser::ParseBlockVal(int depth) {
   Position pos = current_.pos;
-  Advance();  // {
-  auto entries = ParseBody();
-  if (!entries.ok()) return entries.status();
   auto bv = std::make_unique<BlockVal>();
   bv->pos = pos;
+  if (depth + 1 > max_depth_) {
+    if (Status s = Soft(current_.pos,
+                        "nesting depth exceeds MaxNestingDepth=" + std::to_string(max_depth_));
+        !s.ok()) {
+      return s;
+    }
+    bv->end = SkipBalanced(TokenKind::kLBrace, TokenKind::kRBrace);
+    return ValuePtr(std::move(bv));
+  }
+  Advance();  // {
+  auto entries = ParseBody(depth + 1, &bv->end);
+  if (!entries.ok()) return entries.status();
   bv->entries = std::move(entries).consume();
   return ValuePtr(std::move(bv));
 }
 
-// ParseBody is entered with current_ at the first token after `{`; the
-// brace was consumed by the caller, so the depth check reports its
-// position through current_ (the token just inside it).
-StatusOr<std::vector<EntryPtr>> Parser::ParseBody() {
-  if (Status s = Descend(); !s.ok()) return s;
+// ParseBody is entered just inside a `{` and leaves past its `}`.
+StatusOr<std::vector<EntryPtr>> Parser::ParseBody(int depth, Position* end) {
   std::vector<EntryPtr> out;
-  while (current_.kind != TokenKind::kRBrace && current_.kind != TokenKind::kEOF) {
+  while (current_.kind != TokenKind::kRBrace && current_.kind != TokenKind::kEOF &&
+         !TolerantRowClose()) {
+    if (current_.kind == TokenKind::kAtType) {
+      auto e = ParseTypeEntry(out.empty());
+      if (!e.ok()) return e.status();
+      auto entry = std::move(e).consume();
+      if (entry.has_value()) out.push_back(std::move(*entry));
+      continue;
+    }
     // Inside a '{ ... }' block both forms are accepted; the schema layer
     // disambiguates submessage vs map<K,V>.
-    auto e = ParseEntry(/*allow_map_entry=*/true, /*allow_type_entry=*/out.empty());
+    auto e = ParseEntry(depth, /*allow_map_entry=*/true);
     if (!e.ok()) return e.status();
-    out.push_back(std::move(e).consume());
+    auto entry = std::move(e).consume();
+    if (entry.has_value()) out.push_back(std::move(*entry));
   }
   if (current_.kind != TokenKind::kRBrace) {
-    return Status::Error(current_.pos.line,
-                         current_.pos.column,
-                         std::string("expected '}', got ") + TokenKindName(current_.kind));
+    if (!tolerant_) {
+      return Err(current_.pos, std::string("expected '}', got ") + TokenKindName(current_.kind));
+    }
+    // Unclosed: close at EOF, or at the ')' of the @dataset row this is a
+    // cell of, with the entries so far.
+    errs_.push_back(Error{current_.pos,
+                          current_.kind == TokenKind::kRParen
+                              ? "unclosed block: expected '}' before ')'"
+                              : "unclosed block: expected '}' before end of input"});
+    *end = current_.pos;
+    return out;
   }
+  *end = TokenEnd();
   Advance();
-  Ascend();
   return out;
 }
 
-// PeekKind returns the kind of the next significant token (skipping
-// newlines and comments) without consuming it or disturbing the pending
-// comment list. Used by ParseDirective to disambiguate "this IDENT is a
-// directive prefix" from "this IDENT is a body field key".
-//
-// Implementation: we can't cheaply rewind the lexer's internal state
-// (line/column update with every Advance), so we save and restore it
-// around a single Advance() — same approach as protowire-go.
-TokenKind Parser::PeekKind() {
-  // Save lexer + parser state.
-  Lexer saved_lex = lex_;
-  Token saved_current = current_;
-  size_t n_comments = comments_.size();
+// ParseTypeEntry parses `@type = "<type-url>"`, the type entry of an Any block
+// (draft -01 "Any Blocks"). first reports whether it opens its block, the only
+// place it may stand. Tolerant mode records a misplaced or malformed one and
+// skips what is left of it.
+StatusOr<std::optional<EntryPtr>> Parser::ParseTypeEntry(bool first) {
+  auto leading = FlushComments();
+  Position pos = current_.pos;
+  const auto fail = [&](Position at, std::string msg) -> StatusOr<std::optional<EntryPtr>> {
+    if (!tolerant_) return Err(at, std::move(msg));
+    errs_.push_back(Error{at, std::move(msg)});
+    comments_.insert(comments_.begin(), leading.begin(), leading.end());
+    for (TokenKind k : {TokenKind::kAtType, TokenKind::kEquals, TokenKind::kString}) {
+      if (current_.kind == k) Advance();
+    }
+    return std::optional<EntryPtr>{};
+  };
+  if (!first) return fail(pos, kTypeEntryMisplaced);
+  Advance();  // consume @type
+  if (current_.kind != TokenKind::kEquals) {
+    return fail(current_.pos, "expected '=' after @type, got " + TokenErrMsg());
+  }
   Advance();
-  TokenKind next = current_.kind;
-  // Restore.
-  lex_ = saved_lex;
+  if (current_.kind != TokenKind::kString) {
+    return fail(current_.pos, "expected a string type URL after @type =, got " + TokenErrMsg());
+  }
+  auto t = std::make_unique<TypeEntry>();
+  t->pos = pos;
+  t->url = std::string(current_.value);
+  t->end = TokenEnd();
+  t->leading_comments = std::move(leading);
+  Advance();
+  t->trailing_comment = TakeTrailingComment(t->end);
+  return std::optional<EntryPtr>(EntryPtr(std::move(t)));
+}
+
+// PeekKind returns the kind of the next significant token without consuming
+// it or disturbing the pending comments. What a tolerant lexer reports during
+// the peek is dropped, since it reports it again.
+TokenKind Parser::PeekKind() {
+  const Lexer::Mark mark = lex_.GetMark();
+  const Token saved_current = current_;
+  const Position saved_prev_end = prev_end_;
+  const size_t n_comments = comments_.size();
+  const size_t n_errs = errs_.size();
+  Advance();
+  const TokenKind next = current_.kind;
+  lex_.Rewind(mark);
   current_ = saved_current;
+  prev_end_ = saved_prev_end;
   comments_.resize(n_comments);
+  errs_.resize(n_errs);
   return next;
 }
 
@@ -506,11 +787,15 @@ StatusOr<Directive> Parser::ParseDirective(int* end_offset) {
   Position at_pos = current_.pos;
   std::string name(current_.value);
   if (IsFutureReservedDirective(name)) {
-    return Status::Error(
-        at_pos.line,
-        at_pos.column,
-        std::string("@") + name +
-            " is a spec-reserved directive name with no v1 semantics (draft §3.4.6)");
+    // Tolerant mode records it and parses on with the open grammar, so the
+    // rest of the document still gets an AST.
+    if (Status s = Soft(at_pos,
+                        std::string("@") + name +
+                            " is a spec-reserved directive name with no v1 semantics (draft "
+                            "§3.4.6)");
+        !s.ok()) {
+      return s;
+    }
   }
   Directive d;
   d.pos = at_pos;
@@ -545,14 +830,12 @@ StatusOr<Directive> Parser::ParseDirective(int* end_offset) {
   // bytes between `{` and `}` from the input for Body.
   if (current_.kind == TokenKind::kLBrace) {
     int open = current_.pos.offset;
-    auto bv = ParseBlockVal();
+    auto bv = ParseBlockVal(0);
     if (!bv.ok()) return bv.status();
     int close = FindMatchingBrace(lex_.Input(), open);
     if (close < 0) {
-      // ParseBlockVal succeeded so a matching brace must exist; this is
-      // defensive belt-and-braces.
-      return Status::Error(
-          d.pos.line, d.pos.column, std::string("directive @") + d.name + ": unmatched '{'");
+      // Reachable only in tolerant mode, where the block closed at EOF.
+      return Err(d.pos, std::string("directive @") + d.name + ": unmatched '{'");
     }
     d.body = std::string(lex_.Input().substr(open + 1, close - (open + 1)));
     d.has_body = true;
@@ -581,26 +864,20 @@ StatusOr<DatasetDirective> Parser::ParseTableDirective(int* end_offset) {
 
   // Required: column list in `( ... )`. At least one column.
   if (current_.kind != TokenKind::kLParen) {
-    return Status::Error(
-        current_.pos.line,
-        current_.pos.column,
-        std::string("expected '(' to start @dataset column list, got ") + DatasetTokenMsg());
+    return Err(current_.pos,
+               std::string("expected '(' to start @dataset column list, got ") + DatasetTokenMsg());
   }
   Advance();  // consume (
 
   if (current_.kind != TokenKind::kIdent) {
-    return Status::Error(current_.pos.line,
-                         current_.pos.column,
-                         std::string("@dataset column list must contain at least one field name, "
-                                     "got ") +
-                             DatasetTokenMsg());
+    return Err(current_.pos,
+               std::string("@dataset column list must contain at least one field name, got ") +
+                   DatasetTokenMsg());
   }
   std::vector<Position> column_pos;
   for (;;) {
     if (current_.kind != TokenKind::kIdent) {
-      return Status::Error(current_.pos.line,
-                           current_.pos.column,
-                           std::string("expected column field name, got ") + DatasetTokenMsg());
+      return Err(current_.pos, std::string("expected column field name, got ") + DatasetTokenMsg());
     }
     tbl.columns.emplace_back(current_.value);
     column_pos.push_back(current_.pos);
@@ -610,17 +887,15 @@ StatusOr<DatasetDirective> Parser::ParseTableDirective(int* end_offset) {
       continue;
     }
     if (current_.kind == TokenKind::kRParen) break;
-    return Status::Error(
-        current_.pos.line,
-        current_.pos.column,
+    return Err(
+        current_.pos,
         std::string("expected ',' or ')' in @dataset column list, got ") + DatasetTokenMsg());
   }
   // The rules that need no schema are checked here, at the offending
   // column; the ones that need the row type wait for a row to bind.
   size_t bad_column = 0;
   if (std::string msg = ColumnPathError(tbl.columns, &bad_column); !msg.empty()) {
-    const Position& p = column_pos[bad_column];
-    return Status::Error(p.line, p.column, std::move(msg));
+    return Err(column_pos[bad_column], std::move(msg));
   }
   int eo = current_.pos.offset + 1;  // past `)`
   Advance();                         // consume )
@@ -660,19 +935,16 @@ StatusOr<DatasetRow> Parser::ParseTableRow(int expected, int* end_offset) {
   }
 
   if (current_.kind != TokenKind::kRParen) {
-    return Status::Error(
-        current_.pos.line,
-        current_.pos.column,
-        std::string("expected ',' or ')' in @dataset row, got ") + DatasetTokenMsg());
+    return Err(current_.pos,
+               std::string("expected ',' or ')' in @dataset row, got ") + DatasetTokenMsg());
   }
   int eo = current_.pos.offset + 1;
   Advance();  // consume )
 
   if (static_cast<int>(row.cells.size()) != expected) {
-    return Status::Error(pos.line,
-                         pos.column,
-                         std::string("@dataset row has ") + std::to_string(row.cells.size()) +
-                             " cells, expected " + std::to_string(expected) + " (column count)");
+    return Err(pos,
+               std::string("@dataset row has ") + std::to_string(row.cells.size()) +
+                   " cells, expected " + std::to_string(expected) + " (column count)");
   }
   *end_offset = eo;
   return row;
@@ -697,13 +969,10 @@ StatusOr<ProtoDirective> Parser::ParseProtoDirective(int* end_offset) {
   pd.leading_comments = std::move(leading);
   Advance();  // consume @proto
 
-  auto capture_brace_body = [this, at_pos](
-                                const std::string& label, std::string* body, int* eo) -> Status {
+  auto capture_brace_body = [this](const std::string& label, std::string* body, int* eo) -> Status {
     int open = current_.pos.offset;
     int close = FindMatchingBrace(lex_.Input(), open);
-    if (close < 0) {
-      return Status::Error(at_pos.line, at_pos.column, label + ": unmatched '{'");
-    }
+    if (close < 0) return Err(current_.pos, label + ": unmatched '{'");
     *body = std::string(lex_.Input().substr(open + 1, close - (open + 1)));
     // Reposition the lexer past the closing `}` and prime the parser.
     lex_.RepositionTo(close + 1);
@@ -726,10 +995,9 @@ StatusOr<ProtoDirective> Parser::ParseProtoDirective(int* end_offset) {
       pd.type_name = std::string(current_.value);
       Advance();
       if (current_.kind != TokenKind::kLBrace) {
-        return Status::Error(current_.pos.line,
-                             current_.pos.column,
-                             std::string("expected '{' after @proto ") + pd.type_name + ", got " +
-                                 TokenKindName(current_.kind));
+        return Err(current_.pos,
+                   std::string("expected '{' after @proto ") + pd.type_name + ", got " +
+                       TokenKindName(current_.kind));
       }
       int eo = 0;
       auto st = capture_brace_body(std::string("@proto ") + pd.type_name, &pd.body, &eo);
@@ -740,7 +1008,7 @@ StatusOr<ProtoDirective> Parser::ParseProtoDirective(int* end_offset) {
     case TokenKind::kString: {
       pd.shape = ProtoShape::kSource;
       pd.body = std::string(current_.value);
-      *end_offset = current_.pos.offset + static_cast<int>(current_.value.size());
+      *end_offset = TokenEnd().offset;
       Advance();
       return pd;
     }
@@ -749,24 +1017,20 @@ StatusOr<ProtoDirective> Parser::ParseProtoDirective(int* end_offset) {
       size_t offset = 0;
       auto decoded = detail::Base64DecodeProto(current_.value, &offset);
       if (!decoded.has_value()) {
-        return Status::Error(current_.pos.line,
-                             current_.pos.column,
-                             "@proto descriptor body: invalid base64: illegal base64 data at "
-                             "input byte " +
-                                 std::to_string(offset));
+        return Err(current_.pos,
+                   "@proto descriptor body: invalid base64: illegal base64 data at input byte " +
+                       std::to_string(offset));
       }
       pd.body = std::string(decoded->begin(), decoded->end());
-      *end_offset = current_.pos.offset + static_cast<int>(current_.value.size()) + 3;  // b" … "
+      *end_offset = TokenEnd().offset;
       Advance();
       return pd;
     }
     default:
-      return Status::Error(
-          current_.pos.line,
-          current_.pos.column,
-          std::string("expected '{', dotted identifier, triple-quoted string, or b\"...\" after "
-                      "@proto, got ") +
-              TokenKindName(current_.kind));
+      return Err(current_.pos,
+                 std::string("expected '{', dotted identifier, triple-quoted string, or b\"...\" "
+                             "after @proto, got ") +
+                     TokenKindName(current_.kind));
   }
 }
 
@@ -777,89 +1041,103 @@ StatusOr<std::optional<ValuePtr>> Parser::ParseRowCell() {
   if (current_.kind == TokenKind::kComma || current_.kind == TokenKind::kRParen) {
     return std::optional<ValuePtr>{std::nullopt};
   }
-  auto v = ParseValue();
+  // A block cell's entries take pending comments as their own. Comments
+  // before the cell belong to no entry of it, so they are set aside.
+  std::vector<Comment> pending;
+  pending.swap(comments_);
+  auto v = ParseValue(0);
+  comments_.insert(comments_.begin(), pending.begin(), pending.end());
   if (!v.ok()) return v.status();
   return std::optional<ValuePtr>(std::move(v).consume());
 }
 
 int FindMatchingBrace(std::string_view input, int open_offset) {
+  enum class Mode : uint8_t { kCode, kString, kTripleString, kBytes, kLineComment, kBlockComment };
+  Mode mode = Mode::kCode;
   int depth = 1;
-  int i = open_offset + 1;
-  int n = static_cast<int>(input.size());
-  auto skip_string = [&](int j) -> int {
-    if (j + 2 < n && input[j + 1] == '"' && input[j + 2] == '"') {
-      int k = j + 3;
-      while (k + 2 < n) {
-        if (input[k] == '"' && input[k + 1] == '"' && input[k + 2] == '"') return k + 3;
-        ++k;
-      }
-      return -1;
-    }
-    int k = j + 1;
-    while (k < n) {
-      if (input[k] == '\\') {
-        if (k + 1 >= n) return -1;
-        k += 2;
-        continue;
-      }
-      if (input[k] == '"') return k + 1;
-      if (input[k] == '\n') return -1;
-      ++k;
-    }
-    return -1;
-  };
-  auto skip_bytes = [&](int j) -> int {
-    int k = j + 2;  // past `b"`
-    while (k < n) {
-      if (input[k] == '\\') {
-        if (k + 1 >= n) return -1;
-        k += 2;
-        continue;
-      }
-      if (input[k] == '"') return k + 1;
-      if (input[k] == '\n') return -1;
-      ++k;
-    }
-    return -1;
-  };
-  auto skip_eol = [&](int j) -> int {
-    while (j < n && input[j] != '\n') ++j;
-    return j;
-  };
-  while (i < n) {
-    char ch = input[i];
-    if (ch == '{') {
-      ++depth;
-      ++i;
-    } else if (ch == '}') {
-      --depth;
-      if (depth == 0) return i;
-      ++i;
-    } else if (ch == '"') {
-      i = skip_string(i);
-      if (i < 0) return -1;
-    } else if (ch == 'b' && i + 1 < n && input[i + 1] == '"') {
-      i = skip_bytes(i);
-      if (i < 0) return -1;
-    } else if (ch == '#') {
-      i = skip_eol(i + 1);
-    } else if (ch == '/' && i + 1 < n && input[i + 1] == '/') {
-      i = skip_eol(i + 2);
-    } else if (ch == '/' && i + 1 < n && input[i + 1] == '*') {
-      int j = i + 2;
-      bool closed = false;
-      while (j + 1 < n) {
-        if (input[j] == '*' && input[j + 1] == '/') {
-          j += 2;
-          closed = true;
-          break;
+  bool esc = false;
+  int run = 0;  // quotes just seen in a triple string, or 1 after a '*'
+  const int n = static_cast<int>(input.size());
+  for (int i = open_offset + 1; i < n; ++i) {
+    const char ch = input[i];
+    switch (mode) {
+      case Mode::kString:
+        if (esc) {
+          esc = false;
+        } else if (ch == '\\') {
+          esc = true;
+        } else if (ch == '"') {
+          mode = Mode::kCode;
+        } else if (ch == '\n') {
+          return -1;
         }
-        ++j;
+        continue;
+      case Mode::kTripleString:
+        if (ch != '"') {
+          run = 0;
+        } else if (++run == 3) {
+          mode = Mode::kCode;
+          run = 0;
+        }
+        continue;
+      case Mode::kBytes:
+        if (ch == '"') {
+          mode = Mode::kCode;
+        } else if (ch == '\n') {
+          return -1;
+        }
+        continue;
+      case Mode::kLineComment:
+        if (ch == '\n') mode = Mode::kCode;
+        continue;
+      case Mode::kBlockComment:
+        if (ch == '/' && run == 1) {
+          mode = Mode::kCode;
+          run = 0;
+        } else {
+          run = ch == '*' ? 1 : 0;
+        }
+        continue;
+      case Mode::kCode:
+        break;
+    }
+    switch (ch) {
+      case '{':
+        ++depth;
+        break;
+      case '}':
+        if (--depth == 0) return i;
+        break;
+      case '"':
+        if (i + 2 >= n) return -1;
+        if (input[i + 1] == '"' && input[i + 2] == '"') {
+          mode = Mode::kTripleString;
+          i += 2;
+        } else {
+          mode = Mode::kString;
+        }
+        break;
+      case '#':
+        mode = Mode::kLineComment;
+        break;
+      case 'b':
+      case '/': {
+        if (i + 1 >= n) return -1;
+        const char next = input[i + 1];
+        if (ch == 'b' && next == '"') {
+          mode = Mode::kBytes;
+          ++i;
+        } else if (ch == '/' && next == '/') {
+          mode = Mode::kLineComment;
+          ++i;
+        } else if (ch == '/' && next == '*') {
+          mode = Mode::kBlockComment;
+          ++i;
+        }
+        break;
       }
-      if (!closed) return -1;
-      i = j;
-    } else {
-      ++i;
+      default:
+        break;
     }
   }
   return -1;
@@ -894,6 +1172,32 @@ StatusOr<Document> Parse(std::string_view input, ParseOptions opts) {
       opts.max_nesting_depth > 0 ? opts.max_nesting_depth : kMaxNestingDepth,
       opts.max_bytes_literal_length > 0 ? opts.max_bytes_literal_length : kMaxBytesLiteralLength);
   return p.ParseDocument();
+}
+
+TolerantResult ParseTolerant(std::string_view input, ParseOptions opts) {
+  TolerantResult out;
+  const int max_size = opts.max_message_size > 0 ? opts.max_message_size : kMaxMessageSize;
+  if (input.size() > static_cast<size_t>(max_size)) {
+    out.errors.push_back(Error{Position{},
+                               "input of " + std::to_string(input.size()) +
+                                   " bytes exceeds MaxMessageSize=" + std::to_string(max_size)});
+    return out;
+  }
+  Parser p(
+      Parser::TolerantTag{},
+      input,
+      opts.max_nesting_depth > 0 ? opts.max_nesting_depth : kMaxNestingDepth,
+      opts.max_bytes_literal_length > 0 ? opts.max_bytes_literal_length : kMaxBytesLiteralLength);
+  auto doc = p.ParseDocument();
+  if (doc.ok()) {
+    out.document = std::move(doc).consume();
+  } else {
+    p.Record(doc.status());  // Not reachable; ParseDocument recovers from all.
+  }
+  // Recorded in parse order, which is source order except when a lexer error
+  // surfaces during lookahead.
+  out.errors = p.TakeErrors();
+  return out;
 }
 
 }  // namespace protowire::pxf

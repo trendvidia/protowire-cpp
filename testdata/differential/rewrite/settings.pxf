@@ -1,0 +1,22 @@
+# goed editor settings — hand-written, comments everywhere
+
+theme = "gruvbox-dark" // switch back to light in summer
+font_size = 13
+tab_width = 4
+
+# Custom keymap. Order matters to the reader, not the machine.
+keymap {
+  leader = ","
+  save   = "ctrl+s"
+
+  # chords
+  split_vertical = "ctrl+w v"
+}
+
+recent = [
+  "~/src/main.go",
+  "~/notes.md"
+]
+flush = null
+retry = -3
+ratio = 0.5

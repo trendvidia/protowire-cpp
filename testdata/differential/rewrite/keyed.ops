@@ -1,0 +1,329 @@
+# The keyed editors: the inputs of protowire-go's rewrite_keyed_test.go.
+
+doc keyed.pxf
+setkeyed children greeting weight 5
+bytes
+
+doc keyed.pxf
+setkeyed children us-east-1 type "Zone"
+setkeyed children user.name type "Input"
+bytes
+
+doc keyed.pxf
+setkeyed children us-east-1 weight 3
+bytes
+
+doc keyed.pxf
+setkeyed children footer type "HBox"
+bytes
+
+doc keyed.pxf
+setkeyed children eu-west-2 geo.zone "b"
+bytes
+
+doc keyed.pxf
+setkeyed children greeting weight 7
+setkeyed children greeting weight 9
+bytes
+
+src "children {\n  greeting = { weight = 1 }\n}\n"
+setkeyed children greeting weight 4
+bytes
+
+doc keyed.pxf
+rmkeyed children greeting type
+bytes
+
+doc keyed.pxf
+rmelem children greeting
+bytes
+
+doc keyed.pxf
+insert children footer "" type = "HBox" weight = 2
+bytes
+
+doc keyed.pxf
+insert children header greeting type = "Banner"
+bytes
+
+doc keyed.pxf
+insert children ap-south-1 "" type = "Region"
+bytes
+
+doc keyed.pxf
+insert children greeting "" !none
+insert children us-east-1 "" !none
+insert children "" "" !none
+insert children x "" !nil
+insert children x "" !bad
+insert children x "" !block-bad
+insert nope x "" !none
+insert children x missing !none
+insert children y "" !none
+bytes
+
+doc keyed.pxf
+rename children greeting welcome
+bytes
+
+doc keyed.pxf
+rename children greeting welcome-1
+bytes
+
+doc keyed.pxf
+rename children us-east-1 primary
+bytes
+
+doc keyed.pxf
+rename children greeting us-east-1
+rename children missing x
+rename children greeting ""
+rename children greeting greeting
+rename nope a b
+bytes
+
+doc keyed.pxf
+rename children greeting a
+rename children greeting b
+bytes
+
+doc keyed.pxf
+rename children user.name "a\"b\\c"
+rename children us-east-1 "true"
+bytes
+
+doc keyed.pxf
+move children greeting ""
+bytes
+
+doc keyed.pxf
+move children user.name greeting
+bytes
+
+doc keyed.pxf
+move children greeting us-east-1
+bytes
+
+doc keyed.pxf
+move children us-east-1 ""
+move children user.name greeting
+bytes
+
+src "children { a { x = 1 } b { x = 2 } }\n"
+insert children c b x = 3
+bytes
+
+src "children { a { x = 1 } b { x = 2 } }\n"
+move children a ""
+bytes
+
+src "children { a { x = 1 } b { x = 2 } }\n"
+move children b a
+bytes
+
+src "children {a { x = 1 } b { x = 2 }}\n"
+move children a ""
+bytes
+
+src "children { a { x = 1 } b { x = 2 } }\n"
+rmelem children a
+bytes
+
+src "children { a { x = 1 } b { x = 2 } }\n"
+rmelem children b
+bytes
+
+src "children { a { x = 1 } b { x = 2 } }\n"
+setkeyed children c y.z 1
+setkeyed children a y 2
+setkeyed children b x.y 3
+bytes
+
+# An inline element moved next to multi-line ones, and the other way round.
+src "children {\n  a { x = 1 } b { x = 2 }\n  c {\n    x = 3\n  }\n}\n"
+move children c a
+bytes
+
+src "children {\n  a { x = 1 } b { x = 2 }\n  c {\n    x = 3\n  }\n}\n"
+move children a c
+bytes
+
+src "children {\n  a { x = 1 }\n  b { x = 2 } c { x = 3 }\n}\n"
+move children a c
+bytes
+
+src "children {\n  a { x = 1 }\n  b { x = 2 } }\n"
+move children a ""
+bytes
+
+src "children {\n  a { x = 1 }\n  b { x = 2 } c { x = 3 }\n}\n"
+insert children n c x = 1
+bytes
+
+doc keyed.pxf
+setkeyed children greeting weight 10
+rmelem children user.name
+insert children footer "" type = "HBox"
+bytes
+
+doc keyed.pxf
+setkeyed nope k x 1
+setkeyed id k x 1
+setkeyed children "" x 1
+setkeyed children k x !nil
+setkeyed children k x !bad
+setkeyed children k "" 1
+setkeyed children k a..b 1
+setkeyed children k "a b" 1
+setkeyed children k x.true 1
+setkeyed children greeting "" 1
+setkeyed children greeting a..b 1
+rmkeyed children missing x
+rmkeyed children greeting missing
+rmkeyed children greeting a..b
+rmkeyed nope k x
+rmelem children missing
+rmelem nope k
+move children greeting greeting
+move children missing ""
+move children greeting missing
+move nope a ""
+bytes
+
+# fieldPath forms: nested, through a block value, through a scalar, broken.
+src "a {\n  b {\n    k {\n      x = 1\n    }\n  }\n}\nc = {\n  d {\n    e { y = 2 }\n  }\n}\nf = 1\n"
+setkeyed a.b k x 2
+setkeyed c.d e y 3
+setkeyed a.nope k x 1
+setkeyed a.b.k.x k x 1
+setkeyed f.g k x 1
+setkeyed nope.g k x 1
+setkeyed "" k x 1
+setkeyed a..b k x 1
+setkeyed .a k x 1
+setkeyed a. k x 1
+rmelem a. k
+insert "" k "" !none
+rename "" a b
+move "" a ""
+bytes
+
+src "a = 1\nb = \"s\"\nc = [1]\n"
+setkeyed a k x 1
+setkeyed b k x 1
+setkeyed c k x 1
+bytes
+
+# Glued comments: what travels with a moved element and what stays.
+src "c {\n  # header\n\n  # glued 1\n  // glued 2\n  a {\n    x = 1\n  }\n  b {\n    x = 2\n  }\n}\n"
+move c a ""
+bytes
+
+src "c {\n  # header\n\n  # glued 1\n  // glued 2\n  a {\n    x = 1\n  }\n  b {\n    x = 2\n  }\n}\n"
+move c b a
+bytes
+
+src "c {\n  # header\n\n  # glued 1\n  // glued 2\n  a {\n    x = 1\n  }\n  b {\n    x = 2\n  }\n}\n"
+insert c n a x = 1
+bytes
+
+src "c {\n  /* block */\n  a {\n    x = 1\n  }\n  b {\n    x = 2\n  }\n}\n"
+move c a ""
+bytes
+
+src "c {\n  a { x = 1 } # trail\n  b { x = 2 } /* one line */\n  d { x = 3 } /* many\n  lines */\n}\n"
+move c a ""
+bytes
+
+src "c {\n  a { x = 1 } # trail\n  b { x = 2 } /* one line */\n  d { x = 3 } /* many\n  lines */\n}\n"
+move c b a
+bytes
+
+src "c {\n  a { x = 1 } # trail\n  b { x = 2 } /* one line */\n  d { x = 3 } /* many\n  lines */\n}\n"
+move c d a
+bytes
+
+# A space other than ASCII in front of a comment-looking line of a string.
+src "c {\n  /* a\n\xc2\xa0# looks like a comment */\n  b {\n    x = 2\n  }\n}\n"
+insert c n b x = 1
+bytes
+
+src "c {\n  /* a\n\xe3\x80\x80// looks like a comment */\n  b {\n    x = 2\n  }\n}\n"
+insert c n b x = 1
+bytes
+
+src "c {\n  /* a\n\xc2\xa0\x0b\xe2\x80\x83# wide spaces */\n  b {\n    x = 2\n  }\n}\n"
+move c b ""
+bytes
+
+src "c {\n  /* a\n\xff# not a space */\n  b {\n    x = 2\n  }\n}\n"
+insert c n b x = 1
+bytes
+
+# Triple-quoted entry names.
+src "c {\n  \"\"\"a b\"\"\" {\n    x = 1\n  }\n}\n"
+rename c "a b" z
+bytes
+
+src "c {\n  \"\"\"a b\"\"\" = { x = 1 }\n}\n"
+rename c "a b" "y z"
+setkeyed c "a b" x 2
+bytes
+
+# Quoted names, and a name with an escape in it.
+src "c {\n  \"a\\\"b\" {\n    x = 1\n  }\n  \"q\" = { y = 1 }\n}\n"
+rename c "a\"b" z
+rename c q "w x"
+bytes
+
+src "c {\n  \"a b\" {\n    x = 1\n  }\n}\n"
+setkeyed c "a b" x 2
+rmkeyed c "a b" x
+bytes
+
+# A map entry is not an element.
+src "c {\n  a: { x = 1 }\n  b { x = 2 }\n}\n"
+setkeyed c a x 2
+rmelem c a
+insert c a "" x = 1
+bytes
+
+# A scalar assignment is not an element either.
+src "c {\n  a = 1\n  b { x = 2 }\n}\n"
+setkeyed c a x 2
+insert c a "" x = 1
+bytes
+
+# Step inference from the element's own siblings.
+src "c {\n      a {\n            x = 1\n      }\n}\n"
+setkeyed c n p.q 1
+insert c m "" r { s = 1 }
+setkeyed c a y { z = 1 }
+bytes
+
+src "c {\n\ta {\n\t\tx = 1\n\t}\n}\n"
+setkeyed c n p.q 1
+insert c m a r { s = 1 }
+bytes
+
+# Every entry and value kind in a fresh element's body.
+doc keyed.pxf
+insert children m1 "" !map "k k" 1
+insert children m2 "" !mapq "1" { a = 1 }
+insert children m3 greeting !type "t.example/a.B"
+insert children m4 us-east-1 v = { a = 1 b { c = [1, { d = 2 }] } }
+insert children m5 "" !q "# lead\na = 1 # trail\n"
+bytes
+
+src "r = [\n  { n = \"a\" }\n]\n"
+keyedby r n
+insert r m1 "" !map "k k" 1
+insert r m2 a v = { a = 1 } w: 2
+bytes
+
+# A value node carried into a keyed element, and the same key twice.
+src "c {\n  a {\n    x = [1]\n  }\n  a {\n    x = 2\n  }\n}\nd = { y = 1 }\n"
+setkeyed c n v !node 0.0.0
+setkeyed c a x !node 1
+rmelem c a
+bytes

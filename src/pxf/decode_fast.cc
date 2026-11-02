@@ -43,11 +43,13 @@
 #include <google/protobuf/dynamic_message.h>
 #include <google/protobuf/message.h>
 
+#include "bigfloat.h"
 #include "carrier.h"
 #include "parser_internal.h"
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
 #include "protowire/detail/go_quote.h"
+#include "protowire/detail/go_strconv.h"
 #include "protowire/detail/rfc3339.h"
 #include "protowire/detail/utf8.h"
 #include "protowire/limits.h"
@@ -122,17 +124,6 @@ Limits ResolveLimits(const UnmarshalOptions& o) {
   if (o.max_repeated_count > 0) lim.max_repeated = o.max_repeated_count;
   if (o.max_big_float_exponent > 0) lim.max_big_float_exponent = o.max_big_float_exponent;
   return lim;
-}
-
-// CountDigits returns the number of decimal digits in a numeric literal —
-// the quantity MaxNumericLiteralDigits bounds before the literal reaches
-// an arbitrary-precision parser.
-int CountDigits(std::string_view literal) {
-  int n = 0;
-  for (char c : literal) {
-    if (c >= '0' && c <= '9') ++n;
-  }
-  return n;
 }
 
 constexpr const char* kTypeEntryMisplaced =
@@ -658,11 +649,11 @@ class DirectDecoder {
   // CheckDigits bounds a numeric literal before it reaches an
   // arbitrary-precision parser (HARDENING.md MaxNumericLiteralDigits).
   Status CheckDigits(std::string_view literal, Position pos) {
-    int n = CountDigits(literal);
+    int n = CountLiteralDigits(literal);
     if (n > lim_.max_digits) {
       return PosError(pos,
                       "numeric literal has " + std::to_string(n) +
-                          " digits, MaxNumericLiteralDigits=" + std::to_string(lim_.max_digits));
+                          " digits; MaxNumericLiteralDigits=" + std::to_string(lim_.max_digits));
     }
     return Status::OK();
   }
@@ -753,9 +744,9 @@ class DirectDecoder {
     }
     if (ke.named && value != ke.entry_name) {
       return PosError(pos,
-                      "key field \"" + std::string(ke.key_fd->name()) + "\" = \"" +
-                          std::string(value) + "\" conflicts with entry name \"" + ke.entry_name +
-                          "\" in keyed field \"" + ke.field + "\"");
+                      "key field \"" + std::string(ke.key_fd->name()) + "\" = " +
+                          detail::GoQuote(std::string(value)) + " conflicts with entry name " +
+                          detail::GoQuote(ke.entry_name) + " in keyed field \"" + ke.field + "\"");
     }
     return Status::OK();
   }
@@ -771,21 +762,22 @@ class DirectDecoder {
     if (fd == ke->key_fd) {
       if (!is_null) return Status::OK();
       return PosError(pos,
-                      "null on key field \"" + key_name + "\" conflicts with entry name \"" +
-                          ke->entry_name + "\" in keyed field \"" + ke->field + "\"");
+                      "null on key field \"" + key_name + "\" conflicts with entry name " +
+                          detail::GoQuote(ke->entry_name) + " in keyed field \"" + ke->field +
+                          "\"");
     }
     const auto* oo = fd->real_containing_oneof();
     if (oo == nullptr || oo != ke->key_fd->real_containing_oneof()) return Status::OK();
     return PosError(pos,
                     "field \"" + std::string(fd->name()) + "\" shares oneof \"" +
                         std::string(oo->name()) + "\" with key field \"" + key_name +
-                        "\", which entry name \"" + ke->entry_name +
-                        "\" already set in keyed field \"" + ke->field + "\"");
+                        "\", which entry name " + detail::GoQuote(ke->entry_name) +
+                        " already set in keyed field \"" + ke->field + "\"");
   }
   Status QuotedNameUnkeyedError(Position pos, std::string_view name) {
     return PosError(pos,
-                    "quoted entry name \"" + std::string(name) +
-                        "\" is only valid inside a keyed repeated field's block (draft -01 §3.13)");
+                    "quoted entry name " + detail::GoQuote(std::string(name)) +
+                        " is only valid inside a keyed repeated field's block (draft -01 §3.13)");
   }
   Status DecodeKeyedBlockBody(Message* msg,
                               const FieldDescriptor* fd,
@@ -1002,7 +994,7 @@ Status DirectDecoder::CheckOneof(const FieldDescriptor* fd,
   auto it = set_oneofs->find(name);
   if (it != set_oneofs->end()) {
     return PosError(pos,
-                    "oneof \"" + name + "\": field \"" + std::string(fd->name()) +
+                    "oneof " + detail::GoQuote(name) + ": field \"" + std::string(fd->name()) +
                         "\" conflicts with already-set field \"" + it->second + "\"");
   }
   (*set_oneofs)[name] = std::string(fd->name());
@@ -1374,9 +1366,9 @@ Status DirectDecoder::DecodeKeyedBlockBody(Message* msg,
           "invalid UTF-8 in entry name for keyed field \"" + std::string(fd->name()) + "\"");
     }
     if (!seen.emplace(name, true).second) {
-      return PosError(
-          name_pos,
-          "duplicate key \"" + name + "\" in keyed field \"" + std::string(fd->name()) + "\"");
+      return PosError(name_pos,
+                      "duplicate key " + detail::GoQuote(name) + " in keyed field \"" +
+                          std::string(fd->name()) + "\"");
     }
     Advance();
     if (current_.kind == TokenKind::kLBrace) {
@@ -1386,14 +1378,15 @@ Status DirectDecoder::DecodeKeyedBlockBody(Message* msg,
       if (current_.kind != TokenKind::kLBrace) {
         return PosError(
             current_.pos,
-            "keyed entry \"" + name + "\" of field \"" + std::string(fd->name()) +
+            "keyed entry " + detail::GoQuote(name) + " of field \"" + std::string(fd->name()) +
                 "\" must have a block value ('{ ... }'): the element type is a message");
       }
       Advance();
     } else {
       return PosError(current_.pos,
-                      "expected '{' or '=' after entry name \"" + name + "\" in keyed field \"" +
-                          std::string(fd->name()) + "\", got " + TokenKindName(current_.kind));
+                      "expected '{' or '=' after entry name " + detail::GoQuote(name) +
+                          " in keyed field \"" + std::string(fd->name()) + "\", got " +
+                          TokenKindName(current_.kind));
     }
     if (Status s = CheckRepeatedCount(*msg, fd, current_.pos); !s.ok()) return s;
     Message* sub = r->AddMessage(msg, fd);
@@ -1523,7 +1516,7 @@ Status DirectDecoder::SetMapKey(Message* entry,
         return PosError(pos,
                         "invalid string map key " + std::string(key) + " for field \"" +
                             std::string(map_fd->name()) + "\": the keyword " + std::string(key) +
-                            " is a bool key; write \"" + std::string(key) + "\" for the string");
+                            " is a bool key; write " + detail::GoQuote(key) + " for the string");
       }
       if (!detail::IsValidUTF8(key)) return PosError(pos, "invalid UTF-8 in string map key");
       r->SetString(entry, key_fd, std::string(key));
@@ -1577,7 +1570,7 @@ Status DirectDecoder::SetMapKey(Message* entry,
       }
       if (!b.has_value()) {
         std::string spelled =
-            key_kind == TokenKind::kString ? "\"" + std::string(key) + "\"" : std::string(key);
+            key_kind == TokenKind::kString ? detail::GoQuote(key) : std::string(key);
         return PosError(pos,
                         "invalid bool map key " + spelled + " for field \"" +
                             std::string(map_fd->name()) +
@@ -1800,255 +1793,201 @@ Status ParseBoolDefault(std::string_view def, const FieldDescriptor* fd, bool* o
     *out = def == "true";
     return Status::OK();
   }
-  return Status::Error("invalid default bool \"" + std::string(def) + "\" for field \"" +
-                       std::string(fd->name()) +
-                       "\": a PXF bool literal is exactly \"true\" or \"false\", case-sensitive");
+  return Status::Error("invalid default bool " + detail::GoQuote(def) + " for field " +
+                       detail::GoQuote(fd->name()) +
+                       ": a PXF bool literal is exactly \"true\" or \"false\", case-sensitive");
+}
+
+Status InvalidDefault(const char* what,
+                      std::string_view def,
+                      const FieldDescriptor* fd,
+                      const std::string& why) {
+  return Status::Error(std::string("invalid default ") + what + " " + detail::GoQuote(def) +
+                       " for field " + detail::GoQuote(fd->name()) + ": " + why);
+}
+
+// ApplyScalarDefault writes def into target, a scalar field of msg, reporting
+// it as field named: that is target, or the wrapper field around it. The
+// literal is read by Go's own parsers: a default arrives as a string, with no
+// lexer between it and here.
+Status ApplyScalarDefault(Message* msg,
+                          const FieldDescriptor* target,
+                          std::string_view def,
+                          const FieldDescriptor* named) {
+  const Reflection* r = msg->GetReflection();
+  std::string why;
+  switch (target->cpp_type()) {
+    case FieldDescriptor::CPPTYPE_STRING: {
+      if (target->type() != FieldDescriptor::TYPE_BYTES) {
+        r->SetString(msg, target, std::string(def));
+        return Status::OK();
+      }
+      size_t offset = 0;
+      auto decoded = detail::Base64DecodeLenient(def, &offset);
+      if (!decoded.has_value()) {
+        return InvalidDefault(
+            "bytes", def, named, "illegal base64 data at input byte " + std::to_string(offset));
+      }
+      r->SetString(msg, target, std::string(decoded->begin(), decoded->end()));
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_BOOL: {
+      bool b = false;
+      if (Status st = ParseBoolDefault(def, named, &b); !st.ok()) return st;
+      r->SetBool(msg, target, b);
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_INT32: {
+      int64_t n = 0;
+      if (!detail::GoParseInt(def, 32, &n, &why)) return InvalidDefault("int32", def, named, why);
+      r->SetInt32(msg, target, static_cast<int32_t>(n));
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_INT64: {
+      int64_t n = 0;
+      if (!detail::GoParseInt(def, 64, &n, &why)) return InvalidDefault("int64", def, named, why);
+      r->SetInt64(msg, target, n);
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_UINT32: {
+      uint64_t n = 0;
+      if (!detail::GoParseUint(def, 32, &n, &why)) return InvalidDefault("uint32", def, named, why);
+      r->SetUInt32(msg, target, static_cast<uint32_t>(n));
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_UINT64: {
+      uint64_t n = 0;
+      if (!detail::GoParseUint(def, 64, &n, &why)) return InvalidDefault("uint64", def, named, why);
+      r->SetUInt64(msg, target, n);
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_FLOAT: {
+      double d = 0;
+      if (!detail::GoParseFloat(def, 32, &d, &why)) return InvalidDefault("float", def, named, why);
+      r->SetFloat(msg, target, static_cast<float>(d));
+      return Status::OK();
+    }
+    case FieldDescriptor::CPPTYPE_DOUBLE: {
+      double d = 0;
+      if (!detail::GoParseFloat(def, 64, &d, &why)) {
+        return InvalidDefault("double", def, named, why);
+      }
+      r->SetDouble(msg, target, d);
+      return Status::OK();
+    }
+    default:
+      return Status::Error("default values not supported for field " +
+                           detail::GoQuote(named->name()));
+  }
 }
 
 // ApplyMessageDefault handles defaults for well-known message types:
 // google.protobuf.Timestamp / Duration, the wrapper types (StringValue,
-// Int32Value, …), and pxf.BigInt / Decimal / BigFloat. Mirrors
-// protowire-go's applyMessageDefault.
+// Int32Value, …), and pxf.BigInt / Decimal / BigFloat. Each parses before it
+// allocates, so a rejected literal leaves no empty message on the parent.
+// Mirrors protowire-go's applyMessageDefault.
 Status ApplyMessageDefault(Message* msg, const FieldDescriptor* fd, std::string_view def) {
   const auto* mdesc = fd->message_type();
+  const Reflection* r = msg->GetReflection();
 
   if (IsTimestamp(mdesc)) {
     auto ts = detail::ParseRFC3339(def);
     if (!ts.has_value()) {
-      return Status::Error("invalid default timestamp \"" + std::string(def) + "\" for field \"" +
-                           std::string(fd->name()) + "\"");
+      return InvalidDefault("timestamp", def, fd, detail::GoTimestampError(def));
     }
-    Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
-    SetTimestampFields(sub, ts->seconds, ts->nanos);
+    SetTimestampFields(r->MutableMessage(msg, fd), ts->seconds, ts->nanos);
     return Status::OK();
   }
 
   if (IsDuration(mdesc)) {
     auto dur = detail::ParseDuration(def);
-    if (!dur.has_value()) {
-      return Status::Error("invalid default duration \"" + std::string(def) + "\" for field \"" +
-                           std::string(fd->name()) + "\"");
-    }
-    Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
-    SetDurationFields(sub, dur->seconds, dur->nanos);
+    if (!dur.has_value()) return InvalidDefault("duration", def, fd, detail::GoDurationError(def));
+    SetDurationFields(r->MutableMessage(msg, fd), dur->seconds, dur->nanos);
     return Status::OK();
   }
 
-  if (int inner = WrapperInnerCppType(mdesc); inner != -1) {
-    Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
+  if (WrapperInnerCppType(mdesc) != -1) {
     const auto* value_fd = mdesc->FindFieldByName("value");
-    if (value_fd == nullptr) {
-      return Status::Error("wrapper type \"" + std::string(mdesc->full_name()) +
-                           "\" has no `value` field");
-    }
-    const Reflection* sr = sub->GetReflection();
-    switch (inner) {
-      case FieldDescriptor::CPPTYPE_STRING:
-        if (value_fd->type() == FieldDescriptor::TYPE_BYTES) {
-          size_t offset = 0;
-          auto decoded = detail::Base64DecodeLenient(def, &offset);
-          if (!decoded.has_value())
-            return Status::Error("invalid default bytes \"" + std::string(def) + "\" for field \"" +
-                                 std::string(fd->name()) + "\"");
-          sr->SetString(sub, value_fd, std::string(decoded->begin(), decoded->end()));
-        } else {
-          sr->SetString(sub, value_fd, std::string(def));
-        }
-        return Status::OK();
-      case FieldDescriptor::CPPTYPE_BOOL: {
-        bool b = false;
-        if (Status st = ParseBoolDefault(def, fd, &b); !st.ok()) return st;
-        sr->SetBool(sub, value_fd, b);
-        return Status::OK();
-      }
-      case FieldDescriptor::CPPTYPE_INT32: {
-        int32_t n;
-        if (!ParseInteger(def, n))
-          return Status::Error("invalid default int32 \"" + std::string(def) + "\" for field \"" +
-                               std::string(fd->name()) + "\"");
-        sr->SetInt32(sub, value_fd, n);
-        return Status::OK();
-      }
-      case FieldDescriptor::CPPTYPE_INT64: {
-        int64_t n;
-        if (!ParseInteger(def, n))
-          return Status::Error("invalid default int64 \"" + std::string(def) + "\" for field \"" +
-                               std::string(fd->name()) + "\"");
-        sr->SetInt64(sub, value_fd, n);
-        return Status::OK();
-      }
-      case FieldDescriptor::CPPTYPE_UINT32: {
-        uint32_t n;
-        if (!ParseInteger(def, n))
-          return Status::Error("invalid default uint32 \"" + std::string(def) + "\" for field \"" +
-                               std::string(fd->name()) + "\"");
-        sr->SetUInt32(sub, value_fd, n);
-        return Status::OK();
-      }
-      case FieldDescriptor::CPPTYPE_UINT64: {
-        uint64_t n;
-        if (!ParseInteger(def, n))
-          return Status::Error("invalid default uint64 \"" + std::string(def) + "\" for field \"" +
-                               std::string(fd->name()) + "\"");
-        sr->SetUInt64(sub, value_fd, n);
-        return Status::OK();
-      }
-      case FieldDescriptor::CPPTYPE_FLOAT: {
-        float d;
-        if (!ParseFinite(def, d))
-          return Status::Error("invalid default float \"" + std::string(def) + "\" for field \"" +
-                               std::string(fd->name()) + "\"");
-        sr->SetFloat(sub, value_fd, d);
-        return Status::OK();
-      }
-      case FieldDescriptor::CPPTYPE_DOUBLE: {
-        double d;
-        if (!ParseFinite(def, d))
-          return Status::Error("invalid default double \"" + std::string(def) + "\" for field \"" +
-                               std::string(fd->name()) + "\"");
-        sr->SetDouble(sub, value_fd, d);
-        return Status::OK();
-      }
-      default:
-        return Status::Error("unsupported wrapper inner type for field \"" +
-                             std::string(fd->name()) + "\"");
-    }
-  }
-
-  if (IsBigInt(mdesc)) {
-    Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
-    if (!SetBigIntFromString(sub, def)) {
-      return Status::Error("invalid default pxf.BigInt \"" + std::string(def) + "\" for field \"" +
-                           std::string(fd->name()) + "\"");
-    }
-    return Status::OK();
-  }
-  if (IsDecimal(mdesc)) {
-    Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
-    if (!SetDecimalFromString(sub, def)) {
-      return Status::Error("invalid default pxf.Decimal \"" + std::string(def) + "\" for field \"" +
-                           std::string(fd->name()) + "\"");
-    }
-    return Status::OK();
-  }
-  if (IsBigFloat(mdesc)) {
-    Message* sub = msg->GetReflection()->MutableMessage(msg, fd);
-    if (!SetBigFloatFromString(sub, def)) {
-      return Status::Error("invalid default pxf.BigFloat \"" + std::string(def) +
-                           "\" for field \"" + std::string(fd->name()) + "\"");
-    }
+    std::unique_ptr<Message> parsed(r->GetMessage(*msg, fd).New());
+    if (Status st = ApplyScalarDefault(parsed.get(), value_fd, def, fd); !st.ok()) return st;
+    r->MutableMessage(msg, fd)->CopyFrom(*parsed);
     return Status::OK();
   }
 
-  return Status::Error("default values not supported for message type \"" +
-                       std::string(mdesc->full_name()) + "\" (field \"" + std::string(fd->name()) +
-                       "\")");
+  if (IsBigInt(mdesc) || IsDecimal(mdesc) || IsBigFloat(mdesc)) {
+    const bool is_float = IsBigFloat(mdesc);
+    const char* what = IsBigInt(mdesc) ? "big integer" : is_float ? "big float" : "decimal";
+    std::unique_ptr<Message> parsed(r->GetMessage(*msg, fd).New());
+    Status st;
+    if (is_float) {
+      const size_t p = def.find('p');
+      st = SetBigFloatFromLiteral(
+          parsed.get(),
+          def.substr(0, p),
+          p == std::string_view::npos ? std::string_view() : def.substr(p + 1),
+          kMaxNumericLiteralDigits,
+          kMaxBigFloatExponent);
+    } else if (const int digits = CountLiteralDigits(def); digits > kMaxNumericLiteralDigits) {
+      st = Status::Error(
+          "numeric literal has " + std::to_string(digits) +
+          " digits; MaxNumericLiteralDigits=" + std::to_string(kMaxNumericLiteralDigits));
+    } else if (const size_t dot = def.find('.');
+               IsDecimal(mdesc) && dot != std::string_view::npos &&
+               def.size() - dot - 1 > static_cast<size_t>(kMaxNumericLiteralDigits)) {
+      st = Status::Error(
+          "pxf.Decimal scale " + std::to_string(def.size() - dot - 1) +
+          " exceeds MaxNumericLiteralDigits=" + std::to_string(kMaxNumericLiteralDigits));
+    } else if (IsBigInt(mdesc) ? !SetBigIntFromString(parsed.get(), def)
+                               : !SetDecimalFromString(parsed.get(), def)) {
+      st = Status::Error(std::string("invalid ") + what + ": " + std::string(def));
+    }
+    if (!st.ok()) return InvalidDefault(what, def, fd, st.message());
+    r->MutableMessage(msg, fd)->CopyFrom(*parsed);
+    return Status::OK();
+  }
+
+  return Status::Error("default values not supported for message type " +
+                       std::string(mdesc->full_name()) + " (field " + detail::GoQuote(fd->name()) +
+                       ")");
 }
 
-// ApplyDefault parses `def` (the (pxf.default) string) and writes it into
-// `msg`'s `fd` slot. Mirrors protowire-go applyDefault — handles every scalar
-// kind plus enum, bytes, and the well-known message types in
-// ApplyMessageDefault above.
-//
-// ValidateFile rejects what this rejects (CheckDefaultPlacement), but
-// skip_validate bypasses that, and a scalar setter on a repeated or map field
-// aborts in libprotobuf.
+}  // namespace
+
 Status ApplyDefault(Message* msg, const FieldDescriptor* fd, std::string_view def) {
+  // A scalar setter on a repeated or map field aborts in libprotobuf.
   if (fd->is_repeated()) {
     return Status::Error(std::string("default values not supported for ") +
-                         (fd->is_map() ? "map" : "repeated") + " field \"" +
-                         std::string(fd->name()) + "\"");
+                         (fd->is_map() ? "map" : "repeated") + " field " +
+                         detail::GoQuote(fd->name()));
   }
-  const Reflection* r = msg->GetReflection();
   switch (fd->cpp_type()) {
-    case FieldDescriptor::CPPTYPE_STRING: {
-      if (fd->type() == FieldDescriptor::TYPE_BYTES) {
-        size_t offset = 0;
-        auto decoded = detail::Base64DecodeLenient(def, &offset);
-        if (!decoded.has_value()) {
-          return Status::Error("invalid default bytes for field \"" + std::string(fd->name()) +
-                               "\"");
-        }
-        r->SetString(msg, fd, std::string(decoded->begin(), decoded->end()));
-      } else {
-        r->SetString(msg, fd, std::string(def));
-      }
-      return Status::OK();
-    }
-    case FieldDescriptor::CPPTYPE_BOOL: {
-      bool b = false;
-      if (Status st = ParseBoolDefault(def, fd, &b); !st.ok()) return st;
-      r->SetBool(msg, fd, b);
-      return Status::OK();
-    }
-    case FieldDescriptor::CPPTYPE_INT32: {
-      int32_t n;
-      if (!ParseInteger(def, n))
-        return Status::Error("invalid default int32 \"" + std::string(def) + "\" for field \"" +
-                             std::string(fd->name()) + "\"");
-      r->SetInt32(msg, fd, n);
-      return Status::OK();
-    }
-    case FieldDescriptor::CPPTYPE_INT64: {
-      int64_t n;
-      if (!ParseInteger(def, n))
-        return Status::Error("invalid default int64 \"" + std::string(def) + "\" for field \"" +
-                             std::string(fd->name()) + "\"");
-      r->SetInt64(msg, fd, n);
-      return Status::OK();
-    }
-    case FieldDescriptor::CPPTYPE_UINT32: {
-      uint32_t n;
-      if (!ParseInteger(def, n))
-        return Status::Error("invalid default uint32 \"" + std::string(def) + "\" for field \"" +
-                             std::string(fd->name()) + "\"");
-      r->SetUInt32(msg, fd, n);
-      return Status::OK();
-    }
-    case FieldDescriptor::CPPTYPE_UINT64: {
-      uint64_t n;
-      if (!ParseInteger(def, n))
-        return Status::Error("invalid default uint64 \"" + std::string(def) + "\" for field \"" +
-                             std::string(fd->name()) + "\"");
-      r->SetUInt64(msg, fd, n);
-      return Status::OK();
-    }
-    case FieldDescriptor::CPPTYPE_FLOAT: {
-      float d;
-      if (!ParseFinite(def, d))
-        return Status::Error("invalid default float \"" + std::string(def) + "\" for field \"" +
-                             std::string(fd->name()) + "\"");
-      r->SetFloat(msg, fd, d);
-      return Status::OK();
-    }
-    case FieldDescriptor::CPPTYPE_DOUBLE: {
-      double d;
-      if (!ParseFinite(def, d))
-        return Status::Error("invalid default double \"" + std::string(def) + "\" for field \"" +
-                             std::string(fd->name()) + "\"");
-      r->SetDouble(msg, fd, d);
-      return Status::OK();
-    }
     case FieldDescriptor::CPPTYPE_ENUM: {
-      const auto* enum_desc = fd->enum_type();
-      if (const auto* ev = enum_desc->FindValueByName(std::string(def))) {
+      const Reflection* r = msg->GetReflection();
+      if (const auto* ev = fd->enum_type()->FindValueByName(std::string(def))) {
         r->SetEnumValue(msg, fd, ev->number());
         return Status::OK();
       }
-      int32_t n;
-      if (!ParseInteger(def, n))
-        return Status::Error("invalid default enum \"" + std::string(def) + "\" for field \"" +
-                             std::string(fd->name()) + "\"");
-      r->SetEnumValue(msg, fd, n);
+      int64_t n = 0;
+      std::string why;
+      if (!detail::GoParseInt(def, 32, &n, &why)) {
+        return Status::Error("invalid default enum " + detail::GoQuote(def) + " for field " +
+                             detail::GoQuote(fd->name()));
+      }
+      r->SetEnumValue(msg, fd, static_cast<int>(n));
       return Status::OK();
     }
     case FieldDescriptor::CPPTYPE_MESSAGE:
+      if (fd->type() == FieldDescriptor::TYPE_GROUP) {
+        return Status::Error("default values not supported for kind group (field " +
+                             detail::GoQuote(fd->name()) + ")");
+      }
       return ApplyMessageDefault(msg, fd, def);
     default:
-      return Status::Error("default values not supported for field \"" + std::string(fd->name()) +
-                           "\"");
+      return ApplyScalarDefault(msg, fd, def, fd);
   }
 }
+
+namespace {
 
 const std::vector<PostDecoder::PlanField>& PostDecoder::Plan(const Descriptor* desc) {
   auto [it, inserted] = plans_.try_emplace(desc);
@@ -2184,7 +2123,8 @@ Status CheckSchema(const Message* msg, const UnmarshalOptions& opts) {
 Status Unmarshal(std::string_view data, Message* msg, UnmarshalOptions opts) {
   if (Status s = CheckSchema(msg, opts); !s.ok()) return s;
   DirectDecoder d(data, msg, /*result=*/nullptr, opts);
-  return d.Run();
+  if (Status s = d.Run(); !s.ok()) return s;
+  return check::Validate(opts.validator, *msg, opts.report);
 }
 
 StatusOr<Result> UnmarshalFull(std::string_view data, Message* msg, UnmarshalOptions opts) {
@@ -2193,10 +2133,52 @@ StatusOr<Result> UnmarshalFull(std::string_view data, Message* msg, UnmarshalOpt
   DirectDecoder d(data, msg, &r, opts);
   Status st = d.Run();
   if (!st.ok()) return st;
-  if (opts.skip_post_decode) return r;
-  const auto* null_mask_fd = FindNullMaskField(msg->GetDescriptor());
-  if (Status pst = d.RunPostDecode(null_mask_fd); !pst.ok()) return pst;
+  if (!opts.skip_post_decode) {
+    const auto* null_mask_fd = FindNullMaskField(msg->GetDescriptor());
+    if (Status pst = d.RunPostDecode(null_mask_fd); !pst.ok()) return pst;
+  }
+  check::Report report;
+  bool has_report = false;
+  st = check::Validate(opts.validator, *msg, &report, &has_report);
+  if (has_report && opts.report != nullptr) *opts.report = report;
+  if (!st.ok()) return st;
+  if (has_report) r.SetReport(std::move(report));
   return r;
+}
+
+namespace {
+
+// OwnedMessage keeps a dynamic message and the factory it needs alive together.
+struct OwnedMessage {
+  google::protobuf::DynamicMessageFactory factory;
+  std::unique_ptr<Message> message;
+};
+
+std::shared_ptr<OwnedMessage> NewOwned(const Descriptor* desc) {
+  auto owned = std::make_shared<OwnedMessage>();
+  owned->message.reset(owned->factory.GetPrototype(desc)->New());
+  return owned;
+}
+
+}  // namespace
+
+StatusOr<std::shared_ptr<Message>> UnmarshalDescriptor(std::string_view data,
+                                                       const Descriptor* desc,
+                                                       UnmarshalOptions opts) {
+  auto owned = NewOwned(desc);
+  Message* msg = owned->message.get();
+  if (Status s = Unmarshal(data, msg, opts); !s.ok()) return s;
+  return std::shared_ptr<Message>(owned, msg);
+}
+
+StatusOr<DescriptorResult> UnmarshalFullDescriptor(std::string_view data,
+                                                   const Descriptor* desc,
+                                                   UnmarshalOptions opts) {
+  auto owned = NewOwned(desc);
+  Message* msg = owned->message.get();
+  auto r = UnmarshalFull(data, msg, opts);
+  if (!r.ok()) return r.status();
+  return DescriptorResult{std::shared_ptr<Message>(owned, msg), std::move(r).consume()};
 }
 
 }  // namespace protowire::pxf

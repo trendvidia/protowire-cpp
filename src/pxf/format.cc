@@ -17,6 +17,7 @@
 #include <string_view>
 #include <variant>
 
+#include "format_internal.h"
 #include "protowire/detail/base64.h"
 #include "protowire/pxf/keyed.h"
 #include "protowire/pxf/lexer.h"
@@ -53,26 +54,13 @@ bool LexesAsBareMapKey(std::string_view s) {
   }
 }
 
-// MapKeyQuoted decides the spelling of a map key on the way out. A key
-// the document wrote quoted keeps its quotes unless it is identifier-safe;
-// a key the document wrote bare stays bare, because the bare spellings
-// true, 0 and 123 denote a bool or an integer key and quoting them would
-// change what they denote (draft -01 § Entries and Keys, "Canonical
-// spelling of map keys"; protowire#306). A MapEntry built in code carries
-// no document spelling: it is written bare when its key lexes as one bare
-// map-key token and quoted otherwise, so "" or "my key" never produce a
-// document that does not parse.
-bool MapKeyQuoted(const MapEntry& m) {
-  if (m.key_quoted) return !IsIdentifierSafe(m.key);
-  return !LexesAsBareMapKey(m.key);
-}
-
 class Formatter {
  public:
-  explicit Formatter(std::string& out) : out_(out) {}
+  explicit Formatter(std::string& out, std::string_view indent = "  ")
+      : out_(out), indent_(indent) {}
 
   void WriteIndent(int level) {
-    for (int i = 0; i < level; ++i) out_ += "  ";
+    for (int i = 0; i < level; ++i) out_ += indent_;
   }
 
   void WriteComments(const std::vector<Comment>& comments, int level) {
@@ -84,9 +72,17 @@ class Formatter {
   }
 
   void FormatEntries(const std::vector<EntryPtr>& entries, int level) {
-    for (const auto& entry : entries) {
-      std::visit([&](const auto& ptr) { FormatEntry(*ptr, level); }, entry);
-    }
+    for (const auto& entry : entries) FormatOne(entry, level);
+  }
+
+  // A null entry or value is Go's nil interface: the type switch matches
+  // nothing and writes nothing.
+  void FormatOne(const EntryPtr& entry, int level) {
+    std::visit(
+        [&](const auto& ptr) {
+          if (ptr) FormatEntry(*ptr, level);
+        },
+        entry);
   }
 
   void FormatEntry(const Assignment& a, int level) {
@@ -123,6 +119,18 @@ class Formatter {
     out_.push_back('\n');
   }
 
+  void FormatEntry(const TypeEntry& e, int level) {
+    WriteComments(e.leading_comments, level);
+    WriteIndent(level);
+    out_ += "@type = ";
+    WriteQuotedString(e.url, out_);
+    if (!e.trailing_comment.empty()) {
+      out_.push_back(' ');
+      out_ += e.trailing_comment;
+    }
+    out_.push_back('\n');
+  }
+
   void FormatEntry(const Block& b, int level) {
     WriteComments(b.leading_comments, level);
     WriteIndent(level);
@@ -138,7 +146,11 @@ class Formatter {
   }
 
   void FormatValue(const ValuePtr& val, int level) {
-    std::visit([&](const auto& ptr) { FormatValueImpl(*ptr, level); }, val);
+    std::visit(
+        [&](const auto& ptr) {
+          if (ptr) FormatValueImpl(*ptr, level);
+        },
+        val);
   }
 
  private:
@@ -160,6 +172,8 @@ class Formatter {
     out_.push_back('"');
   }
   void FormatValueImpl(const NullVal& /*v*/, int /*level*/) { out_ += "null"; }
+  // A placeholder has no source text. See BadVal.
+  void FormatValueImpl(const BadVal& /*v*/, int /*level*/) {}
   void FormatValueImpl(const IdentVal& v, int /*level*/) { out_ += v.name; }
   void FormatValueImpl(const TimestampVal& v, int /*level*/) { out_ += v.raw; }
   void FormatValueImpl(const DurationVal& v, int /*level*/) { out_ += v.raw; }
@@ -182,14 +196,43 @@ class Formatter {
   }
 
   std::string& out_;
+  std::string_view indent_;
 };
 
 }  // namespace
 
+// MapKeyQuoted decides the spelling of a map key on the way out. A key
+// the document wrote quoted keeps its quotes unless it is identifier-safe;
+// a key the document wrote bare stays bare, because the bare spellings
+// true, 0 and 123 denote a bool or an integer key and quoting them would
+// change what they denote (draft -01 § Entries and Keys, "Canonical
+// spelling of map keys"; protowire#306). A MapEntry built in code carries
+// no document spelling: it is written bare when its key lexes as one bare
+// map-key token and quoted otherwise, so "" or "my key" never produce a
+// document that does not parse.
+bool MapKeyQuoted(const MapEntry& m) {
+  if (m.key_quoted) return !IsIdentifierSafe(m.key);
+  return !LexesAsBareMapKey(m.key);
+}
+
+void AppendValueIndented(std::string* out, const ValuePtr& value, std::string_view indent) {
+  Formatter f(*out, indent);
+  f.FormatValue(value, 0);
+}
+
+void AppendEntryIndented(std::string* out, const EntryPtr& entry, std::string_view indent) {
+  Formatter f(*out, indent);
+  f.FormatOne(entry, 0);
+}
+
+void AppendValue(std::string* out, const ValuePtr& value) {
+  Formatter f(*out);
+  f.FormatValue(value, 0);
+}
+
 std::string FormatValue(const ValuePtr& value) {
   std::string out;
-  Formatter f(out);
-  f.FormatValue(value, 0);
+  AppendValue(&out, value);
   return out;
 }
 

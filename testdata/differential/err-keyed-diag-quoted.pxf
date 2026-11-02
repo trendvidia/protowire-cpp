@@ -1,0 +1,4 @@
+@type diff.v1.Root
+"q\u0001" = 1
+"block\n" { }
+items { "in" { } }

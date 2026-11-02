@@ -194,6 +194,49 @@ void RunMessage(Schema& s, const gpb::Descriptor* d, const std::string& text) {
   PrintText("marshal-nulls", pxf::Marshal(*full, m));
 }
 
+class StubValidator : public protowire::check::Validator {
+ public:
+  explicit StubValidator(protowire::check::Report rep) : rep_(std::move(rep)) {}
+  protowire::StatusOr<protowire::check::Report> Validate(const gpb::Message&) override {
+    return rep_;
+  }
+
+ private:
+  protowire::check::Report rep_;
+};
+
+// RunSeams covers the entry points that allocate the message and the validator
+// seam.
+void RunSeams(Schema& s, const gpb::Descriptor* d, const std::string& text) {
+  pxf::UnmarshalOptions opts;
+  opts.type_resolver = &s;
+  auto m = pxf::UnmarshalDescriptor(text, d, opts);
+  std::cout << "descriptor: " << Text(m.status()) << "\n";
+  if (m.ok()) std::cout << "bytes: " << BytesOf(**m) << "\n";
+  auto f = pxf::UnmarshalFullDescriptor(text, d, opts);
+  std::cout << "descriptor-full: " << Text(f.status()) << "\n";
+  if (f.ok()) {
+    std::cout << "bytes: " << BytesOf(*f->message) << "\n";
+    std::cout << "present: " << Quote(Join(f->result.PresentFields(), " ")) << "\n";
+  }
+  using protowire::check::Report;
+  const std::vector<Report> reports = {
+      Report{},
+      Report{{{"", "", "bad"}}},
+      Report{{{"a.b", "test.rule", "bad"}}},
+      Report{{{"a", "", "one"}, {"", "r", "two"}}},
+  };
+  for (size_t i = 0; i < reports.size(); ++i) {
+    StubValidator v(reports[i]);
+    opts.validator = &v;
+    auto vm = s.New(d);
+    std::cout << "validated " << i << ": " << Text(pxf::Unmarshal(text, vm.get(), opts)) << "\n";
+    auto fm = s.New(d);
+    std::cout << "validated-full " << i << ": "
+              << Text(pxf::UnmarshalFull(text, fm.get(), opts).status()) << "\n";
+  }
+}
+
 void RunDatasets(Schema& s, const pxf::Document& doc) {
   for (const auto& ds : doc.datasets) {
     const gpb::Descriptor* d = s.Find(ds.type);
@@ -262,11 +305,317 @@ void Run(const std::string& root,
     return;
   }
   std::cout << "type: " << d->full_name() << "\n";
+  auto tolerant = pxf::ParseTolerant(text);
+  for (const auto& k : pxf::KeyedDiagnostics(tolerant.document, d)) {
+    std::cout << "keyed: " << pxf::KeyedErrorKindName(k.kind) << " field=" << Quote(k.field)
+              << " key=" << Quote(k.key) << " " << Quote(k.ToString()) << "\n";
+  }
   if (doc.ok()) {
     pxf::CanonicalizeKeyed(&*doc, d);
     PrintText("canonical", pxf::FormatDocument(*doc));
   }
   RunMessage(s, d, text);
+  RunSeams(s, d, text);
+}
+
+// AstDump writes a document's whole AST with every span, in a form the Go side
+// repeats byte for byte.
+class AstDump {
+ public:
+  explicit AstDump(std::string* out) : out_(*out) {}
+
+  void Document(const pxf::Document& doc) {
+    out_ += "type_url " + Quote(doc.type_url) + " body " + std::to_string(doc.body_offset) + "\n";
+    Comments("", doc.leading_comments);
+    for (const auto& x : doc.directives) {
+      out_ += "directive " + Pos(x.pos) + " " + x.name + " " + x.type + " [" + Spaced(x.prefixes) +
+              "] " + Quote(x.body) + " " + Bool(x.has_body) + "\n";
+      Comments("", x.leading_comments);
+    }
+    for (const auto& x : doc.protos) {
+      out_ += "proto " + Pos(x.pos) + " " + pxf::ProtoShapeName(x.shape) + " " + x.type_name + " " +
+              Quote(x.body) + "\n";
+      Comments("", x.leading_comments);
+    }
+    for (const auto& x : doc.datasets) {
+      out_ += "dataset " + Pos(x.pos) + " " + x.type + " [" + Spaced(x.columns) + "]\n";
+      Comments("", x.leading_comments);
+      for (const auto& r : x.rows) {
+        out_ += "row " + Pos(r.pos) + "\n";
+        for (const auto& c : r.cells) {
+          if (c.has_value()) {
+            Value(" ", *c);
+          } else {
+            out_ += " empty\n";
+          }
+        }
+      }
+    }
+    Entries("", doc.entries);
+  }
+
+ private:
+  static std::string Pos(const pxf::Position& p) {
+    return std::to_string(p.line) + ":" + std::to_string(p.column) + ":" + std::to_string(p.offset);
+  }
+  static std::string Bool(bool b) { return b ? "true" : "false"; }
+  static std::string Spaced(const std::vector<std::string>& v) {
+    std::string out;
+    for (size_t i = 0; i < v.size(); ++i) out += (i ? " " : "") + v[i];
+    return out;
+  }
+  void Comments(const std::string& ind, const std::vector<pxf::Comment>& cs) {
+    for (const auto& c : cs) {
+      out_ += ind + "comment " + Pos(c.pos) + " " + Quote(c.text) + "\n";
+    }
+  }
+  void Kind(const pxf::StringVal& v, const std::string&) {
+    out_ += "string " + Quote(v.value) + "\n";
+  }
+  void Kind(const pxf::IntVal& v, const std::string&) {
+    out_ += "int " + v.raw + " p" + v.prec + "\n";
+  }
+  void Kind(const pxf::FloatVal& v, const std::string&) {
+    out_ += "float " + v.raw + " p" + v.prec + "\n";
+  }
+  void Kind(const pxf::BoolVal& v, const std::string&) { out_ += "bool " + Bool(v.value) + "\n"; }
+  void Kind(const pxf::BytesVal& v, const std::string&) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    out_ += "bytes ";
+    for (uint8_t c : v.value) {
+      out_ += kHex[c >> 4];
+      out_ += kHex[c & 0xF];
+    }
+    out_ += "\n";
+  }
+  void Kind(const pxf::NullVal&, const std::string&) { out_ += "null\n"; }
+  void Kind(const pxf::IdentVal& v, const std::string&) { out_ += "ident " + v.name + "\n"; }
+  void Kind(const pxf::TimestampVal& v, const std::string&) { out_ += "timestamp " + v.raw + "\n"; }
+  void Kind(const pxf::DurationVal& v, const std::string&) { out_ += "duration " + v.raw + "\n"; }
+  void Kind(const pxf::BadVal&, const std::string&) { out_ += "bad\n"; }
+  void Kind(const pxf::ListVal& v, const std::string& ind) {
+    out_ += "list\n";
+    for (const auto& e : v.elements) Value(ind + " ", e);
+  }
+  void Kind(const pxf::BlockVal& v, const std::string& ind) {
+    out_ += "blockval\n";
+    Entries(ind + " ", v.entries);
+  }
+  void Value(const std::string& ind, const pxf::ValuePtr& v) {
+    auto [start, end] = pxf::ValueSpan(v);
+    out_ += ind + Pos(start) + "-" + Pos(end) + " ";
+    std::visit([&](const auto& p) { Kind(*p, ind); }, v);
+  }
+  void Entry(const pxf::Assignment& e, const std::string& ind) {
+    out_ += "assign " + Quote(e.key) + " " + Bool(e.key_quoted) +
+            " trail=" + Quote(e.trailing_comment) + "\n";
+    Comments(ind, e.leading_comments);
+    Value(ind + " ", e.value);
+  }
+  void Entry(const pxf::MapEntry& e, const std::string& ind) {
+    out_ += "map " + Quote(e.key) + " " + Bool(e.key_quoted) +
+            " trail=" + Quote(e.trailing_comment) + "\n";
+    Comments(ind, e.leading_comments);
+    Value(ind + " ", e.value);
+  }
+  void Entry(const pxf::TypeEntry& e, const std::string& ind) {
+    out_ += "type " + Quote(e.url) + " trail=" + Quote(e.trailing_comment) + "\n";
+    Comments(ind, e.leading_comments);
+  }
+  void Entry(const pxf::Block& e, const std::string& ind) {
+    out_ += "block " + Quote(e.name) + " " + Bool(e.name_quoted) + "\n";
+    Comments(ind, e.leading_comments);
+    Entries(ind + " ", e.entries);
+  }
+  void Entries(const std::string& ind, const std::vector<pxf::EntryPtr>& es) {
+    for (const auto& e : es) {
+      auto [start, end] = pxf::EntrySpan(e);
+      out_ += ind + Pos(start) + "-" + Pos(end) + " ";
+      std::visit([&](const auto& p) { Entry(*p, ind); }, e);
+    }
+  }
+
+  std::string& out_;
+};
+
+// The same list as defaultTable in tools/godiff. The literals are a schema's,
+// so they cover what strconv and package time accept and refuse.
+const char* const kDefaultTable[] = {"",
+                                     "0",
+                                     "1",
+                                     "-1",
+                                     "+1",
+                                     "+",
+                                     "-",
+                                     "007",
+                                     "5x",
+                                     "x",
+                                     "true",
+                                     "false",
+                                     "True",
+                                     "RED",
+                                     "COLOR_UNSPECIFIED",
+                                     "2147483647",
+                                     "2147483648",
+                                     "-2147483648",
+                                     "-2147483649",
+                                     "4294967295",
+                                     "4294967296",
+                                     "9223372036854775807",
+                                     "9223372036854775808",
+                                     "-9223372036854775808",
+                                     "-9223372036854775809",
+                                     "18446744073709551615",
+                                     "18446744073709551616",
+                                     "99999999999999999999999x",
+                                     "1.5",
+                                     "-1.5",
+                                     ".5",
+                                     "5.",
+                                     ".",
+                                     "1e3",
+                                     "1E3",
+                                     "1e",
+                                     "1e+",
+                                     "1e999",
+                                     "-1e999",
+                                     "1e-999",
+                                     "1e39",
+                                     "3.5e38",
+                                     "0x10",
+                                     "0x1p4",
+                                     "0x1P-2",
+                                     "0x",
+                                     "0xp1",
+                                     "1_000",
+                                     "1__0",
+                                     "_1",
+                                     "1_",
+                                     "0x_1p0",
+                                     "0x1_0p0",
+                                     "inf",
+                                     "+inf",
+                                     "-Inf",
+                                     "INF",
+                                     "infinity",
+                                     "+Infinity",
+                                     "infin",
+                                     "nan",
+                                     "NaN",
+                                     "+nan",
+                                     "-nan",
+                                     "aGk=",
+                                     "aGk",
+                                     "a-_b",
+                                     "!!",
+                                     "a",
+                                     "2024-01-02T03:04:05Z",
+                                     "2024-01-02T3:04:05Z",
+                                     "2024-01-02T03:04:05.5+01:00",
+                                     "2024-13-02T03:04:05Z",
+                                     "2024-02-30T03:04:05Z",
+                                     "2023-02-29T00:00:00Z",
+                                     "2024-00-02T03:04:05Z",
+                                     "2024-01-00T03:04:05Z",
+                                     "2024-01-02T24:04:05Z",
+                                     "2024-01-02T03:60:05Z",
+                                     "2024-01-02T03:04:60Z",
+                                     "2024-01-02",
+                                     "2024-01-02T",
+                                     "2024-01-02T03",
+                                     "2024-01-02T03:04",
+                                     "2024-01-02T03:04:05",
+                                     "2024-01-02T03:04:05+25:00",
+                                     "2024-01-02T03:04:05+01:61",
+                                     "2024-01-02T03:04:05*01:00",
+                                     "2024-01-02T03:04:05+0100",
+                                     "2024-01-02T03:04:05Zjunk",
+                                     "2024-01-02t03:04:05Z",
+                                     "2o24-01-02T03:04:05Z",
+                                     "202",
+                                     "2024x01",
+                                     "2024-1-02T03:04:05Z",
+                                     "2024-01-2T03:04:05Z",
+                                     "2024-01-02 03:04:05Z",
+                                     "2024-01-02T03:4:05Z",
+                                     "2024-01-02T03:04:5Z",
+                                     "1s",
+                                     "1h30m",
+                                     "1.5ms",
+                                     "-1s",
+                                     "+1s",
+                                     "1",
+                                     "5q",
+                                     "1s2",
+                                     ".s",
+                                     "1.s",
+                                     "s",
+                                     "9999999999h",
+                                     "2\xc2\xb5s",
+                                     "2\xce\xbcs",
+                                     "5\xc3\xa9",
+                                     "\"q\"",
+                                     "a\\b",
+                                     "tab\there",
+                                     "12345678901234567890",
+                                     "-12345678901234567890",
+                                     "1.25",
+                                     "-1.25",
+                                     "1.2.3",
+                                     "1p53",
+                                     "1.5p10",
+                                     "1e5"};
+
+// Defaults applies every literal to every field of diff.v1.Kinds.
+int Defaults(const std::string& root, const std::string& dir, const std::string& proto_dir) {
+  Schema s(root, dir, {"diff.proto"}, proto_dir);
+  const gpb::Descriptor* d = s.Find("diff.v1.Kinds");
+  if (s.failed() || d == nullptr) return 2;
+  for (int i = 0; i < d->field_count(); ++i) {
+    const gpb::FieldDescriptor* fd = d->field(i);
+    std::vector<std::string> table(std::begin(kDefaultTable), std::end(kDefaultTable));
+    table.push_back(std::string(5000, '9'));
+    table.push_back("-" + std::string(5000, '9'));
+    table.push_back("1." + std::string(5000, '0'));
+    for (const std::string& def : table) {
+      auto m = s.New(d);
+      Status st = pxf::ApplyDefault(m.get(), fd, def);
+      const std::string label = std::string(fd->name()) + " " + Quote(def) + ": ";
+      if (st.ok()) {
+        std::cout << label << "ok " << BytesOf(*m) << "\n";
+      } else {
+        std::cout << label << Text(st) << "\nbytes: " << BytesOf(*m) << "\n";
+      }
+    }
+  }
+  return 0;
+}
+
+// Tolerant runs Parse and ParseTolerant over text, every prefix of it and every
+// text with one byte removed: the states an editor buffer goes through.
+void Tolerant(const std::string& root, const std::string& file) {
+  std::ifstream in(fs::path(root) / file, std::ios::binary);
+  if (!in) return;
+  std::stringstream ss;
+  ss << in.rdbuf();
+  const std::string text = ss.str();
+  const auto one = [&](const char* label, size_t n, const std::string& input) {
+    std::string out = "=== " + file + " " + label + " " + std::to_string(n) + "\n";
+    AstDump d(&out);
+    auto doc = pxf::Parse(input);
+    out += "parse: " + Text(doc.status()) + "\n";
+    if (doc.ok()) d.Document(*doc);
+    auto t = pxf::ParseTolerant(input);
+    for (const auto& e : t.errors) {
+      out += "error " + std::to_string(e.pos.offset) + " " + Quote(e.ToString()) + "\n";
+    }
+    d.Document(t.document);
+    std::cout << out;
+  };
+  for (size_t i = 0; i <= text.size(); ++i) one("prefix", i, text.substr(0, i));
+  for (size_t i = 0; i < text.size(); ++i) {
+    one("drop", i, text.substr(0, i) + text.substr(i + 1));
+  }
 }
 
 }  // namespace
@@ -308,9 +657,27 @@ void QuoteRunes() {
   }
 }
 
+int RunRewrite(const char* dir);  // rewrite.cc
+
 int main(int argc, char** argv) {
+  if (argc == 3 && std::string_view(argv[1]) == "--rewrite") return RunRewrite(argv[2]);
   if (argc == 2 && std::string_view(argv[1]) == "--quote-runes") {
     QuoteRunes();
+    return 0;
+  }
+  if (argc == 5 && std::string_view(argv[1]) == "--defaults") {
+    return Defaults(argv[2], argv[3], argv[4]);
+  }
+  if (argc == 3 && std::string_view(argv[1]) == "--tolerant") {
+    std::ifstream manifest(argv[2]);
+    std::string line;
+    while (std::getline(manifest, line)) {
+      std::vector<std::string> p;
+      std::istringstream cols(line);
+      std::string col;
+      while (std::getline(cols, col, '\t')) p.push_back(col);
+      Tolerant(p[0], p[4]);
+    }
     return 0;
   }
   if (argc != 3) {

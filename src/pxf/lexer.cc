@@ -71,6 +71,36 @@ bool IsValidRune(uint32_t r) {
   return r <= 0x10FFFF && (r < 0xD800 || r > 0xDFFF);
 }
 
+// IsBlank reports whether s is empty after Go's strings.TrimSpace: only
+// runes with the Unicode White_Space property.
+bool IsBlank(std::string_view s) {
+  for (size_t i = 0; i < s.size();) {
+    const uint8_t c = static_cast<uint8_t>(s[i]);
+    if (c < 0x80) {
+      if (c != ' ' && (c < '\t' || c > '\r')) return false;
+      ++i;
+      continue;
+    }
+    const auto byte = [&](size_t k) -> uint32_t {
+      return k < s.size() ? static_cast<uint8_t>(s[k]) : 0;
+    };
+    if (c == 0xC2 && (byte(i + 1) == 0x85 || byte(i + 1) == 0xA0)) {
+      i += 2;  // U+0085, U+00A0
+      continue;
+    }
+    if (i + 2 >= s.size()) return false;
+    const uint32_t r = (uint32_t{c} << 16) | (byte(i + 1) << 8) | byte(i + 2);
+    const bool space = r == 0xE19A80 ||                     // U+1680
+                       (r >= 0xE28080 && r <= 0xE2808A) ||  // U+2000..U+200A
+                       r == 0xE280A8 || r == 0xE280A9 ||    // U+2028, U+2029
+                       r == 0xE280AF || r == 0xE2819F ||    // U+202F, U+205F
+                       r == 0xE38080;                       // U+3000
+    if (!space) return false;
+    i += 3;
+  }
+  return true;
+}
+
 // Strip leading newline and indent of closing triple-quote.
 std::string Dedent(std::string_view raw) {
   if (!raw.empty() && raw[0] == '\n') raw.remove_prefix(1);
@@ -89,13 +119,7 @@ std::string Dedent(std::string_view raw) {
   std::string_view indent;
   if (!lines.empty()) {
     std::string_view last = lines.back();
-    bool ws_only = true;
-    for (char c : last) {
-      if (c != ' ' && c != '\t') {
-        ws_only = false;
-        break;
-      }
-    }
+    bool ws_only = IsBlank(last);
     if (ws_only) {
       indent = last;
       lines.pop_back();
@@ -169,7 +193,7 @@ const char* TokenKindName(TokenKind k) {
     case TokenKind::kAtProto:
       return "@proto";
     case TokenKind::kAtDirective:
-      return "@<directive>";
+      return "@directive";
   }
   return "?";
 }
@@ -281,7 +305,51 @@ Token Lexer::LexBlockComment(Position pos) {
     }
     Advance();
   }
+  if (Tolerant()) {
+    while (pos_ < input_.size()) Advance();
+    Report(pos, "unterminated block comment");
+    return Token{TokenKind::kComment, input_.substr(start, pos_ - start), pos};
+  }
   return Token{TokenKind::kIllegal, "unterminated block comment", pos};
+}
+
+bool Lexer::ReadHexByte(uint8_t* out) {
+  if (pos_ + 1 >= input_.size()) return false;
+  auto hi = HexVal(static_cast<uint8_t>(input_[pos_]));
+  auto lo = HexVal(static_cast<uint8_t>(input_[pos_ + 1]));
+  if (!hi.second || !lo.second) return false;
+  Advance();
+  Advance();
+  *out = static_cast<uint8_t>((hi.first << 4) | lo.first);
+  return true;
+}
+
+// ReadHexRune reads exactly n hex digits. The digits before a bad one stay
+// consumed, which is what tolerant recovery resumes after.
+bool Lexer::ReadHexRune(int n, uint32_t* out) {
+  if (pos_ + n > input_.size()) return false;
+  uint32_t r = 0;
+  for (int i = 0; i < n; ++i) {
+    auto h = HexVal(static_cast<uint8_t>(input_[pos_]));
+    if (!h.second) return false;
+    r = (r << 4) | static_cast<uint32_t>(h.first);
+    Advance();
+  }
+  *out = r;
+  return true;
+}
+
+// ReadOctRest reads the two octal digits after the first. A leading 0-3
+// keeps the value within a byte.
+bool Lexer::ReadOctRest(uint8_t first, uint8_t* out) {
+  if (pos_ + 1 >= input_.size()) return false;
+  auto d1 = OctVal(static_cast<uint8_t>(input_[pos_]));
+  auto d2 = OctVal(static_cast<uint8_t>(input_[pos_ + 1]));
+  if (!d1.second || !d2.second) return false;
+  Advance();
+  Advance();
+  *out = static_cast<uint8_t>(((first - '0') << 6) | (d1.first << 3) | d2.first);
+  return true;
 }
 
 Token Lexer::LexString(Position pos) {
@@ -289,16 +357,32 @@ Token Lexer::LexString(Position pos) {
   std::string sb;
   bool needs_storage = false;
   size_t verbatim_start = pos_;
+  const auto finish = [&](size_t end) {
+    if (!needs_storage) {
+      return Token{TokenKind::kString, input_.substr(verbatim_start, end - verbatim_start), pos};
+    }
+    return Token{TokenKind::kString, Store(std::move(sb)), pos};
+  };
+  // A bad escape: tolerant mode reports it and keeps its text, kept, in the
+  // string; otherwise it is the token.
+  Position esc_pos;
+  bool bad = false;
+  Token illegal;
+  const auto bad_escape = [&](std::string msg, std::string_view kept) {
+    if (Tolerant()) {
+      Report(esc_pos, std::move(msg));
+      sb.append(kept);
+    } else {
+      bad = true;
+      illegal = Token{TokenKind::kIllegal, Store(std::move(msg)), pos};
+    }
+  };
   while (pos_ < input_.size()) {
     uint8_t c = static_cast<uint8_t>(input_[pos_]);
     if (c == '"') {
-      if (!needs_storage) {
-        std::string_view v = input_.substr(verbatim_start, pos_ - verbatim_start);
-        Advance();
-        return Token{TokenKind::kString, v, pos};
-      }
+      Token t = finish(pos_);
       Advance();
-      return Token{TokenKind::kString, Store(std::move(sb)), pos};
+      return t;
     }
     if (c == '\\') {
       if (!needs_storage) {
@@ -307,21 +391,20 @@ Token Lexer::LexString(Position pos) {
       }
       Advance();
       if (pos_ >= input_.size()) {
+        if (Tolerant()) {
+          Report(pos, "unterminated escape sequence");
+          return finish(pos_);
+        }
         return Token{TokenKind::kIllegal, "unterminated escape sequence", pos};
       }
+      esc_pos = CurrentPos();
       uint8_t esc = Advance();
       switch (esc) {
         case '"':
-          sb.push_back('"');
-          break;
         case '\\':
-          sb.push_back('\\');
-          break;
         case '\'':
-          sb.push_back('\'');
-          break;
         case '?':
-          sb.push_back('?');
+          sb.push_back(static_cast<char>(esc));
           break;
         case 'a':
           sb.push_back('\x07');
@@ -345,102 +428,64 @@ Token Lexer::LexString(Position pos) {
           sb.push_back('\x0B');
           break;
         case 'x': {
-          // Exactly 2 hex digits → 1 byte.
-          if (pos_ + 1 >= input_.size()) {
-            return Token{TokenKind::kIllegal, R"(invalid \x escape: expected 2 hex digits)", pos};
+          uint8_t b = 0;
+          if (ReadHexByte(&b)) {
+            sb.push_back(static_cast<char>(b));
+          } else {
+            bad_escape(R"(invalid \x escape: expected 2 hex digits)", R"(\x)");
           }
-          auto hi = HexVal(static_cast<uint8_t>(input_[pos_]));
-          auto lo = HexVal(static_cast<uint8_t>(input_[pos_ + 1]));
-          if (!hi.second || !lo.second) {
-            return Token{TokenKind::kIllegal, R"(invalid \x escape: expected 2 hex digits)", pos};
-          }
-          Advance();
-          Advance();
-          sb.push_back(static_cast<char>((hi.first << 4) | lo.first));
           break;
         }
         case '0':
         case '1':
         case '2':
         case '3': {
-          // \nnn — exactly 3 octal digits, leading 0-3 keeps result <= 0xFF.
-          if (pos_ + 1 >= input_.size()) {
-            return Token{
-                TokenKind::kIllegal, R"(invalid octal escape: expected 3 octal digits)", pos};
+          uint8_t b = 0;
+          if (ReadOctRest(esc, &b)) {
+            sb.push_back(static_cast<char>(b));
+          } else {
+            const char kept[2] = {'\\', static_cast<char>(esc)};
+            bad_escape(R"(invalid octal escape: expected 3 octal digits)",
+                       std::string_view(kept, 2));
           }
-          auto d1 = OctVal(static_cast<uint8_t>(input_[pos_]));
-          auto d2 = OctVal(static_cast<uint8_t>(input_[pos_ + 1]));
-          if (!d1.second || !d2.second) {
-            return Token{
-                TokenKind::kIllegal, R"(invalid octal escape: expected 3 octal digits)", pos};
-          }
-          Advance();
-          Advance();
-          int v = ((esc - '0') << 6) | (d1.first << 3) | d2.first;
-          sb.push_back(static_cast<char>(v));
           break;
         }
         case 'u': {
-          // \uHHHH — exactly 4 hex digits → rune.
-          if (pos_ + 4 > input_.size()) {
-            return Token{TokenKind::kIllegal,
-                         R"(invalid \u escape: expected 4 hex digits forming a valid codepoint)",
-                         pos};
-          }
           uint32_t r = 0;
-          for (int i = 0; i < 4; ++i) {
-            auto h = HexVal(static_cast<uint8_t>(input_[pos_]));
-            if (!h.second) {
-              return Token{TokenKind::kIllegal,
-                           R"(invalid \u escape: expected 4 hex digits forming a valid codepoint)",
-                           pos};
-            }
-            r = (r << 4) | static_cast<uint32_t>(h.first);
-            Advance();
+          if (ReadHexRune(4, &r) && IsValidRune(r)) {
+            EncodeRune(r, sb);
+          } else {
+            bad_escape(R"(invalid \u escape: expected 4 hex digits forming a valid codepoint)",
+                       R"(\u)");
           }
-          if (!IsValidRune(r)) {
-            return Token{TokenKind::kIllegal,
-                         R"(invalid \u escape: expected 4 hex digits forming a valid codepoint)",
-                         pos};
-          }
-          EncodeRune(r, sb);
           break;
         }
         case 'U': {
-          // \UHHHHHHHH — exactly 8 hex digits → rune.
-          if (pos_ + 8 > input_.size()) {
-            return Token{TokenKind::kIllegal,
-                         R"(invalid \U escape: expected 8 hex digits forming a valid codepoint)",
-                         pos};
-          }
           uint32_t r = 0;
-          for (int i = 0; i < 8; ++i) {
-            auto h = HexVal(static_cast<uint8_t>(input_[pos_]));
-            if (!h.second) {
-              return Token{TokenKind::kIllegal,
-                           R"(invalid \U escape: expected 8 hex digits forming a valid codepoint)",
-                           pos};
-            }
-            r = (r << 4) | static_cast<uint32_t>(h.first);
-            Advance();
+          if (ReadHexRune(8, &r) && IsValidRune(r)) {
+            EncodeRune(r, sb);
+          } else {
+            bad_escape(R"(invalid \U escape: expected 8 hex digits forming a valid codepoint)",
+                       R"(\U)");
           }
-          if (!IsValidRune(r)) {
-            return Token{TokenKind::kIllegal,
-                         R"(invalid \U escape: expected 8 hex digits forming a valid codepoint)",
-                         pos};
-          }
-          EncodeRune(r, sb);
           break;
         }
         default: {
           std::string msg = R"(unknown escape sequence \)";
-          msg.push_back(static_cast<char>(esc));
-          return Token{TokenKind::kIllegal, Store(std::move(msg)), pos};
+          EncodeRune(esc, msg);  // Go's string(byte) reads the byte as a rune.
+          const char kept[2] = {'\\', static_cast<char>(esc)};
+          bad_escape(std::move(msg), std::string_view(kept, 2));
+          break;
         }
       }
+      if (bad) return illegal;
       continue;
     }
     if (c == '\n') {
+      if (Tolerant()) {
+        Report(pos, "unterminated string: ended at newline");
+        return finish(pos_);
+      }
       return Token{
           TokenKind::kIllegal,
           R"(newline in string literal: write it as \n, or use a """triple-quoted""" string)",
@@ -448,6 +493,10 @@ Token Lexer::LexString(Position pos) {
     }
     if (needs_storage) sb.push_back(static_cast<char>(c));
     Advance();
+  }
+  if (Tolerant()) {
+    Report(pos, "unterminated string");
+    return finish(pos_);
   }
   return Token{TokenKind::kIllegal, "unterminated string", pos};
 }
@@ -466,6 +515,11 @@ Token Lexer::LexTripleString(Position pos) {
       return Token{TokenKind::kString, Store(Dedent(raw)), pos};
     }
     Advance();
+  }
+  if (Tolerant()) {
+    while (pos_ < input_.size()) Advance();
+    Report(pos, "unterminated triple-quoted string");
+    return Token{TokenKind::kString, Store(Dedent(input_.substr(start, pos_ - start))), pos};
   }
   return Token{TokenKind::kIllegal, "unterminated triple-quoted string", pos};
 }
@@ -492,16 +546,26 @@ Token Lexer::LexBytes(Position pos) {
     if (c == '"') {
       std::string_view raw = input_.substr(start, pos_ - start);
       Advance();  // closing "
+      // Tolerant mode leaves the check to the parser, which turns a failure
+      // into a positioned error and a BadVal.
       size_t offset = 0;
-      if (!detail::Base64DecodeLenient(raw, &offset).has_value()) {
+      if (!Tolerant() && !detail::Base64DecodeLenient(raw, &offset).has_value()) {
         return Token{TokenKind::kIllegal, "invalid base64 in bytes literal", pos};
       }
       return Token{TokenKind::kBytes, raw, pos};
     }
     if (c == '\n') {
+      if (Tolerant()) {
+        Report(pos, "unterminated bytes literal: ended at newline");
+        return Token{TokenKind::kBytes, input_.substr(start, pos_ - start), pos};
+      }
       return Token{TokenKind::kIllegal, "unterminated bytes literal", pos};
     }
     Advance();
+  }
+  if (Tolerant()) {
+    Report(pos, "unterminated bytes literal");
+    return Token{TokenKind::kBytes, input_.substr(start, pos_ - start), pos};
   }
   return Token{TokenKind::kIllegal, "unterminated bytes literal", pos};
 }

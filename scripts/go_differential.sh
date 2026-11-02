@@ -63,6 +63,56 @@ if ! diff "$work/go.quote" "$work/cpp.quote" > "$work/quote.diff"; then
 fi
 echo "$quoted strings quoted alike"
 
+# A table of literals on every kind of field, through ApplyDefault.
+"$work/godiff.bin" --defaults "$here/testdata" differential "$spec/proto" > "$work/go.defaults"
+"$pxf_diff" --defaults "$here/testdata" differential "$spec/proto" > "$work/cpp.defaults"
+if ! cmp -s "$work/go.defaults" "$work/cpp.defaults"; then
+  echo "ApplyDefault differs:" >&2
+  diff "$work/go.defaults" "$work/cpp.defaults" | head -"${DEFAULTS_DIFF_LINES:-40}" >&2 || true
+  exit 1
+fi
+applied=$(LC_ALL=C awk '/: ok /{n++} END{print n+0}' "$work/go.defaults")
+refused=$(LC_ALL=C awk '/^bytes: /{n++} END{print n+0}' "$work/go.defaults")
+echo "$((applied + refused)) defaults applied alike: $applied accepted, $refused refused"
+
+# Every prefix and every one-byte deletion of every document, the states an
+# editor buffer goes through, through Parse and ParseTolerant.
+"$work/godiff.bin" --tolerant "$manifest" > "$work/go.tolerant"
+"$pxf_diff" --tolerant "$manifest" > "$work/cpp.tolerant"
+if ! cmp -s "$work/go.tolerant" "$work/cpp.tolerant"; then
+  echo "ParseTolerant differs:" >&2
+  diff "$work/go.tolerant" "$work/cpp.tolerant" | head -"${TOLERANT_DIFF_LINES:-40}" >&2 || true
+  [ -n "${DIFF_OUT:-}" ] && cp "$work/go.tolerant" "$DIFF_OUT.go.tolerant" &&
+    cp "$work/cpp.tolerant" "$DIFF_OUT.cpp.tolerant"
+  exit 1
+fi
+states=$(LC_ALL=C awk '/^=== /{n++} END{print n+0}' "$work/go.tolerant")
+broken=$(LC_ALL=C awk '/^error /{n++} END{print n+0}' "$work/go.tolerant")
+bad=$(LC_ALL=C awk '/[0-9]+ bad$/{n++} END{print n+0}' "$work/go.tolerant")
+echo "$states editor states parsed alike: $broken tolerant errors, $bad placeholders"
+
+# The same Rewriter edits through both ports: every call's error text and the
+# final bytes. A run with no ops is a failure, so a broken driver cannot pass.
+rewrite_dir=$here/testdata/differential/rewrite
+"$work/godiff.bin" --rewrite "$rewrite_dir" > "$work/go.rewrite"
+"$pxf_diff" --rewrite "$rewrite_dir" > "$work/cpp.rewrite"
+if ! cmp -s "$work/go.rewrite" "$work/cpp.rewrite"; then
+  echo "Rewriter differs:" >&2
+  diff "$work/go.rewrite" "$work/cpp.rewrite" | head -"${REWRITE_DIFF_LINES:-40}" >&2 || true
+  [ -n "${DIFF_OUT:-}" ] && cp "$work/go.rewrite" "$DIFF_OUT.go.rewrite" &&
+    cp "$work/cpp.rewrite" "$DIFF_OUT.cpp.rewrite"
+  exit 1
+fi
+ops=$(LC_ALL=C awk '/^op [0-9]+ /{n++} END{print n+0}' "$work/go.rewrite")
+op_errors=$(LC_ALL=C awk '/^op [0-9]+ .*: err "/{n++} END{print n+0}' "$work/go.rewrite")
+scripted=$(LC_ALL=C awk '/^=== .*\.ops:/{s=0} /^=== sweep /{s=1} /^op [0-9]+ /{if(!s)n++} END{print n+0}' \
+  "$work/go.rewrite")
+if [ "$ops" -lt 60 ]; then
+  echo "Rewriter ran only $ops operations" >&2
+  exit 2
+fi
+echo "$ops rewriter operations alike ($scripted scripted), $op_errors of them returned errors"
+
 docs=$(wc -l < "$manifest" | tr -d ' ')
 for f in go cpp; do
   ran=$(LC_ALL=C awk '/^=== /{n++} END{print n+0}' "$work/$f.out")

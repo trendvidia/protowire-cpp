@@ -1,0 +1,7 @@
+@type diff.v1.Root
+by_key = { "k": { child { "quoted" { } } } }
+named = {
+  n = { child { "x" = 1 } }
+  m = 5
+}
+items = [ { "q" { } } ]

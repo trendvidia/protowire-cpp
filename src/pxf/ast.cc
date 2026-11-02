@@ -12,6 +12,14 @@ Position ValuePos(const ValuePtr& v) {
   return std::visit([](auto& p) { return p->pos; }, v);
 }
 
+std::pair<Position, Position> EntrySpan(const EntryPtr& e) {
+  return std::visit([](auto& p) { return std::make_pair(p->pos, p->end); }, e);
+}
+
+std::pair<Position, Position> ValueSpan(const ValuePtr& v) {
+  return std::visit([](auto& p) { return std::make_pair(p->pos, p->end); }, v);
+}
+
 const char* ProtoShapeName(ProtoShape s) {
   switch (s) {
     case ProtoShape::kAnonymous:

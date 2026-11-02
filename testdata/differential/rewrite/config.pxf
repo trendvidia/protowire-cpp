@@ -1,0 +1,31 @@
+@type demo.v1.Config
+
+# Server section — hand-aligned assignments, mixed indentation, the
+# kind of file goed settings writes must not reflow.
+server {
+	host = "prod.example.com"   # primary
+	port = 8080
+	timeout    =   30s
+
+	tls {
+	  enabled = true
+	  ciphers = [
+	    "AES128",
+	    "AES256",
+	  ]
+	}
+}
+
+/* block comment
+   spanning lines */
+labels {
+  "team":        "core"
+  "cost.center": 42
+}
+
+weights = [0.25, 0.50, 1e3]
+window  = 2024-01-15T10:30:00Z
+blob    = b"aGVsbG8="
+mode    = FAST
+empty {}
+inline { a = 1 }

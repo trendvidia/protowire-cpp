@@ -17,8 +17,11 @@ namespace {
 int64_t UnitNanos(std::string_view s, size_t& len) {
   if (s.empty()) return -1;
   if (s.size() >= 2) {
-    // µs is 0xC2 0xB5 in UTF-8.
-    if (static_cast<unsigned char>(s[0]) == 0xC2 && static_cast<unsigned char>(s[1]) == 0xB5 &&
+    // µs is 0xC2 0xB5 in UTF-8, and Go's time.ParseDuration also takes U+03BC,
+    // 0xCE 0xBC. The lexer's scan stops at the second, so a document cannot
+    // spell it; a default, read here as a whole string, can.
+    if (((static_cast<unsigned char>(s[0]) == 0xC2 && static_cast<unsigned char>(s[1]) == 0xB5) ||
+         (static_cast<unsigned char>(s[0]) == 0xCE && static_cast<unsigned char>(s[1]) == 0xBC)) &&
         s.size() >= 3 && s[2] == 's') {
       len = 3;
       return 1'000;
