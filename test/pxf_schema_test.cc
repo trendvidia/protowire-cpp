@@ -545,9 +545,9 @@ message Root { repeated Elem items = 1 [(pxf.key) = "name"]; }
   EXPECT_GE(fd->dependency_count(), 1);
 }
 
-// The closure walk skips google/protobuf/* on the assumption that
-// Google's files carry no PXF violation. This pins it: each file the
-// annotations closure pulls in is validated directly.
+// The closure walk skips descriptor.proto on the assumption that it carries
+// no PXF violation. This pins it: each Google file the annotations closure
+// pulls in is checked directly.
 TEST_F(PxfSchema, GoogleProtobufFilesAreConformant) {
   const char* a = R"(
 syntax = "proto3";

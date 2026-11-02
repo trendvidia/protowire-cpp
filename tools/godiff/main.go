@@ -227,7 +227,35 @@ func run(root, dir, protoDir, protos, deftype, file string) {
 		printText("canonical", pxf.FormatDocument(doc), nil)
 	}
 	runMessage(s, d, text)
+	runUnvalidated(s, d, text)
 	runSeams(s, d, text)
+}
+
+// runUnvalidated repeats the decode with bind-time validation off, where a
+// schema the checks would refuse still reaches the codec.
+func runUnvalidated(s *schema, d protoreflect.MessageDescriptor, text []byte) {
+	opts := pxf.UnmarshalOptions{TypeResolver: s, SkipValidate: true}
+	plain := dynamicpb.NewMessage(d)
+	fmt.Printf("unvalidated: %s\n", status(opts.Unmarshal(text, plain)))
+	hooked := opts
+	hooked.OnSecretField = func(path, value string) error {
+		fmt.Printf("secret: %s = %s\n", quote(path), quote(value))
+		return nil
+	}
+	hm := dynamicpb.NewMessage(d)
+	_, herr := hooked.UnmarshalFull(text, hm)
+	fmt.Printf("unvalidated-hooked: %s\n", status(herr))
+	full := dynamicpb.NewMessage(d)
+	r, err := opts.UnmarshalFull(text, full)
+	fmt.Printf("unvalidated-full: %s\n", status(err))
+	if err != nil {
+		return
+	}
+	fmt.Printf("bytes: %s\n", bytesOf(full))
+	b, err := pxf.MarshalOptions{TypeResolver: s}.Marshal(full)
+	printText("unvalidated-marshal", b, err)
+	b, err = pxf.MarshalOptions{TypeResolver: s, NullFields: r}.Marshal(full)
+	printText("unvalidated-marshal-nulls", b, err)
 }
 
 type stubValidator struct{ rep *check.Report }

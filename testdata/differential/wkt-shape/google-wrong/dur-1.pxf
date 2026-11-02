@@ -1,0 +1,4 @@
+@type google.protobuf.H
+dur = { other = "x" }
+dur_l = [ { other = "x" } ]
+dur_m = { "k": { other = "x" } }

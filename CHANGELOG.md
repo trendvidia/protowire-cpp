@@ -11,8 +11,13 @@ number says nothing about any other port. See the Releases section of
 
 ## [Unreleased]
 
+### Changed
+
+- **A schema that redefines a well-known type with the wrong shape is refused at bind time** (draft -01 §wkt-shapes, protowire#487, protowire-go#218). This narrows what binds. A message named, say, `pxf.Secret` or `google.protobuf.Timestamp` without the fields the codec reads now gives a violation of the new kind `ViolationKind::kWellKnownShape`. Copies of the canonical schemas are unaffected, and field numbers are not checked. The check also reaches a schema's own file at a `google/protobuf/` path, which the closure walk used to skip.
+
 ### Fixed
 
+- **A redefined well-known type no longer crashes** (#89). `Unmarshal`, `UnmarshalFull` and `Marshal` segfaulted or aborted on such a message: 19 of the 45 documents in `testdata/differential/wkt-shape`. The codec now checks the shape as well as the name, so where validation does not run, as in `Marshal` and with `skip_validate`, the message is ordinary and has no literal form. `on_secret_field` does not fire for a `pxf.Secret` of the wrong shape, and a `pxf.Secret` block naming a `hint` or `fingerprint` the schema does not declare is an error.
 - **A timestamp follows Go's `time.Parse`, not the RFC.** A one-digit hour (`T3:04:05Z`), a `,` before the fraction, a fraction past nine digits (cut, not rounded) and an offset up to `24:60` now read. A lower-case `t` or `z` and an offset past that are rejected. **This rejects documents that were accepted before.**
 - **`MaxNumericLiteralDigits` leaves out leading zeros** (protowire#410), for `pxf.BigInt`, `Decimal` and `BigFloat`, so a literal with a long run of them no longer fails. A `BigFloat` literal may open with `+` or `.`, as `big.Float` allows, and `inf` is reported as out of range.
 - **A `(pxf.default)` is read as protowire-go reads it, by `strconv` and package `time`.** `+5`, `nan`, `Infinity` and hex floats now work. The errors carry the text Go wraps, such as `strconv.ParseInt: parsing "x": invalid syntax`. A rejected wrapper or big number default no longer leaves an empty message on the parent, so `HasField` stays false.

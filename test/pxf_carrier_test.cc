@@ -184,7 +184,16 @@ TEST(PxfCarrier, DoubleOnABigIntIsPositional) {
   bignum.set_name("pxf/bignum.proto");
   bignum.set_package("pxf");
   bignum.set_syntax("proto3");
-  bignum.add_message_type()->set_name("BigInt");
+  pb::DescriptorProto* big_int = bignum.add_message_type();
+  big_int->set_name("BigInt");
+  for (const auto& [name, type] : {std::pair{"abs", pb::FieldDescriptorProto::TYPE_BYTES},
+                                   std::pair{"negative", pb::FieldDescriptorProto::TYPE_BOOL}}) {
+    pb::FieldDescriptorProto* f = big_int->add_field();
+    f->set_name(name);
+    f->set_number(big_int->field_size());
+    f->set_label(pb::FieldDescriptorProto::LABEL_OPTIONAL);
+    f->set_type(type);
+  }
   ASSERT_NE(pool.BuildFile(bignum), nullptr);
   pb::FileDescriptorProto file;
   file.set_name("c.proto");

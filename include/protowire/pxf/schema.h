@@ -54,12 +54,19 @@ enum class ViolationKind : uint8_t {
   // move and must be recompiled. Checked only in a file that imports one of
   // protowire's annotation files, since other projects use these numbers.
   kRetiredNumber,
+  // A message with the full name of a well-known type a codec handles by
+  // name, without the fields that handling reads (draft -01 §wkt-shapes).
+  // The detail says which.
+  kWellKnownShape,
 };
 
 const char* ViolationKindName(ViolationKind k);
 
-// Violation describes one schema element whose name collides with a
-// reserved PXF keyword. Returned by ValidateDescriptor / ValidateFile.
+// Violation describes one schema element that fails a PXF bind-time check: a
+// name colliding with a reserved PXF keyword, an invalid (pxf.key),
+// (pxf.default) or (pxf.required) placement, an option at a retired extension
+// number, or a message redefining a well-known type with the wrong shape.
+// Returned by ValidateDescriptor / ValidateFile.
 struct Violation {
   std::string file;     // .proto file path the offending element is declared in
   std::string element;  // fully-qualified protobuf name (e.g. "trades.v1.Side.null")
@@ -70,7 +77,7 @@ struct Violation {
   std::string name;
   ViolationKind kind = ViolationKind::kField;
   // Human-readable explanation; set for kKeyOption, kRequiredOption,
-  // kDefaultOption and kRetiredNumber.
+  // kDefaultOption, kRetiredNumber and kWellKnownShape.
   std::string detail;
   // The offending annotation was written @required / @default, so ToString
   // quotes that rather than an option the file does not contain.

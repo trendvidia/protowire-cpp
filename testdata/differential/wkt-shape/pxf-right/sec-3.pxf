@@ -1,0 +1,4 @@
+@type pxf.H
+sec = { fingerprint = "f" }
+sec_l = [ { fingerprint = "f" } ]
+sec_m = { "k": { fingerprint = "f" } }

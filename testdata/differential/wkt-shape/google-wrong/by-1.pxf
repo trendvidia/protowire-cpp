@@ -1,0 +1,4 @@
+@type google.protobuf.H
+by = { value = "x" }
+by_l = [ { value = "x" } ]
+by_m = { "k": { value = "x" } }

@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package pxf;
+
+message BigInt { int32 abs = 1; bool negative = 2; }
+
+message H {
+  BigInt big = 1;
+  repeated BigInt big_l = 2;
+  map<string, BigInt> big_m = 3;
+}

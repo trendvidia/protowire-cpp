@@ -27,4 +27,8 @@ StatusOr<DatasetRow> ParseDatasetRow(std::string_view row, int expected, int max
 // into one error, the bind-time check Unmarshal and DatasetReader share.
 Status CheckDescriptorSchema(const google::protobuf::Descriptor* desc);
 
+// WktShapeProblem says what stops d having the shape its full name needs
+// (draft -01 §wkt-shapes), or returns "" when it has it or the name needs none.
+std::string WktShapeProblem(const google::protobuf::Descriptor* d);
+
 }  // namespace protowire::pxf

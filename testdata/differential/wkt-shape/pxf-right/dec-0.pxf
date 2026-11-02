@@ -1,0 +1,4 @@
+@type pxf.H
+dec = 1.5
+dec_l = [ 1.5 ]
+dec_m = { "k": 1.5 }
