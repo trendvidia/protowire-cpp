@@ -1,0 +1,9 @@
+# Every edit on every node, on the documents here and on the differential
+# corpus one directory up. Named to run last.
+
+sweep config.pxf
+sweep settings.pxf
+sweep keyed.pxf
+sweep split.pxf
+sweep anon.pxf
+sweep-glob ../*.pxf

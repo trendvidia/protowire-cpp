@@ -1,0 +1,14 @@
+id = "root"
+children {
+  # the welcome banner
+  greeting {
+    type = "Label"   # widget class
+    weight = 1
+  }
+  "us-east-1" {
+    type = "Region"
+  }
+  user.name {
+    type = "Field"
+  }
+}

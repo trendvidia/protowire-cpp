@@ -657,7 +657,10 @@ void QuoteRunes() {
   }
 }
 
+int RunRewrite(const char* dir);  // rewrite.cc
+
 int main(int argc, char** argv) {
+  if (argc == 3 && std::string_view(argv[1]) == "--rewrite") return RunRewrite(argv[2]);
   if (argc == 2 && std::string_view(argv[1]) == "--quote-runes") {
     QuoteRunes();
     return 0;

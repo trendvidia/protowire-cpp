@@ -1,4 +1,4 @@
-add_executable(pxf_diff main.cc)
+add_executable(pxf_diff main.cc rewrite.cc)
 set_target_properties(pxf_diff PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 find_package(Protobuf REQUIRED)

@@ -1,0 +1,11 @@
+service = "edge"
+regions = [
+  {
+    name = "us-east-1"
+    replicas = 3
+  },
+  {
+    name = "eu-west-2"
+    replicas = 1
+  }
+]

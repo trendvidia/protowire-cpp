@@ -443,6 +443,10 @@ func tolerant(root, file string) {
 }
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "--rewrite" {
+		rewriteMain(os.Args[2])
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--quote-runes" {
 		quoteRunes()
 		return

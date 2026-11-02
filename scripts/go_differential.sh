@@ -91,6 +91,28 @@ broken=$(LC_ALL=C awk '/^error /{n++} END{print n+0}' "$work/go.tolerant")
 bad=$(LC_ALL=C awk '/[0-9]+ bad$/{n++} END{print n+0}' "$work/go.tolerant")
 echo "$states editor states parsed alike: $broken tolerant errors, $bad placeholders"
 
+# The same Rewriter edits through both ports: every call's error text and the
+# final bytes. A run with no ops is a failure, so a broken driver cannot pass.
+rewrite_dir=$here/testdata/differential/rewrite
+"$work/godiff.bin" --rewrite "$rewrite_dir" > "$work/go.rewrite"
+"$pxf_diff" --rewrite "$rewrite_dir" > "$work/cpp.rewrite"
+if ! cmp -s "$work/go.rewrite" "$work/cpp.rewrite"; then
+  echo "Rewriter differs:" >&2
+  diff "$work/go.rewrite" "$work/cpp.rewrite" | head -"${REWRITE_DIFF_LINES:-40}" >&2 || true
+  [ -n "${DIFF_OUT:-}" ] && cp "$work/go.rewrite" "$DIFF_OUT.go.rewrite" &&
+    cp "$work/cpp.rewrite" "$DIFF_OUT.cpp.rewrite"
+  exit 1
+fi
+ops=$(LC_ALL=C awk '/^op [0-9]+ /{n++} END{print n+0}' "$work/go.rewrite")
+op_errors=$(LC_ALL=C awk '/^op [0-9]+ .*: err "/{n++} END{print n+0}' "$work/go.rewrite")
+scripted=$(LC_ALL=C awk '/^=== .*\.ops:/{s=0} /^=== sweep /{s=1} /^op [0-9]+ /{if(!s)n++} END{print n+0}' \
+  "$work/go.rewrite")
+if [ "$ops" -lt 60 ]; then
+  echo "Rewriter ran only $ops operations" >&2
+  exit 2
+fi
+echo "$ops rewriter operations alike ($scripted scripted), $op_errors of them returned errors"
+
 docs=$(wc -l < "$manifest" | tr -d ' ')
 for f in go cpp; do
   ran=$(LC_ALL=C awk '/^=== /{n++} END{print n+0}' "$work/$f.out")

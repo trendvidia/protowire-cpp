@@ -1,0 +1,250 @@
+# Set, Remove, Bytes: the inputs of protowire-go's rewrite_test.go.
+
+src "# heading comment\n\nserver {\n\thost = \"prod\"   # primary\n\tport = 8080     # keep me\n}\n"
+set server.port 9090
+bytes
+
+src "labels {\n  \"team\":   \"core\"\n}\n"
+set labels.team "infra"
+bytes
+
+src "server {\n\thost = \"h\"\n}\n"
+set server.port 8080
+bytes
+
+src "inline { a = 1 }\n"
+set inline.b 2
+bytes
+
+src "empty {}\n"
+set empty.a true
+bytes
+
+src "a = 1"
+set b "x"
+bytes
+
+src "server {\n  host = \"h\"\n}\n"
+set server.tls.min_version "1.3"
+bytes
+
+src "labels {\n  \"team\": \"core\"\n}\n"
+set labels.env "prod"
+set "labels.odd key" 2
+bytes
+
+src "server {\n\ttags = [\"a\"]\n}\n"
+set server.tags ["x", "y"]
+bytes
+
+src "server {\n    tags = [\"a\"]\n}\n"
+set server.tags ["x", "y"]
+bytes
+
+src "server {\n    host = \"h\"\n}\n"
+set server.tls.min_version "1.3"
+bytes
+
+src "# section\n# about a\na = 1   # trailing\nb = 2\n"
+remove a
+bytes
+
+src "a = 1\nserver {\n  host = \"h\"\n}\nb = 2\n"
+remove server
+bytes
+
+src "inline { a = 1 b = 2 }\n"
+remove inline.a
+bytes
+
+src "x = 1 /* gone */\ny = 2\n"
+remove x
+bytes
+
+src "x = 1 /* spans\nlines */\ny = 2\n"
+remove x
+bytes
+
+src "x = 1 // slashes\ny = 2\n"
+remove x
+bytes
+
+src "x = 1 /* a */ y = 2\n"
+remove x
+bytes
+
+src "x = 1"
+remove x
+bytes
+
+src "x = 1   "
+remove x
+bytes
+
+src "a { x = 1 /* one */ /* two */\n}\n"
+remove a.x
+bytes
+
+src "xs = [1]\n"
+set xs !list-bad
+set m !block-bad
+set xs !list-nil
+bytes
+
+src "server {\n  host = \"h\"\n}\nport = 1\n"
+remove nope
+set server 1
+set port.sub 1
+set "" 1
+set a !nil
+set a..b 1
+set .a 1
+set a. 1
+remove ""
+remove server..x
+remove port.sub
+bytes
+
+src "port ="
+set a 1
+bytes
+
+src "server {\n  host = \"h\"\n}\n"
+remove server
+set server.host "x"
+bytes
+
+src "a = 1\n"
+set a 2
+set a 3
+bytes
+
+src "a = 0\n"
+set a "x\ny"
+bytes
+
+# Keys and block names Set cannot write.
+src "a = 1\n"
+set "my key" 1
+set "b c.d" 1
+set "x.y z.w" 1
+set true 1
+set 123 1
+bytes
+
+src "m {\n  1: \"a\"\n}\n"
+set m.2 "b"
+set "m.x y" "c"
+set m.true "d"
+set m.new.chain 1
+bytes
+
+# The block-value spellings a dotted path walks through.
+src "a = { b = { c = 1 } }\n"
+set a.b.c 2
+set a.b.d 3
+set a.e 4
+bytes
+
+src "m {\n  k: { x = 1 }\n}\n"
+set m.k.x 2
+set m.k.y 3
+bytes
+
+src "a = {\n  b = 1\n}\n"
+set a.c.d 2
+remove a.b
+bytes
+
+# A multi-line scope whose brace shares a line with the last entry.
+src "a {\n  x = 1 }\n"
+set a.y 2
+set a.z.w 3
+bytes
+
+# Every kind of value.
+src "a = 1\n"
+set a null
+bytes
+set a 1.5e3
+bytes
+set a 5p10
+bytes
+set a b"aGk="
+bytes
+set a FAST
+bytes
+set a 30s
+bytes
+set a 2024-01-15T10:30:00Z
+bytes
+set a { x = 1 y { z = 2 } }
+bytes
+set a [ { x = 1 }, [ 1, 2 ], "s" ]
+bytes
+set a "q\"uo\\te\t"
+bytes
+
+# BlockVal and ListVal values landing in nested and tabbed scopes.
+src "s {\n\tt {\n\t\tx = 1\n\t}\n}\n"
+set s.t.x { a = 1 b = [1] }
+set s.t.y [ { a = 1 } ]
+set s.u.v { a = 1 }
+bytes
+
+# The reparse safety net.
+src "a = 1\n"
+set a !raw "1 ="
+bytes
+
+src "a = 1\n"
+set a !raw "{"
+bytes
+
+src "a = 1\nb = 2\n"
+span 0 1 "="
+bytes
+
+src "a = 1\n"
+set b !list-nil
+bytes
+
+src "a = 1\n"
+set a !block-nil
+bytes
+
+src "a = 1\n"
+set a !block-nilentry
+bytes
+
+src "a = 1\n"
+set a !block-nested-bad
+bytes
+
+# A node of the document as the new value.
+src "a = [1, 2]\nb = 3\n"
+set b !node 0
+bytes
+
+# Bytes is repeatable and does not consume the edits.
+src "a = 1\n"
+set a 2
+bytes
+bytes
+set a 3
+bytes
+
+# Nothing staged.
+src ""
+bytes
+set a 1
+bytes
+
+src "# only a comment\n"
+bytes
+set a 1
+bytes
+
+src "\n\n"
+set a { b = 1 }
+bytes

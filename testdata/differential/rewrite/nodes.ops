@@ -1,0 +1,225 @@
+# ReplaceValue, SetSpan, AppendEntry: the inputs of protowire-go's
+# node_edit_test.go.
+
+src "children {\n    a { type = \"Button\"  text = \"@one\" }\n    b { type = \"Button\"  text = \"@two\" }\n}\n"
+replace 0.1.1 "@changed"
+bytes
+
+src "server {\n    tags = [\"a\"]\n}\n"
+replace 0.0 ["x", "y"]
+bytes
+
+src "a = 1\n"
+replace 0 2
+replace 0 3
+bytes
+
+src "a = 1\n"
+replace !nil 1
+replace 0 !nil
+replace 0 !bad
+replace 0 !list-bad
+replace !handmade 1
+replace !bad 1
+bytes
+
+# List elements, and a value that holds a node.
+src "a = [\n  1,\n  [2, 3],\n  { x = 4 }\n]\n"
+replace 0.e0 "first"
+replace 0.e1.e1 { y = 1 }
+replace 0.e2.0 [5, 6]
+bytes
+
+src "a = 1\nb = [2]\n"
+replace 1 !node 0
+bytes
+
+src "m {\n  k: 1\n}\n"
+replace 0.0 { a = 1 }
+bytes
+
+src "a = 1\n"
+replace 0 2
+span 4 5 "9"
+bytes
+
+src "a = 1\n"
+span 4 5 "42"
+bytes
+
+src "a = 1\n"
+span -1 2 "x"
+span 3 2 "x"
+span 0 999 "x"
+span 0 6 "b = 2\n"
+bytes
+
+src "a = 1\nb = 2\n"
+span 0 6 !nil
+bytes
+
+src "a = 1\n"
+span 0 0 "z = 0\n"
+span 0 0 "y = 0\n"
+bytes
+
+src "a = 1\n"
+span 6 6 "b = 2\n"
+span 0 3 "c ="
+bytes
+
+# Overlaps, in each order.
+src "a = 1\nb = 2\n"
+span 0 8 "x"
+span 4 5 "y"
+bytes
+
+src "a = 1\nb = 2\n"
+span 4 5 "y"
+span 0 8 "x"
+bytes
+
+src "a = 1\nb = 2\n"
+set a 9
+remove a
+bytes
+
+src "a = 1\nb = 2\n"
+remove a
+set a 9
+bytes
+
+src "a { b = 1 }\n"
+set a.b 2
+span 0 1 "z"
+remove a
+bytes
+
+src "a = 1\n"
+remove a
+span 2 3 "x"
+bytes
+
+src "server {\n    host = \"h\"\n}\n"
+append 0 port = 8080
+bytes
+
+src "children {\n    a { type = \"Button\" }\n}\n"
+append 0 b { type = "Label" }
+bytes
+
+src "root {\n    children {\n        greeting {\n            type = \"Label\"\n        }\n    }\n}\n"
+append 0.0 button { type = "Button" }
+bytes
+
+src "root {\n    sub {\n        x = 1\n    }\n    children {\n    }\n}\n"
+append 0.1 button { type = "Button" }
+bytes
+
+src "children { }\n"
+append 0 a { type = "Button" }
+bytes
+
+src "inline { a = 1 }\n"
+append 0 b = 2
+bytes
+
+src "labels {\n  \"team\": \"core\"\n}\n"
+append 0 env: "prod"
+bytes
+
+src "server {\n  host = \"h\"\n}\n"
+append 0 port = 1
+append 0 debug = true
+bytes
+
+src "server {\n}\n"
+append 0 port = 8080
+bytes
+
+src "server {\n}\n"
+append !nil a = 1
+append 0 !nil
+append 0 !bad
+append 0 !map-bad
+append 0 !block-bad
+append !handmade a = 1
+bytes
+
+src "labels { \"team\": \"core\" }\n"
+append 0 !map "404" "int"
+append 0 !mapq "123" "str"
+append 0 !map "my key" "q"
+append 0 !mapq "team" "again"
+append 0 !map "true" 1
+append 0 !mapq "true" 2
+append 0 !map "" 3
+append 0 !map "null" 4
+append 0 !map "1.5" 5
+bytes
+
+src "labels {\n  \"team\": \"core\"\n}\n"
+append 0 !map "404" "int"
+append 0 !mapq "123" "str"
+append 0 !map "my key" { x = 1 }
+bytes
+
+# Every entry kind, inline and multi-line.
+src "b { }\n"
+append 0 !assignq "q k" 1
+append 0 !blockq "q n" x = 1
+append 0 !type "t.example/a.B"
+append 0 !block-nilchild
+bytes
+
+src "b {\n}\n"
+append 0 !assignq "q k" 1
+append 0 !blockq "q n" x = 1
+append 0 !type "t.example/a.B"
+append 0 !block-nilchild
+bytes
+
+src "b { }\n"
+append 0 !nil-value
+bytes
+
+src "b {\n}\n"
+append 0 !nil-value
+bytes
+
+# Comments on an appended entry: kept on its own lines, dropped inline.
+src "b {\n}\n"
+append 0 !q "# lead\na = 1 # trail\n"
+bytes
+
+src "b { }\n"
+append 0 !q "# lead\na = 1 # trail\n"
+bytes
+
+src "b {\n  x = 1\n}\n"
+append 0 !q "# lead\nc {\n  # inner\n  y = 2 // t\n}\n"
+bytes
+
+# The '}' on the last entry's line, and a brace with no space before it.
+src "a {\n  x = 1 }\n"
+append 0 y = 2
+bytes
+
+src "a {x = 1}\n"
+append 0 y = 2
+bytes
+
+src "a {}\n"
+append 0 y = 2
+bytes
+
+src "a { x = 1\t}\n"
+append 0 y = 2
+bytes
+
+# A list value and block value in an appended entry.
+src "\ta {\n\t\tx {\n\t\t\ty = 1\n\t\t}\n\t}\n"
+append 0 z = [1, { w = 2 }]
+append 0 q { r { s = 1 } }
+append 0.0 t = { u = 1 }
+bytes
