@@ -40,7 +40,7 @@ jobs:
           CXX: g++-13
         run: |
           cmake -S . -B build
-          cmake --build build -j
+          cmake --build build -j 2
 
       # The config file's paths-ignore never applied to this build-based
       # C++ analysis (#23), so the exclusions are enforced here instead:
