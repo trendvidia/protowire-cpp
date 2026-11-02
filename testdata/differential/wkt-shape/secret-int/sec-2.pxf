@@ -1,0 +1,4 @@
+@type pxf.H
+sec = { hint = "h" }
+sec_l = [ { hint = "h" } ]
+sec_m = { "k": { hint = "h" } }

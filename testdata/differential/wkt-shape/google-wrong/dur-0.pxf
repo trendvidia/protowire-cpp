@@ -1,0 +1,4 @@
+@type google.protobuf.H
+dur = 5s
+dur_l = [ 5s ]
+dur_m = { "k": 5s }

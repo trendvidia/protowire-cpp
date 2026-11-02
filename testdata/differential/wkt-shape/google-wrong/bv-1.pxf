@@ -1,0 +1,4 @@
+@type google.protobuf.H
+bv = { other = "x" }
+bv_l = [ { other = "x" } ]
+bv_m = { "k": { other = "x" } }

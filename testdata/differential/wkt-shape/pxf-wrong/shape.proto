@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package pxf;
+
+message BigInt { string other = 1; }
+message Decimal { string other = 1; }
+message BigFloat { string other = 1; }
+message Secret { string other = 1; }
+
+message H {
+  BigInt big = 1;
+  repeated BigInt big_l = 2;
+  map<string, BigInt> big_m = 3;
+  Decimal dec = 4;
+  repeated Decimal dec_l = 5;
+  map<string, Decimal> dec_m = 6;
+  BigFloat flt = 7;
+  repeated BigFloat flt_l = 8;
+  map<string, BigFloat> flt_m = 9;
+  Secret sec = 10;
+  repeated Secret sec_l = 11;
+  map<string, Secret> sec_m = 12;
+}

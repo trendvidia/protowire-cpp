@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package google.protobuf;
+
+message Timestamp { string other = 1; }
+message Duration { string other = 1; }
+message StringValue { int32 value = 1; }
+message Int32Value { string value = 1; }
+message BoolValue { string other = 1; }
+message BytesValue { string value = 1; }
+message Any { string other = 1; }
+message FieldMask { string other = 1; }
+
+message H {
+  Timestamp ts = 1;
+  repeated Timestamp ts_l = 2;
+  map<string, Timestamp> ts_m = 3;
+  Duration dur = 4;
+  repeated Duration dur_l = 5;
+  map<string, Duration> dur_m = 6;
+  StringValue sv = 7;
+  repeated StringValue sv_l = 8;
+  map<string, StringValue> sv_m = 9;
+  Int32Value iv = 10;
+  repeated Int32Value iv_l = 11;
+  map<string, Int32Value> iv_m = 12;
+  BoolValue bv = 13;
+  repeated BoolValue bv_l = 14;
+  map<string, BoolValue> bv_m = 15;
+  BytesValue by = 16;
+  repeated BytesValue by_l = 17;
+  map<string, BytesValue> by_m = 18;
+  Any any = 19;
+  FieldMask _null = 20;
+}

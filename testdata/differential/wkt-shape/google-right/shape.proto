@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package google.protobuf;
+
+message Timestamp { int64 seconds = 1; int32 nanos = 2; }
+message Int32Value { int32 value = 1; }
+
+message H {
+  Timestamp ts = 1;
+  repeated Timestamp ts_l = 2;
+  map<string, Timestamp> ts_m = 3;
+  Int32Value iv = 4;
+  repeated Int32Value iv_l = 5;
+  map<string, Int32Value> iv_m = 6;
+}

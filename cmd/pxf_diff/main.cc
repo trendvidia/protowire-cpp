@@ -194,6 +194,35 @@ void RunMessage(Schema& s, const gpb::Descriptor* d, const std::string& text) {
   PrintText("marshal-nulls", pxf::Marshal(*full, m));
 }
 
+// RunUnvalidated repeats the decode with bind-time validation off, where a
+// schema the checks would refuse still reaches the codec.
+void RunUnvalidated(Schema& s, const gpb::Descriptor* d, const std::string& text) {
+  pxf::UnmarshalOptions opts;
+  opts.type_resolver = &s;
+  opts.skip_validate = true;
+  auto plain = s.New(d);
+  std::cout << "unvalidated: " << Text(pxf::Unmarshal(text, plain.get(), opts)) << "\n";
+  pxf::UnmarshalOptions hooked = opts;
+  hooked.on_secret_field = [](std::string_view path, std::string_view value) {
+    std::cout << "secret: " << Quote(std::string(path)) << " = " << Quote(std::string(value))
+              << "\n";
+    return Status::OK();
+  };
+  auto hm = s.New(d);
+  auto hr = pxf::UnmarshalFull(text, hm.get(), hooked);
+  std::cout << "unvalidated-hooked: " << Text(hr.status()) << "\n";
+  auto full = s.New(d);
+  auto r = pxf::UnmarshalFull(text, full.get(), opts);
+  std::cout << "unvalidated-full: " << Text(r.status()) << "\n";
+  if (!r.ok()) return;
+  std::cout << "bytes: " << BytesOf(*full) << "\n";
+  pxf::MarshalOptions m;
+  m.type_resolver = &s;
+  PrintText("unvalidated-marshal", pxf::Marshal(*full, m));
+  m.null_fields = &*r;
+  PrintText("unvalidated-marshal-nulls", pxf::Marshal(*full, m));
+}
+
 class StubValidator : public protowire::check::Validator {
  public:
   explicit StubValidator(protowire::check::Report rep) : rep_(std::move(rep)) {}
@@ -315,6 +344,7 @@ void Run(const std::string& root,
     PrintText("canonical", pxf::FormatDocument(*doc));
   }
   RunMessage(s, d, text);
+  RunUnvalidated(s, d, text);
   RunSeams(s, d, text);
 }
 

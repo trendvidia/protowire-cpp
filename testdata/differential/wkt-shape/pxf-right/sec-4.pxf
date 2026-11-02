@@ -1,0 +1,4 @@
+@type pxf.H
+sec = { note = "n" }
+sec_l = [ { note = "n" } ]
+sec_m = { "k": { note = "n" } }

@@ -24,7 +24,8 @@ add_dir() { # root dir [extra protos] [type of a document with no @type]
   local protos
   protos=${ONLY_PROTOS:-$(cd "$root/$dir" && ls | awk '/\.proto$/' | paste -sd, -)}
   protos=${protos:+$protos}${extra:+${protos:+,}$extra}
-  (cd "$root" && find "$dir" -name '*.pxf' | LC_ALL=C sort) |
+  (cd "$root" && find "$dir" -path "$dir/${SKIP_DIR:-}" -prune -o -name '*.pxf' -print |
+    LC_ALL=C sort) |
     awk -v r="$root" -v d="$dir" -v p="$protos" -v t="$type" \
       '{ print r "\t" d "\t" p "\t" t "\t" $0 }' >> "$manifest"
 }
@@ -38,7 +39,11 @@ ONLY_PROTOS=settings.proto add_dir "$spec/testdata" annotations "" settings.v1.S
 add_dir "$spec/testdata" dataset test.proto
 add_dir "$spec/testdata" repeated test.proto
 add_dir "$spec/testdata" proto-imports
-add_dir "$here/testdata" differential
+SKIP_DIR=wkt-shape add_dir "$here/testdata" differential
+# Each of these schemas redefines well-known types, so each needs its own run.
+for dir in "$here"/testdata/differential/wkt-shape/*/; do
+  add_dir "$here/testdata" "differential/wkt-shape/$(basename "$dir")"
+done
 
 cp -R "$here/tools/godiff" "$work/godiff"
 chmod -R u+w "$work/godiff"

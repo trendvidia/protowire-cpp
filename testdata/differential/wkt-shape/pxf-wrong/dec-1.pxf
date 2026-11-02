@@ -1,0 +1,4 @@
+@type pxf.H
+dec = { other = "x" }
+dec_l = [ { other = "x" } ]
+dec_m = { "k": { other = "x" } }

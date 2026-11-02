@@ -1,0 +1,4 @@
+@type google.protobuf.H
+sv = { value = 5 }
+sv_l = [ { value = 5 } ]
+sv_m = { "k": { value = 5 } }

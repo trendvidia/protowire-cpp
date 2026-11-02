@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package pxf;
+
+message Secret { repeated string value = 1; }
+
+message H {
+  Secret sec = 1;
+  repeated Secret sec_l = 2;
+  map<string, Secret> sec_m = 3;
+}
