@@ -11,12 +11,20 @@ number says nothing about any other port. See the Releases section of
 
 ## [Unreleased]
 
+### Added
+
+- **`pb::Encoder` and `pb::Decoder`,** with `SetMaxFrameSize`, `kDefaultMaxFrameSize` and `kErrFramingCorrupt` (#83), protobuf's length-delimited framing over a `std::ostream` and `std::istream`. `Decoder` takes `UnmarshalOptions`, applied to each frame.
+- **`sbe::Codec::NewEncoder` and `NewDecoder`,** with the same limits, framed by a Simple Open Framing Header, and **`sbe::Codec::UnmarshalDescriptor`,** which allocates the message (#83).
+- **`IsEOF`, `IsUnexpectedEOF`, and `pb::IsFramingCorrupt` and `sbe::IsFramingCorrupt`,** which test a `Decode` result. `Decode` reports the end of a stream as a non-OK `Status`, as Go reports `io.EOF`.
+
 ### Changed
 
 - **A schema that redefines a well-known type with the wrong shape is refused at bind time** (draft -01 §wkt-shapes, protowire#487, protowire-go#218). This narrows what binds. A message named, say, `pxf.Secret` or `google.protobuf.Timestamp` without the fields the codec reads now gives a violation of the new kind `ViolationKind::kWellKnownShape`. Copies of the canonical schemas are unaffected, and field numbers are not checked. The check also reaches a schema's own file at a `google/protobuf/` path, which the closure walk used to skip.
 
 ### Fixed
 
+- **`pb::Unmarshal` reads the wire as protowire-go does** (#83). Field number 0 and a varint past 64 bits are rejected, **which rejects input that was accepted before.** An unknown group is skipped, which was an error. **Error text changes:** a failure names its field, `field text: corrupt string`, and uses Go's words, such as `corrupt int` and `corrupt field 15`.
+- **An SBE string keeps a zero inside it** (#83). Decoding, and `View::String`, stopped at the first zero; now only trailing zero padding goes. **A string with a zero inside it now decodes differently.** `bytes` fields keep the whole region, as before. SBE error text gains Go's detail, such as `sbe: data too short for root block: need 16, have 12`.
 - **Every file in the import closure is validated, at a `google/protobuf/` path too** (#90). A schema's own file at such a path escaped the reserved-name and annotation checks, and at `google/protobuf/descriptor.proto` it escaped all of them. Only the `descriptor.proto` linked into libprotobuf is skipped, since it cannot be a schema's own. **A schema with a violation in such a file is now rejected.** Fields with no options skip the annotation lookups, so a schema outside the annotations decodes faster than before. A dynamically built schema that imports them pays a fixed ~0.5 µs per decode to walk its compiled `descriptor.proto`; `skip_validate` still avoids all of it.
 - **A redefined well-known type no longer crashes** (#89). `Unmarshal`, `UnmarshalFull` and `Marshal` segfaulted or aborted on such a message: 19 of the 45 documents in `testdata/differential/wkt-shape`. The codec now checks the shape as well as the name, so where validation does not run, as in `Marshal` and with `skip_validate`, the message is ordinary and has no literal form. `on_secret_field` does not fire for a `pxf.Secret` of the wrong shape, and a `pxf.Secret` block naming a `hint` or `fingerprint` the schema does not declare is an error.
 - **A timestamp follows Go's `time.Parse`, not the RFC.** A one-digit hour (`T3:04:05Z`), a `,` before the fraction, a fraction past nine digits (cut, not rounded) and an offset up to `24:60` now read. A lower-case `t` or `z` and an offset past that are rejected. **This rejects documents that were accepted before.**

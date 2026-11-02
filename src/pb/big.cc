@@ -249,19 +249,21 @@ void MarshalBigFloatMsg(const BigFloat& v, std::vector<uint8_t>& out) {
 namespace {
 
 template <class Out, class Msg>
-Status ReadFields(std::span<const uint8_t> data, Msg& out, Out fn) {
+Status ReadFields(std::span<const uint8_t> data, const char* message, Msg& out, Out fn) {
   while (!data.empty()) {
     wire::FieldNumber num;
     wire::WireType type;
     int n = wire::ConsumeTag(data, num, type);
-    if (n < 0) return Status::Error("corrupt big-number tag");
+    if (n < 0) return Status::Error(std::string("corrupt tag in ") + message);
     data = data.subspan(n);
     int consumed = 0;
     Status st = fn(data, num, type, out, consumed);
     if (!st.ok()) return st;
     if (consumed == 0) {
       int skipped = wire::ConsumeFieldValue(data, num, type);
-      if (skipped < 0) return Status::Error("corrupt big-number field");
+      if (skipped < 0) {
+        return Status::Error("corrupt field " + std::to_string(num) + " in " + message);
+      }
       consumed = skipped;
     }
     data = data.subspan(consumed);
@@ -274,6 +276,7 @@ Status ReadFields(std::span<const uint8_t> data, Msg& out, Out fn) {
 Status UnmarshalBigIntMsg(std::span<const uint8_t> data, BigInt& out) {
   out = {};
   return ReadFields(data,
+                    "BigInt",
                     out,
                     [](std::span<const uint8_t> d,
                        wire::FieldNumber num,
@@ -283,13 +286,13 @@ Status UnmarshalBigIntMsg(std::span<const uint8_t> data, BigInt& out) {
                       if (num == 1) {
                         std::span<const uint8_t> b;
                         int n = wire::ConsumeBytes(d, b);
-                        if (n < 0) return Status::Error("corrupt BigInt.abs");
+                        if (n < 0) return Status::Error("corrupt abs in BigInt");
                         v.abs.assign(b.begin(), b.end());
                         consumed = n;
                       } else if (num == 2) {
                         uint64_t x;
                         int n = wire::ConsumeVarint(d, x);
-                        if (n < 0) return Status::Error("corrupt BigInt.negative");
+                        if (n < 0) return Status::Error("corrupt negative in BigInt");
                         v.negative = x != 0;
                         consumed = n;
                       }
@@ -301,6 +304,7 @@ Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out, int max_
   out = {};
   if (max_digits <= 0) max_digits = kMaxNumericLiteralDigits;
   Status st = ReadFields(data,
+                         "Decimal",
                          out,
                          [](std::span<const uint8_t> d,
                             wire::FieldNumber num,
@@ -310,19 +314,19 @@ Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out, int max_
                            if (num == 1) {
                              std::span<const uint8_t> b;
                              int n = wire::ConsumeBytes(d, b);
-                             if (n < 0) return Status::Error("corrupt Decimal.unscaled");
+                             if (n < 0) return Status::Error("corrupt unscaled in Decimal");
                              v.unscaled.assign(b.begin(), b.end());
                              consumed = n;
                            } else if (num == 2) {
                              uint64_t x;
                              int n = wire::ConsumeVarint(d, x);
-                             if (n < 0) return Status::Error("corrupt Decimal.scale");
+                             if (n < 0) return Status::Error("corrupt scale in Decimal");
                              v.scale = static_cast<int32_t>(wire::DecodeZigZag(x));
                              consumed = n;
                            } else if (num == 3) {
                              uint64_t x;
                              int n = wire::ConsumeVarint(d, x);
-                             if (n < 0) return Status::Error("corrupt Decimal.negative");
+                             if (n < 0) return Status::Error("corrupt negative in Decimal");
                              v.negative = x != 0;
                              consumed = n;
                            }
@@ -334,7 +338,7 @@ Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out, int max_
   // consumer that materialises the value computes 10^|scale| from five
   // attacker-written bytes (HARDENING.md § Mandatory limits, protowire#279).
   if (out.scale > max_digits || out.scale < -max_digits) {
-    return Status::Error("Decimal.scale " + std::to_string(out.scale) +
+    return Status::Error("pxf.Decimal scale " + std::to_string(out.scale) +
                          " exceeds MaxNumericLiteralDigits=" + std::to_string(max_digits));
   }
   return Status::OK();
@@ -343,6 +347,7 @@ Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out, int max_
 Status UnmarshalBigFloatMsg(std::span<const uint8_t> data, BigFloat& out) {
   out = {};
   return ReadFields(data,
+                    "BigFloat",
                     out,
                     [](std::span<const uint8_t> d,
                        wire::FieldNumber num,
@@ -352,25 +357,25 @@ Status UnmarshalBigFloatMsg(std::span<const uint8_t> data, BigFloat& out) {
                       if (num == 1) {
                         std::span<const uint8_t> b;
                         int n = wire::ConsumeBytes(d, b);
-                        if (n < 0) return Status::Error("corrupt BigFloat.mantissa");
+                        if (n < 0) return Status::Error("corrupt mantissa in BigFloat");
                         v.mantissa.assign(b.begin(), b.end());
                         consumed = n;
                       } else if (num == 2) {
                         uint64_t x;
                         int n = wire::ConsumeVarint(d, x);
-                        if (n < 0) return Status::Error("corrupt BigFloat.exponent");
+                        if (n < 0) return Status::Error("corrupt exponent in BigFloat");
                         v.exponent = static_cast<int32_t>(wire::DecodeZigZag(x));
                         consumed = n;
                       } else if (num == 3) {
                         uint64_t x;
                         int n = wire::ConsumeVarint(d, x);
-                        if (n < 0) return Status::Error("corrupt BigFloat.prec");
+                        if (n < 0) return Status::Error("corrupt prec in BigFloat");
                         v.prec = static_cast<uint32_t>(x);
                         consumed = n;
                       } else if (num == 4) {
                         uint64_t x;
                         int n = wire::ConsumeVarint(d, x);
-                        if (n < 0) return Status::Error("corrupt BigFloat.negative");
+                        if (n < 0) return Status::Error("corrupt negative in BigFloat");
                         v.negative = x != 0;
                         consumed = n;
                       }

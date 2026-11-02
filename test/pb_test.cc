@@ -409,7 +409,7 @@ TEST(PbHardening, DecimalScaleBound) {
   Node got;
   auto st = Unmarshal(with_scale(2147483647), got);
   ASSERT_FALSE(st.ok());
-  EXPECT_NE(st.message().find("Decimal.scale 2147483647 exceeds MaxNumericLiteralDigits=4096"),
+  EXPECT_NE(st.message().find("pxf.Decimal scale 2147483647 exceeds MaxNumericLiteralDigits=4096"),
             std::string::npos)
       << st.ToString();
   EXPECT_FALSE(Unmarshal(with_scale(-2147483647 - 1), got).ok());

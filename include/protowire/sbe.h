@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstdint>
+#include <iosfwd>
 #include <memory>
 #include <span>
 #include <string>
@@ -26,14 +27,27 @@
 
 #include "protowire/check.h"
 #include "protowire/detail/status.h"
+#include "protowire/detail/stream.h"
 #include "protowire/limits.h"
 #include "protowire/sbe/template.h"
 
 namespace protowire::sbe {
 
 class Codec;
+class Decoder;
+class Encoder;
 class View;
 class GroupView;
+
+// kDefaultMaxFrameSize caps the SBE body size at 16 MiB by default.
+inline constexpr int kDefaultMaxFrameSize = 16 << 20;
+
+// kErrFramingCorrupt opens the error of invalid SOFH framing: a wrong encoding
+// type, a length less than the header, a frame larger than the maximum. The byte
+// stream is then desynchronized and the decoder is permanently unusable.
+// IsFramingCorrupt tests for it.
+inline constexpr const char* kErrFramingCorrupt = "sbe: stream framing corrupt";
+bool IsFramingCorrupt(const Status& st);
 
 // CodecOptions carries the HARDENING.md § Mandatory limits the codec's
 // decoders enforce, configurable per codec; 0 selects the default in
@@ -55,6 +69,17 @@ class Codec {
   StatusOr<std::vector<uint8_t>> Marshal(const google::protobuf::Message& msg) const;
   Status Unmarshal(std::span<const uint8_t> data, google::protobuf::Message* msg) const;
 
+  // UnmarshalDescriptor decodes into a new message of type desc, for a caller
+  // with a descriptor and no generated class. The message owns what it needs
+  // and desc must outlive it.
+  StatusOr<std::shared_ptr<google::protobuf::Message>> UnmarshalDescriptor(
+      std::span<const uint8_t> data, const google::protobuf::Descriptor* desc) const;
+
+  // Stream encoder and decoder over w and r. The codec and the stream must
+  // outlive them.
+  Encoder NewEncoder(std::ostream* w) const;
+  Decoder NewDecoder(std::istream* r) const;
+
   // Zero-allocation reader over an SBE buffer. The view holds a span into
   // the buffer; strings and bytes returned by it borrow from that buffer.
   // The header, root block and every group header are validated here
@@ -70,6 +95,9 @@ class Codec {
   Status RegisterMessage(const google::protobuf::Descriptor* md,
                          uint16_t schema_id,
                          uint16_t version);
+  Status UnmarshalInto(std::span<const uint8_t> data,
+                       const MessageTemplate& tmpl,
+                       google::protobuf::Message* msg) const;
 
   // ValidateGroups walks every group header after the root block and
   // checks it per HARDENING.md § SBE validation, returning the total size
@@ -83,6 +111,41 @@ class Codec {
   int max_message_size_ = kMaxMessageSize;
   int max_repeated_ = kMaxRepeatedCount;
   check::Validator* validator_ = nullptr;
+};
+
+// Encoder writes SBE messages framed with a Simple Open Framing Header.
+class Encoder {
+ public:
+  Status Encode(const google::protobuf::Message& msg);
+
+ private:
+  friend class Codec;
+  Encoder(const Codec* codec, std::ostream* w) : codec_(codec), w_(w) {}
+
+  const Codec* codec_;
+  std::ostream* w_;
+};
+
+// Decoder reads SOFH-framed SBE messages.
+//
+// Decode returns a Status for which IsEOF is true at the end of the stream, and
+// IsUnexpectedEOF when it ends inside a frame. A framing error is sticky: every
+// later call returns it. A frame whose body does not decode is not, since the
+// next frame is at a known boundary.
+class Decoder {
+ public:
+  void SetMaxFrameSize(int64_t n) { max_ = n; }
+  Status Decode(google::protobuf::Message* msg);
+
+ private:
+  friend class Codec;
+  Decoder(const Codec* codec, std::istream* r) : codec_(codec), r_(r) {}
+
+  const Codec* codec_;
+  std::istream* r_;
+  std::vector<uint8_t> buf_;  // reused; Unmarshal copies what it keeps
+  int64_t max_ = kDefaultMaxFrameSize;
+  Status err_;
 };
 
 // Zero-allocation read-only view over an SBE-encoded message.

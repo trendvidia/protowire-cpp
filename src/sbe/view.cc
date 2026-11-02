@@ -97,8 +97,8 @@ std::string_view View::String(std::string_view name) const {
   const FieldTemplate* ft = FindField(name);
   if (!ft) return {};
   const char* p = reinterpret_cast<const char*>(block_.data() + ft->offset);
-  size_t n = 0;
-  while (n < ft->size && p[n] != 0) ++n;
+  size_t n = ft->size;
+  while (n > 0 && p[n - 1] == 0) --n;
   return std::string_view(p, n);
 }
 

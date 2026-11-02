@@ -119,6 +119,26 @@ if [ "$ops" -lt 60 ]; then
 fi
 echo "$ops rewriter operations alike ($scripted scripted), $op_errors of them returned errors"
 
+# The pb and sbe stream codecs over every truncation and many corruptions of a
+# stream: the bytes they write, each Decode's result and error text.
+"$work/godiff.bin" --streams "$here/testdata" differential/stream "$spec/proto" > "$work/go.streams"
+"$pxf_diff" --streams "$here/testdata" differential/stream "$spec/proto" > "$work/cpp.streams"
+if ! cmp -s "$work/go.streams" "$work/cpp.streams"; then
+  echo "Stream codecs differ:" >&2
+  diff "$work/go.streams" "$work/cpp.streams" | head -"${STREAM_DIFF_LINES:-40}" >&2 || true
+  [ -n "${DIFF_OUT:-}" ] && cp "$work/go.streams" "$DIFF_OUT.go.streams" &&
+    cp "$work/cpp.streams" "$DIFF_OUT.cpp.streams"
+  exit 1
+fi
+variants=$(LC_ALL=C awk '/^--- /{n++} END{print n+0}' "$work/go.streams")
+decoded=$(LC_ALL=C awk '/^ok /{n++} END{print n+0}' "$work/go.streams")
+framing=$(LC_ALL=C awk '/stream framing corrupt/{n++} END{print n+0}' "$work/go.streams")
+if [ "$variants" -lt 900 ] || [ "$decoded" -lt 100 ] || [ "$framing" -lt 100 ]; then
+  echo "Streams ran only $variants variants, $decoded decodes, $framing framing errors" >&2
+  exit 2
+fi
+echo "$variants damaged streams decoded alike: $decoded messages, $framing framing errors"
+
 docs=$(wc -l < "$manifest" | tr -d ' ')
 for f in go cpp; do
   ran=$(LC_ALL=C awk '/^=== /{n++} END{print n+0}' "$work/$f.out")

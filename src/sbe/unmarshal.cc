@@ -5,9 +5,12 @@
 #include "protowire/sbe.h"
 
 #include <cstring>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
+
+#include <google/protobuf/dynamic_message.h>
 
 #include "protowire/detail/utf8.h"
 
@@ -53,9 +56,12 @@ Status DecodeScalarField(const uint8_t* p, const FieldTemplate& ft, pb::Message*
   const pb::Reflection* r = msg->GetReflection();
   const pb::FieldDescriptor* fd = ft.fd;
   if (ft.encoding == kEncChar) {
-    // Char array — null-terminated within ft.size, or the whole region.
-    size_t n = 0;
-    while (n < ft.size && p[n] != 0) ++n;
+    // A string drops its trailing zero padding, and a zero inside it stays. A
+    // bytes field takes the whole region.
+    size_t n = ft.size;
+    if (fd->type() == pb::FieldDescriptor::TYPE_STRING) {
+      while (n > 0 && p[n - 1] == 0) --n;
+    }
     std::string_view raw(reinterpret_cast<const char*>(p), n);
     // HARDENING.md § UTF-8: a proto3 string field is valid UTF-8 whatever
     // the source encoding; a bytes field takes the raw region.
@@ -132,7 +138,38 @@ Status Codec::Unmarshal(std::span<const uint8_t> data, pb::Message* msg) const {
     return Status::Error("sbe: no template registered for " +
                          std::string(msg->GetDescriptor()->full_name()));
   }
-  if (data.size() < 8) return Status::Error("sbe: buffer too short for header");
+  return UnmarshalInto(data, *tmpl, msg);
+}
+
+StatusOr<std::shared_ptr<pb::Message>> Codec::UnmarshalDescriptor(
+    std::span<const uint8_t> data, const pb::Descriptor* desc) const {
+  if (data.size() > static_cast<size_t>(max_message_size_)) {
+    return Status::Error("sbe: input of " + std::to_string(data.size()) +
+                         " bytes exceeds MaxMessageSize=" + std::to_string(max_message_size_));
+  }
+  const auto* tmpl = TemplateByName(desc->full_name());
+  if (!tmpl) {
+    return Status::Error("sbe: no template registered for " + std::string(desc->full_name()));
+  }
+  struct Owned {
+    pb::DynamicMessageFactory factory;
+    std::unique_ptr<pb::Message> message;
+  };
+  auto owned = std::make_shared<Owned>();
+  owned->message.reset(owned->factory.GetPrototype(desc)->New());
+  pb::Message* msg = owned->message.get();
+  if (Status st = UnmarshalInto(data, *tmpl, msg); !st.ok()) return st;
+  return std::shared_ptr<pb::Message>(owned, msg);
+}
+
+Status Codec::UnmarshalInto(std::span<const uint8_t> data,
+                            const MessageTemplate& message_template,
+                            pb::Message* msg) const {
+  const MessageTemplate* tmpl = &message_template;
+  if (data.size() < 8) {
+    return Status::Error("sbe: data too short for header: " + std::to_string(data.size()) +
+                         " bytes");
+  }
   // HARDENING.md § SBE validation, steps 1 and 2: the root block fits, and
   // the wire block is at least the template's — schema evolution may make
   // it larger (fields appended), never smaller, since a smaller block
@@ -149,7 +186,9 @@ Status Codec::Unmarshal(std::span<const uint8_t> data, pb::Message* msg) const {
                          " for template " + std::to_string(tmpl->template_id));
   }
   if (data.size() < 8u + block_length) {
-    return Status::Error("sbe: data too short for root block");
+    return Status::Error("sbe: data too short for root block: need " +
+                         std::to_string(8u + block_length) + ", have " +
+                         std::to_string(data.size()));
   }
   // Steps 3 and 4 for every group, before any entry is allocated.
   if (Status st = ValidateGroups(data, *tmpl, 8u + block_length); !st.ok()) return st;

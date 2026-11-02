@@ -65,7 +65,7 @@ target_include_directories(protowire_detail PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 
 # --- Optional package libraries (only built when their .cc files exist) ----
-_pwx_existing_sources(_pb_srcs src/pb/wire.cc src/pb/big.cc)
+_pwx_existing_sources(_pb_srcs src/pb/wire.cc src/pb/big.cc src/pb/stream.cc)
 if(_pb_srcs)
   add_library(protowire_pb STATIC ${_pb_srcs})
   target_include_directories(protowire_pb PUBLIC
@@ -87,7 +87,7 @@ _pwx_existing_sources(_pxf_srcs
   src/pxf/bigfloat.cc src/pxf/carrier.cc src/pxf/dataset_reader.cc src/pxf/dataset_paths.cc src/pxf/dataset_writer.cc src/pxf/go_wire.cc src/pxf/keyed.cc src/pxf/rewriter.cc)
 _pwx_existing_sources(_sbe_srcs
   src/sbe/annotations.cc src/sbe/template.cc src/sbe/codec.cc
-  src/sbe/marshal.cc src/sbe/unmarshal.cc src/sbe/view.cc
+  src/sbe/marshal.cc src/sbe/unmarshal.cc src/sbe/stream.cc src/sbe/view.cc
   src/sbe/xmlschema.cc src/sbe/xmltoproto.cc src/sbe/prototoxml.cc)
 
 if(_pxf_srcs OR _sbe_srcs)
