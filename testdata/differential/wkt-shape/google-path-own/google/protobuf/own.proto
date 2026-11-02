@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package own.v1;
+
+import "pxf/annotations.proto";
+
+message Item { string id = 1; }
+
+message Row {
+  string null = 1;
+  Item item = 2 [(pxf.key) = "id"];
+}
+
+enum Kind {
+  KIND_UNSPECIFIED = 0;
+  true = 1;
+}

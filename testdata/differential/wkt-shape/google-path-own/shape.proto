@@ -1,0 +1,7 @@
+syntax = "proto3";
+
+package own.v1;
+
+import "google/protobuf/own.proto";
+
+message H { Row row = 1; }

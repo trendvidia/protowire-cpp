@@ -14,6 +14,7 @@
 #include "protoc_compat.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -21,6 +22,7 @@
 #include <vector>
 
 #include <google/protobuf/compiler/importer.h>
+#include <google/protobuf/descriptor.pb.h>
 #include <google/protobuf/dynamic_message.h>
 
 // Note on raw-string delimiters: clang-format treats `R"pb(...)pb"` /
@@ -77,6 +79,7 @@ class PxfSchema : public ::testing::Test {
       const std::string& main_basename) {
     for (const auto& [name, src] : files) {
       std::string path = protowire_test::FixtureDir() + "/" + name;
+      std::filesystem::create_directories(std::filesystem::path(path).parent_path());
       std::ofstream out(path, std::ios::binary);
       out << src;
       extra_paths_.push_back(path);
@@ -545,9 +548,9 @@ message Root { repeated Elem items = 1 [(pxf.key) = "name"]; }
   EXPECT_GE(fd->dependency_count(), 1);
 }
 
-// The closure walk skips descriptor.proto on the assumption that it carries
-// no PXF violation. This pins it: each Google file the annotations closure
-// pulls in is checked directly.
+// Google's files are walked like any other. The walk skips only the
+// descriptor.proto linked into libprotobuf, on the assumption that it reports
+// nothing. This pins it, on a compiled copy of each file, which is walked.
 TEST_F(PxfSchema, GoogleProtobufFilesAreConformant) {
   const char* a = R"(
 syntax = "proto3";
@@ -563,35 +566,115 @@ message Root { google.protobuf.Timestamp t = 1 [(pxf.required) = true]; }
   const pb::FileDescriptor* fd = CompileFiles({{"g_closure.proto", a}}, "g_closure.proto");
   ASSERT_NE(fd, nullptr) << errors_.last_;
   std::vector<const pb::FileDescriptor*> stack{fd};
-  std::vector<std::string> seen;
+  std::vector<const pb::FileDescriptor*> seen;
   int google_files = 0;
   while (!stack.empty()) {
     const pb::FileDescriptor* f = stack.back();
     stack.pop_back();
-    if (std::find(seen.begin(), seen.end(), std::string(f->name())) != seen.end()) continue;
-    seen.push_back(std::string(f->name()));
+    if (std::find(seen.begin(), seen.end(), f) != seen.end()) continue;
+    seen.push_back(f);
     for (int i = 0; i < f->dependency_count(); ++i) stack.push_back(f->dependency(i));
     if (std::string(f->name()).rfind("google/protobuf/", 0) != 0) continue;
     ++google_files;
-    // Validate the file's own declarations the way the walk would have.
-    std::vector<protowire::pxf::Violation> vs;
-    for (int i = 0; i < f->message_type_count(); ++i) {
-      const pb::Descriptor* md = f->message_type(i);
-      for (int k = 0; k < md->field_count(); ++k) {
-        const std::string name(md->field(k)->name());
-        EXPECT_FALSE(name == "null" || name == "true" || name == "false") << f->name();
-        EXPECT_FALSE(protowire::pxf::KeyFieldName(md->field(k)).has_value()) << f->name();
-      }
-    }
-    for (int i = 0; i < f->enum_type_count(); ++i) {
-      for (int k = 0; k < f->enum_type(i)->value_count(); ++k) {
-        const std::string name(f->enum_type(i)->value(k)->name());
-        EXPECT_FALSE(name == "null" || name == "true" || name == "false") << f->name();
-      }
-    }
+    EXPECT_NE(f, pb::FileDescriptorProto::descriptor()->file()) << "must be a compiled copy";
+    EXPECT_TRUE(ValidateFile(f).empty()) << f->name();
   }
   EXPECT_GE(google_files, 6) << "descriptor.proto and five well-known types";
   EXPECT_TRUE(ValidateFile(fd).empty());
+}
+
+// The validation walk and ReadFieldAnnotations skip a field whose options are
+// the default instance. If libprotobuf stopped sharing it, nothing would go
+// wrong except that every decode would slow down, so this says so.
+TEST_F(PxfSchema, FieldsWithNoOptionsShareTheDefaultInstance) {
+  const pb::FileDescriptor* fd = CompileFromString(R"src(
+syntax = "proto3";
+package bare.v1;
+message Row { int64 a = 1; }
+)src",
+                                                   "bare.proto");
+  ASSERT_NE(fd, nullptr) << errors_.last_;
+  const pb::FieldOptions* shared = &pb::FieldOptions::default_instance();
+  EXPECT_EQ(&fd->message_type(0)->field(0)->options(), shared);
+  EXPECT_EQ(&pb::FileDescriptorSet::descriptor()->field(0)->options(), shared);
+}
+
+// A schema can put its own file at a google/protobuf path. It gets every check
+// any other file gets, on a file Google does not have and on ones it does.
+TEST_F(PxfSchema, OwnFileAtGooglePathIsWalked) {
+  const char* own = R"(
+syntax = "proto3";
+package own.v1;
+import "pxf/annotations.proto";
+message Item { string id = 1; }
+message Row {
+  string null = 1;
+  Item item = 2 [(pxf.key) = "id"];
+}
+enum Kind { KIND_UNSPECIFIED = 0; true = 1; }
+)";
+  const char* a = R"(
+syntax = "proto3";
+package closure.v1;
+import "google/protobuf/own.proto";
+message Root { own.v1.Row row = 1; }
+)";
+  const pb::FileDescriptor* fd =
+      CompileFiles({{"google/protobuf/own.proto", own}, {"own_root.proto", a}}, "own_root.proto");
+  ASSERT_NE(fd, nullptr) << errors_.last_;
+  const auto vs = ValidateFile(fd);
+  ASSERT_EQ(vs.size(), 3u);
+  EXPECT_EQ(vs[0].file, "google/protobuf/own.proto");
+  EXPECT_EQ(vs[0].kind, ViolationKind::kKeyOption);
+  EXPECT_EQ(vs[1].kind, ViolationKind::kField);
+  EXPECT_EQ(vs[2].kind, ViolationKind::kEnumValue);
+}
+
+TEST_F(PxfSchema, ShadowedTimestampFileIsWalked) {
+  const char* shadow = R"(
+syntax = "proto3";
+package google.protobuf;
+message Timestamp {
+  int64 seconds = 1;
+  int32 nanos = 2;
+  string null = 3;
+}
+)";
+  const char* a = R"(
+syntax = "proto3";
+package closure.v1;
+import "google/protobuf/timestamp.proto";
+message Root { google.protobuf.Timestamp t = 1; }
+)";
+  const pb::FileDescriptor* fd = CompileFiles(
+      {{"google/protobuf/timestamp.proto", shadow}, {"ts_root.proto", a}}, "ts_root.proto");
+  ASSERT_NE(fd, nullptr) << errors_.last_;
+  const auto vs = ValidateFile(fd);
+  ASSERT_EQ(vs.size(), 1u);
+  EXPECT_EQ(vs[0].element, "google.protobuf.Timestamp.null");
+}
+
+// The walk once skipped this path outright, so nothing in the file was seen.
+TEST_F(PxfSchema, ShadowedDescriptorFileIsWalked) {
+  const char* shadow = R"(
+syntax = "proto3";
+package google.protobuf;
+message Duration { string seconds = 1; int32 nanos = 2; }
+message Row { string false = 1; }
+)";
+  const char* a = R"(
+syntax = "proto3";
+package closure.v1;
+import "google/protobuf/descriptor.proto";
+message Root { google.protobuf.Row row = 1; }
+)";
+  const pb::FileDescriptor* fd = CompileFiles(
+      {{"google/protobuf/descriptor.proto", shadow}, {"d_root.proto", a}}, "d_root.proto");
+  ASSERT_NE(fd, nullptr) << errors_.last_;
+  const auto vs = ValidateFile(fd);
+  ASSERT_EQ(vs.size(), 2u);
+  EXPECT_EQ(vs[0].kind, ViolationKind::kWellKnownShape);
+  EXPECT_EQ(vs[1].element, "google.protobuf.Row.false");
 }
 
 }  // namespace

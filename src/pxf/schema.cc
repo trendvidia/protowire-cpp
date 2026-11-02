@@ -30,7 +30,7 @@ bool IsReservedName(std::string_view name) {
   return name == "null" || name == "true" || name == "false";
 }
 
-void WalkEnumsForFile(const std::string& path,
+void WalkEnumsForFile(std::string_view path,
                       const pb::FileDescriptor* fd,
                       std::vector<Violation>* out) {
   for (int i = 0; i < fd->enum_type_count(); ++i) {
@@ -38,14 +38,16 @@ void WalkEnumsForFile(const std::string& path,
     for (int j = 0; j < e->value_count(); ++j) {
       const pb::EnumValueDescriptor* v = e->value(j);
       if (IsReservedName(v->name())) {
-        out->push_back(Violation{
-            path, std::string(v->full_name()), std::string(v->name()), ViolationKind::kEnumValue});
+        out->push_back(Violation{std::string(path),
+                                 std::string(v->full_name()),
+                                 std::string(v->name()),
+                                 ViolationKind::kEnumValue});
       }
     }
   }
 }
 
-void WalkEnumsForMessage(const std::string& path,
+void WalkEnumsForMessage(std::string_view path,
                          const pb::Descriptor* md,
                          std::vector<Violation>* out) {
   for (int i = 0; i < md->enum_type_count(); ++i) {
@@ -53,8 +55,10 @@ void WalkEnumsForMessage(const std::string& path,
     for (int j = 0; j < e->value_count(); ++j) {
       const pb::EnumValueDescriptor* v = e->value(j);
       if (IsReservedName(v->name())) {
-        out->push_back(Violation{
-            path, std::string(v->full_name()), std::string(v->name()), ViolationKind::kEnumValue});
+        out->push_back(Violation{std::string(path),
+                                 std::string(v->full_name()),
+                                 std::string(v->name()),
+                                 ViolationKind::kEnumValue});
       }
     }
   }
@@ -64,13 +68,16 @@ void WalkEnumsForMessage(const std::string& path,
 // per draft -01 §3.13: the annotated field must be a repeated
 // message-typed field, and the annotation value must name a singular
 // string field of the element message.
-void CheckKeyOption(const std::string& path,
+void CheckKeyOption(std::string_view path,
                     const pb::FieldDescriptor* f,
                     const std::string& key_name,
                     std::vector<Violation>* out) {
   auto violation = [&](std::string detail) {
-    out->push_back(Violation{
-        path, std::string(f->full_name()), key_name, ViolationKind::kKeyOption, std::move(detail)});
+    out->push_back(Violation{std::string(path),
+                             std::string(f->full_name()),
+                             key_name,
+                             ViolationKind::kKeyOption,
+                             std::move(detail)});
   };
   if (!f->is_repeated() || f->is_map() || f->cpp_type() != pb::FieldDescriptor::CPPTYPE_MESSAGE) {
     violation("(pxf.key) is valid only on repeated message-typed fields");
@@ -92,13 +99,13 @@ void CheckKeyOption(const std::string& path,
 // it is valid only on a field one literal can denote. A literal that does
 // not parse as the field's type stays a decode-time error. The rejected set
 // is the set ApplyDefault in decode_fast.cc cannot honor; keep them in step.
-void CheckDefaultPlacement(const std::string& path,
+void CheckDefaultPlacement(std::string_view path,
                            const pb::FieldDescriptor* f,
                            const FieldAnnotations& a,
                            std::vector<Violation>* out) {
   const std::string annotation = a.default_from_carrier ? "@default" : "(pxf.default)";
   auto violation = [&](std::string detail) {
-    out->push_back(Violation{path,
+    out->push_back(Violation{std::string(path),
                              std::string(f->full_name()),
                              *a.def,
                              ViolationKind::kDefaultOption,
@@ -131,7 +138,7 @@ struct OneofDefault {
 // would attach meaning to a detail authors may change. `annotated` is in
 // field order, and a group is reported at its first member, so the order
 // does not depend on anything but the schema.
-void CheckOneofDefaultCap(const std::string& path,
+void CheckOneofDefaultCap(std::string_view path,
                           const std::vector<OneofDefault>& annotated,
                           std::vector<Violation>* out) {
   for (size_t i = 0; i < annotated.size(); ++i) {
@@ -152,7 +159,7 @@ void CheckOneofDefaultCap(const std::string& path,
                                names + ")";
     for (const OneofDefault& m : annotated) {
       if (m.oneof != oneof) continue;
-      out->push_back(Violation{path,
+      out->push_back(Violation{std::string(path),
                                std::string(m.field->full_name()),
                                m.def,
                                ViolationKind::kDefaultOption,
@@ -172,65 +179,75 @@ void CheckWktShape(std::string_view path, const pb::Descriptor* md, std::vector<
   }
 }
 
-void WalkShapes(std::string_view path, const pb::Descriptor* md, std::vector<Violation>* out) {
-  CheckWktShape(path, md, out);
-  for (int i = 0; i < md->nested_type_count(); ++i) WalkShapes(path, md->nested_type(i), out);
+// CheckFieldAnnotations reports the annotation rules for one field, and adds
+// it to oneof_defaults when it is a oneof member carrying a default.
+void CheckFieldAnnotations(std::string_view path,
+                           const pb::FieldDescriptor* f,
+                           std::vector<OneofDefault>* oneof_defaults,
+                           std::vector<Violation>* out) {
+  if (auto key = KeyFieldName(f); key.has_value()) {
+    CheckKeyOption(path, f, *key, out);
+  }
+  const FieldAnnotations a = ReadFieldAnnotations(f);
+  if (!a.default_problem.empty()) {
+    out->push_back(Violation{std::string(path),
+                             std::string(f->full_name()),
+                             "",
+                             ViolationKind::kDefaultOption,
+                             a.default_problem,
+                             a.default_from_carrier});
+  }
+  if (a.def.has_value()) CheckDefaultPlacement(path, f, a, out);
+  if (a.required && a.def.has_value()) {
+    const std::string required = a.required_from_carrier ? "@required" : "(pxf.required)";
+    const std::string def = a.default_from_carrier ? "@default" : "(pxf.default)";
+    out->push_back(Violation{std::string(path),
+                             std::string(f->full_name()),
+                             *a.def,
+                             ViolationKind::kRequiredOption,
+                             required + " and " + def +
+                                 " are exclusive on one field: the first rejects a document "
+                                 "where the field is absent, and the second treats it as "
+                                 "supplied",
+                             a.required_from_carrier});
+  }
+  // real_containing_oneof leaves out proto3 `optional`, whose synthetic
+  // oneof has no sibling to choose instead.
+  if (const pb::OneofDescriptor* oneof = f->real_containing_oneof(); oneof != nullptr) {
+    if (a.required) {
+      const std::string required = a.required_from_carrier ? "@required" : "(pxf.required)";
+      out->push_back(Violation{std::string(path),
+                               std::string(f->full_name()),
+                               std::string(oneof->name()),
+                               ViolationKind::kRequiredOption,
+                               required + " is not valid on a member of oneof \"" +
+                                   std::string(oneof->name()) +
+                                   "\": read per field it demands that one arm always be "
+                                   "chosen, which makes every other arm undecodable",
+                               a.required_from_carrier});
+    }
+    if (a.def.has_value()) {
+      oneof_defaults->push_back(OneofDefault{oneof, f, *a.def, a.default_from_carrier});
+    }
+  }
 }
 
-void WalkMessages(const std::string& path, const pb::Descriptor* md, std::vector<Violation>* out) {
+void WalkMessages(std::string_view path, const pb::Descriptor* md, std::vector<Violation>* out) {
   CheckWktShape(path, md, out);
   std::vector<OneofDefault> oneof_defaults;
   for (int i = 0; i < md->field_count(); ++i) {
     const pb::FieldDescriptor* f = md->field(i);
     if (IsReservedName(f->name())) {
-      out->push_back(Violation{
-          path, std::string(f->full_name()), std::string(f->name()), ViolationKind::kField});
-    }
-    if (auto key = KeyFieldName(f); key.has_value()) {
-      CheckKeyOption(path, f, *key, out);
-    }
-    const FieldAnnotations a = ReadFieldAnnotations(f);
-    if (!a.default_problem.empty()) {
-      out->push_back(Violation{path,
+      out->push_back(Violation{std::string(path),
                                std::string(f->full_name()),
-                               "",
-                               ViolationKind::kDefaultOption,
-                               a.default_problem,
-                               a.default_from_carrier});
+                               std::string(f->name()),
+                               ViolationKind::kField});
     }
-    if (a.def.has_value()) CheckDefaultPlacement(path, f, a, out);
-    if (a.required && a.def.has_value()) {
-      const std::string required = a.required_from_carrier ? "@required" : "(pxf.required)";
-      const std::string def = a.default_from_carrier ? "@default" : "(pxf.default)";
-      out->push_back(Violation{path,
-                               std::string(f->full_name()),
-                               *a.def,
-                               ViolationKind::kRequiredOption,
-                               required + " and " + def +
-                                   " are exclusive on one field: the first rejects a document "
-                                   "where the field is absent, and the second treats it as "
-                                   "supplied",
-                               a.required_from_carrier});
-    }
-    // real_containing_oneof leaves out proto3 `optional`, whose synthetic
-    // oneof has no sibling to choose instead.
-    if (const pb::OneofDescriptor* oneof = f->real_containing_oneof(); oneof != nullptr) {
-      if (a.required) {
-        const std::string required = a.required_from_carrier ? "@required" : "(pxf.required)";
-        out->push_back(Violation{path,
-                                 std::string(f->full_name()),
-                                 std::string(oneof->name()),
-                                 ViolationKind::kRequiredOption,
-                                 required + " is not valid on a member of oneof \"" +
-                                     std::string(oneof->name()) +
-                                     "\": read per field it demands that one arm always be "
-                                     "chosen, which makes every other arm undecodable",
-                                 a.required_from_carrier});
-      }
-      if (a.def.has_value()) {
-        oneof_defaults.push_back(OneofDefault{oneof, f, *a.def, a.default_from_carrier});
-      }
-    }
+    // A field declared with no options shares the default instance and can
+    // carry no annotation. Most fields in a closure are like this, and this
+    // runs on every decode.
+    if (&f->options() == &pb::FieldOptions::default_instance()) continue;
+    CheckFieldAnnotations(path, f, &oneof_defaults, out);
   }
   CheckOneofDefaultCap(path, oneof_defaults, out);
   // Skip synthetic oneofs (those generated for proto3 optional fields).
@@ -243,8 +260,10 @@ void WalkMessages(const std::string& path, const pb::Descriptor* md, std::vector
   for (int i = 0; i < real_oneofs; ++i) {
     const pb::OneofDescriptor* o = md->oneof_decl(i);
     if (IsReservedName(o->name())) {
-      out->push_back(Violation{
-          path, std::string(o->full_name()), std::string(o->name()), ViolationKind::kOneof});
+      out->push_back(Violation{std::string(path),
+                               std::string(o->full_name()),
+                               std::string(o->name()),
+                               ViolationKind::kOneof});
     }
   }
   for (int i = 0; i < md->nested_type_count(); ++i) {
@@ -327,8 +346,8 @@ bool ImportsProtowire(const pb::FileDescriptor* fd) {
 // fields of opts. Nothing declares these numbers any more, so that is where
 // they land.
 template <size_t N>
-void RetiredIn(const std::string& path,
-               const std::string& element,
+void RetiredIn(std::string_view path,
+               std::string_view element,
                const char* kind,
                const pb::Message& opts,
                const RetiredNumber (&table)[N],
@@ -339,8 +358,8 @@ void RetiredIn(const std::string& path,
     for (const RetiredNumber& r : table) {
       if (r.number != number) continue;
       const std::string num = std::to_string(number);
-      out->push_back(Violation{path,
-                               element,
+      out->push_back(Violation{std::string(path),
+                               std::string(element),
                                num,
                                ViolationKind::kRetiredNumber,
                                "option number " + num + " on " + kind + " was " + r.was +
@@ -352,7 +371,7 @@ void RetiredIn(const std::string& path,
   }
 }
 
-void WalkRetiredEnum(const std::string& path,
+void WalkRetiredEnum(std::string_view path,
                      const pb::EnumDescriptor* e,
                      std::vector<Violation>* out) {
   RetiredIn(
@@ -368,7 +387,7 @@ void WalkRetiredEnum(const std::string& path,
   }
 }
 
-void WalkRetiredMessage(const std::string& path,
+void WalkRetiredMessage(std::string_view path,
                         const pb::Descriptor* md,
                         std::vector<Violation>* out) {
   RetiredIn(
@@ -387,9 +406,7 @@ void WalkRetiredMessage(const std::string& path,
   }
 }
 
-void WalkRetired(const std::string& path,
-                 const pb::FileDescriptor* fd,
-                 std::vector<Violation>* out) {
+void WalkRetired(std::string_view path, const pb::FileDescriptor* fd, std::vector<Violation>* out) {
   RetiredIn(path, path, "FileOptions", fd->options(), kRetiredFile, out);
   for (int i = 0; i < fd->message_type_count(); ++i) {
     WalkRetiredMessage(path, fd->message_type(i), out);
@@ -475,7 +492,7 @@ namespace {
 
 // FileViolations appends one file's own violations, in walk order.
 void FileViolations(const pb::FileDescriptor* fd, std::vector<Violation>* out) {
-  std::string path(fd->name());
+  const std::string_view path = fd->name();
   for (int i = 0; i < fd->message_type_count(); ++i) {
     WalkMessages(path, fd->message_type(i), out);
   }
@@ -491,34 +508,25 @@ void FileViolations(const pb::FileDescriptor* fd, std::vector<Violation>* out) {
 // runs on every decode, and paths like google/protobuf/timestamp.proto are too
 // long to store inline. Import closures are small, so a linear scan of the
 // seen files beats a map.
+//
+// Every file in the closure is walked, Google's included, as protowire-go
+// does: a schema can put its own file at any of their paths. protowire-go
+// memoizes the result per descriptor. This does not, because a descriptor can
+// die with its pool and a cache keyed by address could answer for a new one.
+// The one exception is the descriptor.proto linked into libprotobuf: it is the
+// file FieldOptions itself comes from, so it cannot be a schema's own, and
+// PxfSchema.GoogleProtobufFilesAreConformant pins that it reports nothing.
 struct ClosureWalk {
   std::vector<const pb::FileDescriptor*> seen;
   std::vector<Violation> out;
 
   void Walk(const pb::FileDescriptor* fd) {
     if (fd == nullptr) return;
-    // Google's own files are in nearly every closure (every annotated
-    // schema imports pxf/annotations.proto and, through it,
-    // descriptor.proto: 54 messages and enums no PXF document can name) and
-    // cannot carry a reserved name or an annotation: they declare no
-    // null / true / false and import none of the annotations. Walking
-    // descriptor.proto measured ~1.1 µs, a quarter of a small document's
-    // decode, and walking timestamp.proto and duration.proto 190 ns, so
-    // they are not walked; the assumption is pinned by
-    // PxfSchema.GoogleProtobufFilesAreConformant.
-    const std::string_view path = fd->name();
-    if (path == "google/protobuf/descriptor.proto") return;
+    static const pb::FileDescriptor* const linked = pb::FileDescriptorProto::descriptor()->file();
+    if (fd == linked) return;
     if (std::find(seen.begin(), seen.end(), fd) != seen.end()) return;
     seen.push_back(fd);
-    if (path.rfind("google/protobuf/", 0) == 0) {
-      // A schema can put its own timestamp.proto here, the likeliest place
-      // for a redefinition, so these still get the shape check.
-      for (int i = 0; i < fd->message_type_count(); ++i) {
-        WalkShapes(path, fd->message_type(i), &out);
-      }
-    } else {
-      FileViolations(fd, &out);
-    }
+    FileViolations(fd, &out);
     for (int i = 0; i < fd->dependency_count(); ++i) Walk(fd->dependency(i));
   }
 };
