@@ -30,7 +30,8 @@
 #include "protowire/pxf/options.h"
 #include "protowire/pxf/parser.h"  // Document, Parse
 #include "protowire/pxf/result.h"
-#include "protowire/pxf/schema.h"  // ValidateDescriptor, Violation
+#include "protowire/pxf/rewriter.h"  // Rewriter
+#include "protowire/pxf/schema.h"    // ValidateDescriptor, Violation
 
 namespace protowire::pxf {
 
