@@ -31,8 +31,14 @@ struct Decimal {
   bool IsZero() const { return unscaled.empty(); }
 };
 
-// Byte-backed BigFloat. value = (-1)^negative × mantissa × 2^exponent, where
-// mantissa is interpreted as an integer in [0, 2^prec). prec == 0 means zero.
+// Byte-backed BigFloat. value = (-1)^negative × mantissa × 2^exponent, rounded
+// to prec bits, half to even. prec == 0 means zero, signed by negative.
+//
+// The fields hold the value, not one spelling of it. Unmarshal narrows a mantissa
+// wider than prec, and Marshal writes the one form protowire-go writes: mantissa
+// a prec-bit integer with its top bit set. So {25, -5, 64} marshals as a mantissa
+// of eight bytes and exponent -64, and reads back with those fields, the same
+// number.
 struct BigFloat {
   std::vector<uint8_t> mantissa;
   int32_t exponent = 0;

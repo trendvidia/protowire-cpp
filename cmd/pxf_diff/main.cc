@@ -690,12 +690,14 @@ void QuoteRunes() {
 int RunRewrite(const char* dir);  // rewrite.cc
 
 int RunStreams(const std::string& root, const std::string& dir, const std::string& proto_dir);
+int RunPbBig(const std::string& file);  // pbbig.cc
 
 int main(int argc, char** argv) {
   if (argc == 5 && std::string_view(argv[1]) == "--streams") {
     return RunStreams(argv[2], argv[3], argv[4]);
   }
   if (argc == 3 && std::string_view(argv[1]) == "--rewrite") return RunRewrite(argv[2]);
+  if (argc == 3 && std::string_view(argv[1]) == "--pb-big") return RunPbBig(argv[2]);
   if (argc == 2 && std::string_view(argv[1]) == "--quote-runes") {
     QuoteRunes();
     return 0;

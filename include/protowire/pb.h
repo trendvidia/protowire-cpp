@@ -73,6 +73,9 @@ struct UnmarshalOptions {
   int max_nesting_depth = 0;
   // Bounds the magnitude of pxf.Decimal.scale on the wire (a digit count).
   int max_numeric_literal_digits = 0;
+  // Bounds the magnitude of a pxf.BigFloat value's binary exponent: exponent
+  // plus the mantissa's bit length.
+  int max_big_float_exponent = 0;
   int max_repeated_count = 0;
 };
 
@@ -177,6 +180,7 @@ struct Limits {
   int max_message_size = kMaxMessageSize;
   int max_depth = kMaxNestingDepth;
   int max_digits = kMaxNumericLiteralDigits;
+  int max_big_float_exp = kMaxBigFloatExponent;
   int max_repeated = kMaxRepeatedCount;
 };
 
@@ -185,6 +189,7 @@ inline Limits ResolveLimits(const UnmarshalOptions& o) {
   if (o.max_message_size > 0) lim.max_message_size = o.max_message_size;
   if (o.max_nesting_depth > 0) lim.max_depth = o.max_nesting_depth;
   if (o.max_numeric_literal_digits > 0) lim.max_digits = o.max_numeric_literal_digits;
+  if (o.max_big_float_exponent > 0) lim.max_big_float_exp = o.max_big_float_exponent;
   if (o.max_repeated_count > 0) lim.max_repeated = o.max_repeated_count;
   return lim;
 }
@@ -221,7 +226,9 @@ Status UnmarshalBigIntMsg(std::span<const uint8_t> data, BigInt& out);
 // max_digits bounds |Decimal.scale| (HARDENING.md MaxNumericLiteralDigits);
 // 0 selects the default.
 Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out, int max_digits);
-Status UnmarshalBigFloatMsg(std::span<const uint8_t> data, BigFloat& out);
+// max_exponent bounds the value's binary exponent (HARDENING.md
+// MaxBigFloatExponent); 0 selects the default.
+Status UnmarshalBigFloatMsg(std::span<const uint8_t> data, BigFloat& out, int max_exponent);
 
 // ---- Marshal dispatch ----------------------------------------------------
 
@@ -237,6 +244,9 @@ inline bool IsZeroValue(const T& v) {
     return v.empty();
   } else if constexpr (IsVector<T>::value) {
     return v.empty();
+  } else if constexpr (std::is_same_v<T, BigFloat>) {
+    // Only +0 at prec 0 is the empty message: -0 there is {negative: true}.
+    return v.prec == 0 && !v.negative;
   } else if constexpr (IsBigNumber<T>::value) {
     return v.IsZero();
   } else {
@@ -488,7 +498,7 @@ inline Status UnmarshalScalar(std::span<const uint8_t> data,
     if (n < 0) return Status::Error("corrupt embedded message");
     consumed = n;
     if (depth + 1 > lim.max_depth) return DepthError(lim);
-    return UnmarshalBigFloatMsg(bytes, v);
+    return UnmarshalBigFloatMsg(bytes, v, lim.max_big_float_exp);
   } else if constexpr (HasFields<T>::value) {
     std::span<const uint8_t> bytes;
     int n = wire::ConsumeBytes(data, bytes);

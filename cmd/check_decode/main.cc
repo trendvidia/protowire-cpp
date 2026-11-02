@@ -341,6 +341,7 @@ bool PbDecodeAs(std::string_view data, const Limits& lim, std::string* err) {
   opts.max_message_size = lim.max_message_size;
   opts.max_nesting_depth = lim.max_nesting_depth;
   opts.max_numeric_literal_digits = lim.max_numeric_literal_digits;
+  opts.max_big_float_exponent = lim.max_big_float_exponent;
   opts.max_repeated_count = lim.max_repeated_count;
   std::span<const uint8_t> bytes(reinterpret_cast<const uint8_t*>(data.data()), data.size());
   auto status = protowire::pb::Unmarshal(bytes, msg, opts);
