@@ -149,3 +149,51 @@ message Nulls {
   Inner inner = 5;
   google.protobuf.FieldMask _null = 6;
 }
+
+// Empty (pxf.required) lists and maps, which a row writes as [] or {}, and
+// which a body of a cell keeps rather than leaves out. These are the messages
+// of protowire-go's dataset_write_required_list_test.go.
+message ReqKey {
+  string id = 1;
+}
+
+message ReqInts {
+  repeated int32 f = 1 [(pxf.required) = true];
+}
+message ReqStrs {
+  repeated string f = 1 [(pxf.required) = true];
+}
+message ReqBools {
+  repeated bool f = 1 [(pxf.required) = true];
+}
+message ReqBys {
+  repeated bytes f = 1 [(pxf.required) = true];
+}
+message ReqDbls {
+  repeated double f = 1 [(pxf.required) = true];
+}
+message ReqFlts {
+  repeated float f = 1 [(pxf.required) = true];
+}
+message ReqEnums {
+  repeated Color f = 1 [(pxf.required) = true];
+}
+message ReqMsgs {
+  repeated Deep f = 1 [(pxf.required) = true];
+}
+message ReqKeyed {
+  repeated ReqKey f = 1 [(pxf.required) = true, (pxf.key) = "id"];
+}
+message ReqMaps {
+  map<string, int32> f = 1 [(pxf.required) = true];
+}
+message ReqMsgMaps {
+  map<string, Deep> f = 1 [(pxf.required) = true];
+}
+
+message ReqOuter {
+  ReqInts ints = 1;
+  ReqMaps maps = 2;
+  repeated ReqInts list = 3;
+  map<string, ReqMaps> by_key = 4;
+}
