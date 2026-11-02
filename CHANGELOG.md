@@ -16,6 +16,7 @@ number says nothing about any other port. See the Releases section of
 - **`pb::Encoder` and `pb::Decoder`,** with `SetMaxFrameSize`, `kDefaultMaxFrameSize` and `kErrFramingCorrupt` (#83), protobuf's length-delimited framing over a `std::ostream` and `std::istream`. `Decoder` takes `UnmarshalOptions`, applied to each frame.
 - **`sbe::Codec::NewEncoder` and `NewDecoder`,** with the same limits, framed by a Simple Open Framing Header, and **`sbe::Codec::UnmarshalDescriptor`,** which allocates the message (#83).
 - **`pb::UnmarshalOptions::max_big_float_exponent`** (#93). `pb::Unmarshal` now refuses a `pxf.BigFloat` whose binary exponent is past `kMaxBigFloatExponent`, on both signs, before it stores the value (protowire#281). **This rejects messages that were accepted before.** `check_decode` passes `--limit MaxBigFloatExponent=N` to the pb decoder as well.
+- **`pb::UnmarshalOptions::validator` and `report`** (#83), the seam `pxf` and `sbe` already have, on the decoded struct and on each frame of a `Decoder`. A validator overrides the new `check::Validator::ValidateStruct`, or derives from `check::StructValidator<T>`. An existing validator compiles unchanged, and returns an engine error for a struct. The seam is now in `protowire/check_seam.h`, which needs no protobuf; `protowire/check.h` includes it.
 - **`IsEOF`, `IsUnexpectedEOF`, and `pb::IsFramingCorrupt` and `sbe::IsFramingCorrupt`,** which test a `Decode` result. `Decode` reports the end of a stream as a non-OK `Status`, as Go reports `io.EOF`.
 
 ### Changed

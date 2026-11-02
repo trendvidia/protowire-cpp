@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 TrendVidia, LLC.
 #include "protowire/pb.h"
+#include "protowire/check.h"
 
 #include <gtest/gtest.h>
 
@@ -8,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -636,6 +638,142 @@ TEST(Pb, BigNumbersDecodeToValues) {
   EXPECT_TRUE(got.balance.IsZero());
   EXPECT_FALSE(got.balance.negative);
   EXPECT_FALSE(got.price.negative);
+}
+
+// protowire-go's encoding/pb/options_test.go.
+namespace check = protowire::check;
+
+struct ValMsg {
+  std::string Name;
+  int32_t Port = 0;
+  PROTOWIRE_FIELDS(ValMsg, PROTOWIRE_FIELD(1, Name), PROTOWIRE_FIELD(2, Port))
+};
+
+class FakeValidator : public check::StructValidator<ValMsg> {
+ public:
+  explicit FakeValidator(protowire::StatusOr<check::Report> result) : result_(std::move(result)) {}
+  protowire::StatusOr<check::Report> ValidateValue(const ValMsg& v) override {
+    got = &v;
+    ++calls;
+    return result_;
+  }
+  const ValMsg* got = nullptr;
+  int calls = 0;
+
+ private:
+  protowire::StatusOr<check::Report> result_;
+};
+
+check::Report PortOutOfRange() {
+  return check::Report{{{"port", "test.range", "port out of range"}}};
+}
+
+TEST(PbValidator, Violation) {
+  ValMsg in;
+  in.Name = "x";
+  in.Port = 99999;
+  FakeValidator v{PortOutOfRange()};
+  check::Report report;
+  protowire::pb::UnmarshalOptions opts;
+  opts.validator = &v;
+  opts.report = &report;
+  ValMsg got;
+  auto st = Unmarshal(Marshal(in), got, opts);
+  ASSERT_FALSE(st.ok());
+  EXPECT_EQ(st.message(), "check: port: port out of range (test.range)");
+  ASSERT_EQ(report.violations.size(), 1u);
+  EXPECT_EQ(report.violations[0].rule_id, "test.range");
+  // The validator sees the same decoded struct, fully populated.
+  EXPECT_EQ(v.got, &got);
+  EXPECT_EQ(got.Name, "x");
+  EXPECT_EQ(got.Port, 99999);
+}
+
+TEST(PbValidator, CleanPass) {
+  ValMsg in;
+  in.Name = "x";
+  FakeValidator v{check::Report{}};
+  protowire::pb::UnmarshalOptions opts;
+  opts.validator = &v;
+  ValMsg got;
+  EXPECT_TRUE(Unmarshal(Marshal(in), got, opts).ok());
+  EXPECT_EQ(got.Name, "x");
+  EXPECT_EQ(v.calls, 1);
+}
+
+TEST(PbValidator, EngineError) {
+  ValMsg in;
+  in.Name = "x";
+  FakeValidator v{protowire::Status::Error("engine failure")};
+  protowire::pb::UnmarshalOptions opts;
+  opts.validator = &v;
+  ValMsg got;
+  auto st = Unmarshal(Marshal(in), got, opts);
+  ASSERT_FALSE(st.ok());
+  EXPECT_EQ(st.message(), "engine failure");
+}
+
+TEST(PbValidator, ZeroValue) {
+  ValMsg in;
+  in.Name = "x";
+  ValMsg got;
+  EXPECT_TRUE(Unmarshal(Marshal(in), got, protowire::pb::UnmarshalOptions{}).ok());
+}
+
+TEST(PbValidator, NotCalledWhenDecodeFails) {
+  FakeValidator v{check::Report{}};
+  protowire::pb::UnmarshalOptions opts;
+  opts.validator = &v;
+  ValMsg got;
+  EXPECT_FALSE(Unmarshal(std::vector<uint8_t>{0x0a, 0x7f}, got, opts).ok());
+  EXPECT_EQ(v.calls, 0);
+}
+
+// An engine for messages alone, as the two protocheck adapters are, returns an
+// engine error for a struct and does not need to change.
+TEST(PbValidator, EngineForMessagesRefusesAStruct) {
+  class MessagesOnly : public check::Validator {
+   public:
+    protowire::StatusOr<check::Report> Validate(const google::protobuf::Message&) override {
+      return check::Report{};
+    }
+  } v;
+  protowire::pb::UnmarshalOptions opts;
+  opts.validator = &v;
+  ValMsg got;
+  auto st = Unmarshal(Marshal(ValMsg{}), got, opts);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("not a protobuf message"), std::string::npos) << st.ToString();
+}
+
+TEST(PbValidator, StructValidatorRefusesAnotherType) {
+  FakeValidator v{check::Report{}};
+  protowire::pb::UnmarshalOptions opts;
+  opts.validator = &v;
+  BigNumStruct got;
+  auto st = Unmarshal(std::vector<uint8_t>{}, got, opts);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("another type"), std::string::npos) << st.ToString();
+  EXPECT_EQ(v.calls, 0);
+}
+
+TEST(PbValidator, RunsOnEachFrameOfADecoder) {
+  ValMsg in;
+  in.Name = "x";
+  std::ostringstream out;
+  protowire::pb::Encoder enc(&out);
+  ASSERT_TRUE(enc.Encode(in).ok());
+  ASSERT_TRUE(enc.Encode(in).ok());
+  std::istringstream stream(out.str());
+  FakeValidator v{PortOutOfRange()};
+  protowire::pb::UnmarshalOptions opts;
+  opts.validator = &v;
+  protowire::pb::Decoder dec(&stream, opts);
+  ValMsg got;
+  // A frame that fails validation leaves the stream at the next one.
+  EXPECT_FALSE(dec.Decode(got).ok());
+  EXPECT_FALSE(dec.Decode(got).ok());
+  EXPECT_EQ(v.calls, 2);
 }
 
 // proto3 packs repeated numerics by default; the reference's pb.Marshal

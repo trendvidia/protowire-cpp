@@ -52,6 +52,7 @@
 #include <utility>
 #include <vector>
 
+#include "protowire/check_seam.h"
 #include "protowire/detail/status.h"
 #include "protowire/detail/stream.h"
 #include "protowire/detail/utf8.h"
@@ -78,6 +79,12 @@ struct UnmarshalOptions {
   // plus the mantissa's bit length.
   int max_big_float_exponent = 0;
   int max_repeated_count = 0;
+  // Runs after a successful decode, on the decoded struct, and on each frame of
+  // a Decoder. Derive from check::StructValidator<T>, or override
+  // check::Validator::ValidateStruct. Not owned; may be null.
+  check::Validator* validator = nullptr;
+  // Receives the validator's report, since a Status has only text. May be null.
+  check::Report* report = nullptr;
 };
 
 // ---- Field descriptor ---------------------------------------------------
@@ -679,7 +686,8 @@ Status Unmarshal(std::span<const uint8_t> data, T& v, UnmarshalOptions opts) {
     return Status::Error("input of " + std::to_string(data.size()) +
                          " bytes exceeds MaxMessageSize=" + std::to_string(lim.max_message_size));
   }
-  return detail::UnmarshalStruct(data, v, /*depth=*/0, lim);
+  if (Status st = detail::UnmarshalStruct(data, v, /*depth=*/0, lim); !st.ok()) return st;
+  return check::ValidateStruct(opts.validator, v, opts.report);
 }
 
 template <class T>

@@ -12,6 +12,11 @@
 #include "protowire/detail/status.h"
 #include "protowire/detail/wire.h"
 
+// protowire_pb does not link protobuf, so its headers must not pull it in.
+#ifdef GOOGLE_PROTOBUF_VERSION
+#error "protowire/pb.h includes protobuf"
+#endif
+
 namespace protowire::pb {
 
 namespace {
