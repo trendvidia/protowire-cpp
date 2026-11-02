@@ -9,7 +9,9 @@
 #include <utility>
 #include <vector>
 
-#include "protowire/detail/status.h"
+// Relative, as in pb_big.h: clang-tidy runs on this header with flags it infers,
+// and they do not always carry the include root.
+#include "detail/status.h"
 
 namespace google::protobuf {
 class Message;
