@@ -250,8 +250,19 @@ TEST(PbGoParity, UnknownGroupIsSkipped) {
 }
 
 TEST(PbGoParity, DeepGroupsAreBounded) {
+  // Past the limit: this overflowed the stack on Windows when it recursed.
   std::vector<uint8_t> data(200000, 0x7b);
   EXPECT_EQ(UnmarshalBytes(data).message(), "corrupt field 15");
+
+  // Go's limit, from running protowire.ConsumeFieldValue: 10001 groups nest
+  // and 10002 do not.
+  const auto nested = [](size_t n) {
+    std::vector<uint8_t> out(n, 0x7b);
+    out.insert(out.end(), n, 0x7c);
+    return out;
+  };
+  EXPECT_TRUE(UnmarshalBytes(nested(10001)).ok());
+  EXPECT_EQ(UnmarshalBytes(nested(10002)).message(), "corrupt field 15");
 }
 
 }  // namespace

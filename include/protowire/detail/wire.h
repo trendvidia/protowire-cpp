@@ -121,15 +121,16 @@ inline int ConsumeBytes(std::span<const uint8_t> data, std::span<const uint8_t>&
   return n + static_cast<int>(len);
 }
 
-// The depth to which ConsumeFieldValue follows nested groups, as Go's
+// How many groups ConsumeFieldValue follows inside the first, as Go's
 // protowire.DefaultRecursionLimit.
-inline constexpr int kFieldValueRecursionLimit = 10000;
+inline constexpr size_t kFieldValueRecursionLimit = 10000;
 
 // Skips a single field's value. Returns bytes consumed, or -1 on error.
-inline int ConsumeFieldValue(std::span<const uint8_t> data,
-                             FieldNumber num,
-                             WireType type,
-                             int depth = kFieldValueRecursionLimit) {
+//
+// Nested groups are followed with a list rather than by recursion. The limit
+// is Go's, and Go's stacks grow: ten thousand frames from a hostile message
+// overflow a fixed C++ stack.
+inline int ConsumeFieldValue(std::span<const uint8_t> data, FieldNumber num, WireType type) {
   switch (type) {
     case kVarint: {
       uint64_t v;
@@ -147,28 +148,32 @@ inline int ConsumeFieldValue(std::span<const uint8_t> data,
       uint32_t v;
       return ConsumeFixed32(data, v);
     }
-    case kStartGroup: {
-      if (depth < 0) return -1;
-      const size_t size = data.size();
-      for (;;) {
-        FieldNumber inner;
-        WireType inner_type;
-        int n = ConsumeTag(data, inner, inner_type);
-        if (n < 0) return -1;
-        data = data.subspan(n);
-        if (inner_type == kEndGroup) {
-          if (inner != num) return -1;
-          return static_cast<int>(size - data.size());
-        }
-        n = ConsumeFieldValue(data, inner, inner_type, depth - 1);
-        if (n < 0) return -1;
-        data = data.subspan(n);
-      }
-    }
-    case kEndGroup:
+    case kStartGroup:
+      break;
+    default:
       return -1;
   }
-  return -1;
+  const size_t size = data.size();
+  std::vector<FieldNumber> open = {num};
+  while (!open.empty()) {
+    FieldNumber inner;
+    WireType inner_type;
+    int n = ConsumeTag(data, inner, inner_type);
+    if (n < 0) return -1;
+    data = data.subspan(n);
+    if (inner_type == kEndGroup) {
+      if (inner != open.back()) return -1;
+      open.pop_back();
+    } else if (inner_type == kStartGroup) {
+      if (open.size() > kFieldValueRecursionLimit) return -1;
+      open.push_back(inner);
+    } else {
+      n = ConsumeFieldValue(data, inner, inner_type);  // not a group, so one level
+      if (n < 0) return -1;
+      data = data.subspan(n);
+    }
+  }
+  return static_cast<int>(size - data.size());
 }
 
 }  // namespace protowire::wire

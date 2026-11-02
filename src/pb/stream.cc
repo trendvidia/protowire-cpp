@@ -16,7 +16,7 @@ Status Corrupt(const std::string& why) {
   return Status::Error(std::string(kErrFramingCorrupt) + ": " + why);
 }
 
-enum class VarintEnd { kOk, kEOF, kUnexpectedEOF, kError, kOverflow };
+enum class VarintEnd : uint8_t { kOk, kEOF, kUnexpectedEOF, kError, kOverflow };
 
 // ReadUvarint is Go's binary.ReadUvarint, byte by byte, since a frame's length
 // cannot be read past its last byte.

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <ios>
 #include <istream>
 
@@ -32,7 +33,7 @@ namespace detail {
 // The text of a stream that failed for a reason other than its end.
 inline constexpr const char* kErrRead = "read failed";
 
-enum class ReadEnd { kFull, kEOF, kError };
+enum class ReadEnd : uint8_t { kFull, kEOF, kError };
 
 // ReadFull is Go's io.ReadFull over an istream. *got is the count read. A
 // stream that ended on an earlier call is read again, since it may have grown,
