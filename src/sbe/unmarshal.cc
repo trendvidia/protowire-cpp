@@ -5,9 +5,12 @@
 #include "protowire/sbe.h"
 
 #include <cstring>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
+
+#include <google/protobuf/dynamic_message.h>
 
 #include "protowire/detail/utf8.h"
 
@@ -132,6 +135,34 @@ Status Codec::Unmarshal(std::span<const uint8_t> data, pb::Message* msg) const {
     return Status::Error("sbe: no template registered for " +
                          std::string(msg->GetDescriptor()->full_name()));
   }
+  return UnmarshalInto(data, *tmpl, msg);
+}
+
+StatusOr<std::shared_ptr<pb::Message>> Codec::UnmarshalDescriptor(std::span<const uint8_t> data,
+                                                                  const pb::Descriptor* desc) const {
+  if (data.size() > static_cast<size_t>(max_message_size_)) {
+    return Status::Error("sbe: input of " + std::to_string(data.size()) +
+                         " bytes exceeds MaxMessageSize=" + std::to_string(max_message_size_));
+  }
+  const auto* tmpl = TemplateByName(desc->full_name());
+  if (!tmpl) {
+    return Status::Error("sbe: no template registered for " + std::string(desc->full_name()));
+  }
+  struct Owned {
+    pb::DynamicMessageFactory factory;
+    std::unique_ptr<pb::Message> message;
+  };
+  auto owned = std::make_shared<Owned>();
+  owned->message.reset(owned->factory.GetPrototype(desc)->New());
+  pb::Message* msg = owned->message.get();
+  if (Status st = UnmarshalInto(data, *tmpl, msg); !st.ok()) return st;
+  return std::shared_ptr<pb::Message>(owned, msg);
+}
+
+Status Codec::UnmarshalInto(std::span<const uint8_t> data,
+                            const MessageTemplate& message_template,
+                            pb::Message* msg) const {
+  const MessageTemplate* tmpl = &message_template;
   if (data.size() < 8) return Status::Error("sbe: buffer too short for header");
   // HARDENING.md § SBE validation, steps 1 and 2: the root block fits, and
   // the wire block is at least the template's — schema evolution may make

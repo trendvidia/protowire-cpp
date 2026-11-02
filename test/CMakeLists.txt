@@ -17,7 +17,7 @@ target_link_libraries(protowire_detail_test PRIVATE
 gtest_discover_tests(protowire_detail_test)
 
 if(TARGET protowire_pb AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pb_test.cc)
-  add_executable(protowire_pb_test pb_test.cc)
+  add_executable(protowire_pb_test pb_test.cc pb_stream_test.cc)
   target_link_libraries(protowire_pb_test PRIVATE
     protowire_pb GTest::gtest GTest::gtest_main)
   gtest_discover_tests(protowire_pb_test)
@@ -57,7 +57,7 @@ endif()
 
 if(TARGET protowire_sbe)
   set(_sbe_test_srcs "")
-  foreach(f sbe_codec_test sbe_convert_test sbe_navigation_test)
+  foreach(f sbe_codec_test sbe_convert_test sbe_navigation_test sbe_stream_test)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${f}.cc)
       list(APPEND _sbe_test_srcs ${f}.cc)
     endif()

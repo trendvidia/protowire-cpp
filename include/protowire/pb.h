@@ -39,6 +39,7 @@
 #pragma once
 
 #include <cstdint>
+#include <iosfwd>
 #include <map>
 #include <memory>
 #include <optional>
@@ -52,6 +53,7 @@
 #include <vector>
 
 #include "protowire/detail/status.h"
+#include "protowire/detail/stream.h"
 #include "protowire/detail/wire.h"
 #include "protowire/limits.h"
 #include "protowire/pb_big.h"
@@ -664,6 +666,68 @@ template <class T>
 Status Unmarshal(const std::vector<uint8_t>& data, T& v, UnmarshalOptions opts = {}) {
   return Unmarshal(std::span<const uint8_t>(data.data(), data.size()), v, opts);
 }
+
+// ---- Streaming ----------------------------------------------------------
+
+// kDefaultMaxFrameSize caps each frame at 16 MiB by default. Streams face
+// per-connection adversary risk; callers can adjust with SetMaxFrameSize. It is
+// below kMaxMessageSize, which still bounds a frame's payload through the
+// Decoder's UnmarshalOptions when a caller raises the frame cap.
+inline constexpr int kDefaultMaxFrameSize = 16 << 20;
+
+// kErrFramingCorrupt opens the error of invalid length-prefix framing: a
+// corrupt varint, a frame larger than the maximum. The byte stream is then
+// desynchronized and the decoder is permanently unusable. IsFramingCorrupt tests
+// for it.
+inline constexpr const char* kErrFramingCorrupt = "pb: stream framing corrupt";
+bool IsFramingCorrupt(const Status& st);
+
+// Encoder writes length-prefixed pb-encoded messages using the
+// protobuf-delimited framing convention (varint length + body). w must outlive
+// the encoder.
+class Encoder {
+ public:
+  explicit Encoder(std::ostream* w) : w_(w) {}
+
+  template <class T>
+  Status Encode(const T& v) {
+    return WriteFrame(Marshal(v));
+  }
+
+ private:
+  Status WriteFrame(std::span<const uint8_t> body);
+
+  std::ostream* w_;
+};
+
+// Decoder reads length-prefixed pb-encoded messages, each under opts. r must
+// outlive the decoder.
+//
+// Decode returns a Status for which IsEOF is true at the end of the stream, and
+// IsUnexpectedEOF when it ends inside a frame. A framing error is sticky: every
+// later call returns it. A frame whose body does not decode is not, since the
+// next frame is at a known boundary.
+class Decoder {
+ public:
+  explicit Decoder(std::istream* r, UnmarshalOptions opts = {}) : r_(r), opts_(opts) {}
+
+  void SetMaxFrameSize(int64_t n) { max_ = n; }
+
+  template <class T>
+  Status Decode(T& v) {
+    if (Status st = ReadFrame(); !st.ok()) return st;
+    return Unmarshal(std::span<const uint8_t>(buf_.data(), buf_.size()), v, opts_);
+  }
+
+ private:
+  Status ReadFrame();
+
+  std::istream* r_;
+  UnmarshalOptions opts_;
+  std::vector<uint8_t> buf_;  // reused; Unmarshal copies what it keeps
+  int64_t max_ = kDefaultMaxFrameSize;
+  Status err_;
+};
 
 }  // namespace protowire::pb
 
