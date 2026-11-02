@@ -389,6 +389,159 @@ class AstDump {
   std::string& out_;
 };
 
+// The same list as defaultTable in tools/godiff. The literals are a schema's,
+// so they cover what strconv and package time accept and refuse.
+const char* const kDefaultTable[] = {"",
+                                     "0",
+                                     "1",
+                                     "-1",
+                                     "+1",
+                                     "+",
+                                     "-",
+                                     "007",
+                                     "5x",
+                                     "x",
+                                     "true",
+                                     "false",
+                                     "True",
+                                     "RED",
+                                     "COLOR_UNSPECIFIED",
+                                     "2147483647",
+                                     "2147483648",
+                                     "-2147483648",
+                                     "-2147483649",
+                                     "4294967295",
+                                     "4294967296",
+                                     "9223372036854775807",
+                                     "9223372036854775808",
+                                     "-9223372036854775808",
+                                     "-9223372036854775809",
+                                     "18446744073709551615",
+                                     "18446744073709551616",
+                                     "99999999999999999999999x",
+                                     "1.5",
+                                     "-1.5",
+                                     ".5",
+                                     "5.",
+                                     ".",
+                                     "1e3",
+                                     "1E3",
+                                     "1e",
+                                     "1e+",
+                                     "1e999",
+                                     "-1e999",
+                                     "1e-999",
+                                     "1e39",
+                                     "3.5e38",
+                                     "0x10",
+                                     "0x1p4",
+                                     "0x1P-2",
+                                     "0x",
+                                     "0xp1",
+                                     "1_000",
+                                     "1__0",
+                                     "_1",
+                                     "1_",
+                                     "0x_1p0",
+                                     "0x1_0p0",
+                                     "inf",
+                                     "+inf",
+                                     "-Inf",
+                                     "INF",
+                                     "infinity",
+                                     "+Infinity",
+                                     "infin",
+                                     "nan",
+                                     "NaN",
+                                     "+nan",
+                                     "-nan",
+                                     "aGk=",
+                                     "aGk",
+                                     "a-_b",
+                                     "!!",
+                                     "a",
+                                     "2024-01-02T03:04:05Z",
+                                     "2024-01-02T3:04:05Z",
+                                     "2024-01-02T03:04:05.5+01:00",
+                                     "2024-13-02T03:04:05Z",
+                                     "2024-02-30T03:04:05Z",
+                                     "2023-02-29T00:00:00Z",
+                                     "2024-00-02T03:04:05Z",
+                                     "2024-01-00T03:04:05Z",
+                                     "2024-01-02T24:04:05Z",
+                                     "2024-01-02T03:60:05Z",
+                                     "2024-01-02T03:04:60Z",
+                                     "2024-01-02",
+                                     "2024-01-02T",
+                                     "2024-01-02T03",
+                                     "2024-01-02T03:04",
+                                     "2024-01-02T03:04:05",
+                                     "2024-01-02T03:04:05+25:00",
+                                     "2024-01-02T03:04:05+01:61",
+                                     "2024-01-02T03:04:05*01:00",
+                                     "2024-01-02T03:04:05+0100",
+                                     "2024-01-02T03:04:05Zjunk",
+                                     "2024-01-02t03:04:05Z",
+                                     "2o24-01-02T03:04:05Z",
+                                     "202",
+                                     "2024x01",
+                                     "2024-1-02T03:04:05Z",
+                                     "2024-01-2T03:04:05Z",
+                                     "2024-01-02 03:04:05Z",
+                                     "2024-01-02T03:4:05Z",
+                                     "2024-01-02T03:04:5Z",
+                                     "1s",
+                                     "1h30m",
+                                     "1.5ms",
+                                     "-1s",
+                                     "+1s",
+                                     "1",
+                                     "5q",
+                                     "1s2",
+                                     ".s",
+                                     "1.s",
+                                     "s",
+                                     "9999999999h",
+                                     "2\xc2\xb5s",
+                                     "2\xce\xbcs",
+                                     "5\xc3\xa9",
+                                     "\"q\"",
+                                     "a\\b",
+                                     "tab\there",
+                                     "12345678901234567890",
+                                     "-12345678901234567890",
+                                     "1.25",
+                                     "-1.25",
+                                     "1.2.3",
+                                     "1p53",
+                                     "1.5p10",
+                                     "1e5"};
+
+// Defaults applies every literal to every field of diff.v1.Kinds.
+int Defaults(const std::string& root, const std::string& dir, const std::string& proto_dir) {
+  Schema s(root, dir, {"diff.proto"}, proto_dir);
+  const gpb::Descriptor* d = s.Find("diff.v1.Kinds");
+  if (s.failed() || d == nullptr) return 2;
+  for (int i = 0; i < d->field_count(); ++i) {
+    const gpb::FieldDescriptor* fd = d->field(i);
+    std::vector<std::string> table(std::begin(kDefaultTable), std::end(kDefaultTable));
+    table.push_back(std::string(5000, '9'));
+    table.push_back("-" + std::string(5000, '9'));
+    table.push_back("1." + std::string(5000, '0'));
+    for (const std::string& def : table) {
+      auto m = s.New(d);
+      Status st = pxf::ApplyDefault(m.get(), fd, def);
+      const std::string label = std::string(fd->name()) + " " + Quote(def) + ": ";
+      if (st.ok()) {
+        std::cout << label << "ok " << BytesOf(*m) << "\n";
+      } else {
+        std::cout << label << Text(st) << "\nbytes: " << BytesOf(*m) << "\n";
+      }
+    }
+  }
+  return 0;
+}
+
 // Tolerant runs Parse and ParseTolerant over text, every prefix of it and every
 // text with one byte removed: the states an editor buffer goes through.
 void Tolerant(const std::string& root, const std::string& file) {
@@ -459,6 +612,9 @@ int main(int argc, char** argv) {
   if (argc == 2 && std::string_view(argv[1]) == "--quote-runes") {
     QuoteRunes();
     return 0;
+  }
+  if (argc == 5 && std::string_view(argv[1]) == "--defaults") {
+    return Defaults(argv[2], argv[3], argv[4]);
   }
   if (argc == 3 && std::string_view(argv[1]) == "--tolerant") {
     std::ifstream manifest(argv[2]);

@@ -57,7 +57,7 @@ endfunction()
 # --- Foundation -----------------------------------------------------------
 add_library(protowire_detail STATIC
   src/detail/base64.cc
-  src/detail/go_quote.cc
+  src/detail/go_quote.cc src/detail/go_strconv.cc
   src/detail/rfc3339.cc
   src/detail/duration.cc
   src/detail/status.cc)

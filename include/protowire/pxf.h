@@ -41,6 +41,14 @@ StatusOr<Result> UnmarshalFull(std::string_view data,
                                google::protobuf::Message* msg,
                                UnmarshalOptions opts = {});
 
+// ApplyDefault parses def, a (pxf.default) literal, and writes it to fd of msg.
+// A caller running its own post-decode pass, as a layered config does after
+// merging (UnmarshalOptions::skip_post_decode), reads the literal with
+// GetDefault. A rejected literal leaves msg unchanged.
+Status ApplyDefault(google::protobuf::Message* msg,
+                    const google::protobuf::FieldDescriptor* fd,
+                    std::string_view def);
+
 // --- Encoding --------------------------------------------------------------
 
 StatusOr<std::string> Marshal(const google::protobuf::Message& msg, MarshalOptions opts = {});

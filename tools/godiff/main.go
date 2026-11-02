@@ -342,6 +342,34 @@ func (d astDump) document(doc *pxf.Document) {
 	d.entries("", doc.Entries)
 }
 
+// defaultTable is the same list in cmd/pxf_diff. The literals are a schema's,
+// so they cover what strconv and package time accept and refuse.
+var defaultTable = []string{"","0","1","-1","+1","+","-","007","5x","x","true","false","True","RED","COLOR_UNSPECIFIED","2147483647","2147483648","-2147483648","-2147483649","4294967295","4294967296","9223372036854775807","9223372036854775808","-9223372036854775808","-9223372036854775809","18446744073709551615","18446744073709551616","99999999999999999999999x","1.5","-1.5",".5","5.",".","1e3","1E3","1e","1e+","1e999","-1e999","1e-999","1e39","3.5e38","0x10","0x1p4","0x1P-2","0x","0xp1","1_000","1__0","_1","1_","0x_1p0","0x1_0p0","inf","+inf","-Inf","INF","infinity","+Infinity","infin","nan","NaN","+nan","-nan","aGk=","aGk","a-_b","!!","a","2024-01-02T03:04:05Z","2024-01-02T3:04:05Z","2024-01-02T03:04:05.5+01:00","2024-13-02T03:04:05Z","2024-02-30T03:04:05Z","2023-02-29T00:00:00Z","2024-00-02T03:04:05Z","2024-01-00T03:04:05Z","2024-01-02T24:04:05Z","2024-01-02T03:60:05Z","2024-01-02T03:04:60Z","2024-01-02","2024-01-02T","2024-01-02T03","2024-01-02T03:04","2024-01-02T03:04:05","2024-01-02T03:04:05+25:00","2024-01-02T03:04:05+01:61","2024-01-02T03:04:05*01:00","2024-01-02T03:04:05+0100","2024-01-02T03:04:05Zjunk","2024-01-02t03:04:05Z","2o24-01-02T03:04:05Z","202","2024x01","2024-1-02T03:04:05Z","2024-01-2T03:04:05Z","2024-01-02 03:04:05Z","2024-01-02T03:4:05Z","2024-01-02T03:04:5Z","1s","1h30m","1.5ms","-1s","+1s","1","5q","1s2",".s","1.s","s","9999999999h","2\xc2\xb5s","2\xce\xbcs","5\xc3\xa9","\"q\"","a\\b","tab\there","12345678901234567890","-12345678901234567890","1.25","-1.25","1.2.3","1p53","1.5p10","1e5"}
+
+// defaults applies every literal to every field of diff.v1.Kinds.
+func defaults(root, dir, protoDir string) {
+	s, err := compile(root, dir, []string{"diff.proto"}, protoDir)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(2)
+	}
+	d := s.find("diff.v1.Kinds")
+	w := bufio.NewWriter(os.Stdout)
+	defer w.Flush()
+	for i := 0; i < d.Fields().Len(); i++ {
+		fd := d.Fields().Get(i)
+		for _, def := range append(defaultTable, strings.Repeat("9", 5000), "-"+strings.Repeat("9", 5000), "1."+strings.Repeat("0", 5000)) {
+			m := dynamicpb.NewMessage(d)
+			if err := pxf.ApplyDefault(m.ProtoReflect(), fd, def); err != nil {
+				fmt.Fprintf(w, "%s %s: %s\n", fd.Name(), quote(def), status(err))
+				fmt.Fprintf(w, "bytes: %s\n", bytesOf(m))
+				continue
+			}
+			fmt.Fprintf(w, "%s %s: ok %s\n", fd.Name(), quote(def), bytesOf(m))
+		}
+	}
+}
+
 // tolerant runs Parse and ParseTolerant over text, every prefix of it and
 // every text with one byte removed: the states an editor buffer goes through.
 func tolerant(root, file string) {
@@ -376,6 +404,10 @@ func tolerant(root, file string) {
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--quote-runes" {
 		quoteRunes()
+		return
+	}
+	if len(os.Args) == 5 && os.Args[1] == "--defaults" {
+		defaults(os.Args[2], os.Args[3], os.Args[4])
 		return
 	}
 	if len(os.Args) == 3 && os.Args[1] == "--tolerant" {

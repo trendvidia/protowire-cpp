@@ -63,6 +63,18 @@ if ! diff "$work/go.quote" "$work/cpp.quote" > "$work/quote.diff"; then
 fi
 echo "$quoted strings quoted alike"
 
+# A table of literals on every kind of field, through ApplyDefault.
+"$work/godiff.bin" --defaults "$here/testdata" differential "$spec/proto" > "$work/go.defaults"
+"$pxf_diff" --defaults "$here/testdata" differential "$spec/proto" > "$work/cpp.defaults"
+if ! cmp -s "$work/go.defaults" "$work/cpp.defaults"; then
+  echo "ApplyDefault differs:" >&2
+  diff "$work/go.defaults" "$work/cpp.defaults" | head -"${DEFAULTS_DIFF_LINES:-40}" >&2 || true
+  exit 1
+fi
+applied=$(LC_ALL=C awk '/: ok /{n++} END{print n+0}' "$work/go.defaults")
+refused=$(LC_ALL=C awk '/^bytes: /{n++} END{print n+0}' "$work/go.defaults")
+echo "$((applied + refused)) defaults applied alike: $applied accepted, $refused refused"
+
 # Every prefix and every one-byte deletion of every document, the states an
 # editor buffer goes through, through Parse and ParseTolerant.
 "$work/godiff.bin" --tolerant "$manifest" > "$work/go.tolerant"
