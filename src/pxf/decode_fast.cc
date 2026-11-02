@@ -1053,7 +1053,6 @@ Status DirectDecoder::DecodeLiteral(Message* sub, const FieldDescriptor* fd, boo
   // Wrapper sugar: bare scalar → wrapper.value.
   if (WrapperInnerCppType(d) != -1 && kind != TokenKind::kLBrace) {
     const FieldDescriptor* inner = d->FindFieldByName("value");
-    if (!inner) return PosError(current_.pos, "wrapper missing 'value' field");
     return ConsumeScalar(sub, inner, fd, /*repeated=*/false);
   }
   // pxf.Secret sugar: a string → secret.value.
@@ -1199,6 +1198,11 @@ Status DirectDecoder::DecodeSecretBlock(Message* sub, const std::string& path) {
                           " (expected value/hint/fingerprint)");
     }
     const FieldDescriptor* fd = desc->FindFieldByName(name);
+    if (fd == nullptr) {
+      return PosError(name_pos,
+                      "unknown pxf.Secret field " + detail::GoQuote(name) +
+                          ": this schema does not declare it");
+    }
     if (Status s = CheckBindOnce(fd, name_pos, &scope); !s.ok()) return s;
     if (name == "value") {
       if (Status st = on_secret_(path, current_.value); !st.ok()) {

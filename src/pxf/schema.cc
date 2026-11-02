@@ -162,7 +162,23 @@ void CheckOneofDefaultCap(const std::string& path,
   }
 }
 
+void CheckWktShape(std::string_view path, const pb::Descriptor* md, std::vector<Violation>* out) {
+  if (std::string problem = WktShapeProblem(md); !problem.empty()) {
+    out->push_back(Violation{std::string(path),
+                             std::string(md->full_name()),
+                             "",
+                             ViolationKind::kWellKnownShape,
+                             std::move(problem)});
+  }
+}
+
+void WalkShapes(std::string_view path, const pb::Descriptor* md, std::vector<Violation>* out) {
+  CheckWktShape(path, md, out);
+  for (int i = 0; i < md->nested_type_count(); ++i) WalkShapes(path, md->nested_type(i), out);
+}
+
 void WalkMessages(const std::string& path, const pb::Descriptor* md, std::vector<Violation>* out) {
+  CheckWktShape(path, md, out);
   std::vector<OneofDefault> oneof_defaults;
   for (int i = 0; i < md->field_count(); ++i) {
     const pb::FieldDescriptor* f = md->field(i);
@@ -417,6 +433,8 @@ const char* ViolationKindName(ViolationKind k) {
       return "default field option";
     case ViolationKind::kRetiredNumber:
       return "retired option number";
+    case ViolationKind::kWellKnownShape:
+      return "well-known type shape";
   }
   return "unknown";
 }
@@ -440,6 +458,10 @@ std::string Violation::ToString() const {
   if (kind == ViolationKind::kRetiredNumber) {
     return file + ": \"" + element + "\": " + detail + " (STABILITY.md promise 3)";
   }
+  if (kind == ViolationKind::kWellKnownShape) {
+    return file + ": message \"" + element + "\" redefines a well-known type: " + detail +
+           " (draft -01 §wkt-shapes)";
+  }
   return file + ": " + ViolationKindName(kind) + " \"" + element + "\" uses PXF-reserved name \"" +
          name + "\" (draft §3.13)";
 }
@@ -462,32 +484,41 @@ void FileViolations(const pb::FileDescriptor* fd, std::vector<Violation>* out) {
 }
 
 // ClosureWalk carries the state of one ValidateFile traversal over the
-// import closure (draft -01 § Scope of Bind-Time Checks). Deduplication
-// is by path rather than by descriptor identity: within one closure a
-// path names one file, and the diamond — A imports B and C, both
-// importing D — is the common shape that would otherwise report D's
-// violations twice. Import closures are small, so a linear scan of the
-// seen paths beats a map.
+// import closure (draft -01 § Scope of Bind-Time Checks). The diamond — A
+// imports B and C, both importing D — is the common shape that would
+// otherwise report D's violations twice. A pool holds one descriptor per
+// path, so identity deduplicates by path, and it allocates no string: this
+// runs on every decode, and paths like google/protobuf/timestamp.proto are too
+// long to store inline. Import closures are small, so a linear scan of the
+// seen files beats a map.
 struct ClosureWalk {
-  std::vector<std::string> seen;
+  std::vector<const pb::FileDescriptor*> seen;
   std::vector<Violation> out;
 
   void Walk(const pb::FileDescriptor* fd) {
     if (fd == nullptr) return;
-    std::string path(fd->name());
-    // Google's own files — descriptor.proto and the well-known types —
-    // are in nearly every closure (every annotated schema imports
-    // pxf/annotations.proto and, through it, descriptor.proto: 54
-    // messages and enums no PXF document can name) and cannot carry a
-    // violation: they declare no null / true / false and import none of
-    // the annotations. Walking descriptor.proto measured ~1.1 µs, a
-    // quarter of a small document's decode, so it is skipped; the
-    // assumption is pinned by PxfSchema.GoogleProtobufFilesAreConformant,
-    // which validates each of them directly.
-    if (path.rfind("google/protobuf/", 0) == 0) return;
-    if (std::find(seen.begin(), seen.end(), path) != seen.end()) return;
-    seen.push_back(std::move(path));
-    FileViolations(fd, &out);
+    // Google's own files are in nearly every closure (every annotated
+    // schema imports pxf/annotations.proto and, through it,
+    // descriptor.proto: 54 messages and enums no PXF document can name) and
+    // cannot carry a reserved name or an annotation: they declare no
+    // null / true / false and import none of the annotations. Walking
+    // descriptor.proto measured ~1.1 µs, a quarter of a small document's
+    // decode, and walking timestamp.proto and duration.proto 190 ns, so
+    // they are not walked; the assumption is pinned by
+    // PxfSchema.GoogleProtobufFilesAreConformant.
+    const std::string_view path = fd->name();
+    if (path == "google/protobuf/descriptor.proto") return;
+    if (std::find(seen.begin(), seen.end(), fd) != seen.end()) return;
+    seen.push_back(fd);
+    if (path.rfind("google/protobuf/", 0) == 0) {
+      // A schema can put its own timestamp.proto here, the likeliest place
+      // for a redefinition, so these still get the shape check.
+      for (int i = 0; i < fd->message_type_count(); ++i) {
+        WalkShapes(path, fd->message_type(i), &out);
+      }
+    } else {
+      FileViolations(fd, &out);
+    }
     for (int i = 0; i < fd->dependency_count(); ++i) Walk(fd->dependency(i));
   }
 };

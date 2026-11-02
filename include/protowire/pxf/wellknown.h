@@ -14,7 +14,10 @@
 
 namespace protowire::pxf {
 
-// Detection helpers for google.protobuf.* well-known types.
+// Detection helpers for google.protobuf.* well-known types. Each of these,
+// and the wrapper, big-number and pxf.Secret checks below, needs the shape of
+// draft -01 §wkt-shapes as well as the name: a message that has the name
+// without the fields is an ordinary message.
 bool IsTimestamp(const google::protobuf::Descriptor* d);
 bool IsDuration(const google::protobuf::Descriptor* d);
 bool IsAny(const google::protobuf::Descriptor* d);
@@ -32,15 +35,14 @@ void SetDurationFields(google::protobuf::Message* msg, int64_t seconds, int32_t 
 void ReadTimestampFields(const google::protobuf::Message& msg, int64_t* seconds, int32_t* nanos);
 void ReadDurationFields(const google::protobuf::Message& msg, int64_t* seconds, int32_t* nanos);
 
-// pxf.BigInt / pxf.Decimal / pxf.BigFloat detection by full name.
+// pxf.BigInt / pxf.Decimal / pxf.BigFloat detection.
 bool IsBigInt(const google::protobuf::Descriptor* d);
 bool IsDecimal(const google::protobuf::Descriptor* d);
 bool IsBigFloat(const google::protobuf::Descriptor* d);
 
 // IsSecret reports a pxf.Secret. It has a scalar form, `pw = "x"`, which
 // binds to `value`, and Marshal writes that form when `hint` and
-// `fingerprint` are both empty. A message of this name without a string
-// `value` is an ordinary message.
+// `fingerprint` are both empty. Either of those may be undeclared.
 bool IsSecret(const google::protobuf::Descriptor* d);
 
 // IsDefaultable reports a message type one PXF literal can denote, which is
@@ -68,7 +70,8 @@ StatusOr<std::string> ReadBigFloatAsString(const google::protobuf::Message& msg)
 
 // Locates the `_null` `google.protobuf.FieldMask` field on a descriptor used
 // to track null fields across protobuf binary round-trips. Returns nullptr
-// if the descriptor has no field named exactly `_null` of type FieldMask.
+// if the descriptor has no field named exactly `_null` of type FieldMask, or
+// that FieldMask does not have the well-known shape.
 const google::protobuf::FieldDescriptor* FindNullMaskField(const google::protobuf::Descriptor* d);
 
 // Appends a dotted field path to the FieldMask's `paths` repeated string.

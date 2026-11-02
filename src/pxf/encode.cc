@@ -124,10 +124,7 @@ bool SecretHasMetadata(const Message& secret) {
   const Reflection* r = secret.GetReflection();
   for (const char* name : {"hint", "fingerprint"}) {
     const FieldDescriptor* fd = d->FindFieldByName(name);
-    if (fd != nullptr && fd->type() == FieldDescriptor::TYPE_STRING && !fd->is_repeated() &&
-        !r->GetString(secret, fd).empty()) {
-      return true;
-    }
+    if (fd != nullptr && !r->GetString(secret, fd).empty()) return true;
   }
   return false;
 }
