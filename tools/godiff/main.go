@@ -242,9 +242,154 @@ func quoteRunes() {
 	}
 }
 
+// astDump writes a document's whole AST with every span, in a form the C++
+// side repeats byte for byte.
+type astDump struct{ w *bufio.Writer }
+
+func pos(p pxf.Position) string { return fmt.Sprintf("%d:%d:%d", p.Line, p.Column, p.Offset) }
+
+func (d astDump) comments(ind string, cs []pxf.Comment) {
+	for _, c := range cs {
+		fmt.Fprintf(d.w, "%scomment %s %s\n", ind, pos(c.Pos), quote(c.Text))
+	}
+}
+
+func (d astDump) value(ind string, v pxf.Value) {
+	start, end := pxf.ValueSpan(v)
+	fmt.Fprintf(d.w, "%s%s-%s ", ind, pos(start), pos(end))
+	switch v := v.(type) {
+	case *pxf.StringVal:
+		fmt.Fprintf(d.w, "string %s\n", quote(v.Value))
+	case *pxf.IntVal:
+		fmt.Fprintf(d.w, "int %s p%s\n", v.Raw, v.Prec)
+	case *pxf.FloatVal:
+		fmt.Fprintf(d.w, "float %s p%s\n", v.Raw, v.Prec)
+	case *pxf.BoolVal:
+		fmt.Fprintf(d.w, "bool %v\n", v.Value)
+	case *pxf.BytesVal:
+		fmt.Fprintf(d.w, "bytes %s\n", hex.EncodeToString(v.Value))
+	case *pxf.NullVal:
+		fmt.Fprintf(d.w, "null\n")
+	case *pxf.IdentVal:
+		fmt.Fprintf(d.w, "ident %s\n", v.Name)
+	case *pxf.TimestampVal:
+		fmt.Fprintf(d.w, "timestamp %s\n", v.Raw)
+	case *pxf.DurationVal:
+		fmt.Fprintf(d.w, "duration %s\n", v.Raw)
+	case *pxf.BadVal:
+		fmt.Fprintf(d.w, "bad\n")
+	case *pxf.ListVal:
+		fmt.Fprintf(d.w, "list\n")
+		for _, e := range v.Elements {
+			d.value(ind+" ", e)
+		}
+	case *pxf.BlockVal:
+		fmt.Fprintf(d.w, "blockval\n")
+		d.entries(ind+" ", v.Entries)
+	}
+}
+
+func (d astDump) entries(ind string, es []pxf.Entry) {
+	for _, e := range es {
+		start, end := pxf.EntrySpan(e)
+		fmt.Fprintf(d.w, "%s%s-%s ", ind, pos(start), pos(end))
+		switch e := e.(type) {
+		case *pxf.Assignment:
+			fmt.Fprintf(d.w, "assign %s %v trail=%s\n", quote(e.Key), e.KeyQuoted, quote(e.TrailingComment))
+			d.comments(ind, e.LeadingComments)
+			d.value(ind+" ", e.Value)
+		case *pxf.MapEntry:
+			fmt.Fprintf(d.w, "map %s %v trail=%s\n", quote(e.Key), e.KeyQuoted, quote(e.TrailingComment))
+			d.comments(ind, e.LeadingComments)
+			d.value(ind+" ", e.Value)
+		case *pxf.TypeEntry:
+			fmt.Fprintf(d.w, "type %s trail=%s\n", quote(e.URL), quote(e.TrailingComment))
+			d.comments(ind, e.LeadingComments)
+		case *pxf.Block:
+			fmt.Fprintf(d.w, "block %s %v\n", quote(e.Name), e.NameQuoted)
+			d.comments(ind, e.LeadingComments)
+			d.entries(ind+" ", e.Entries)
+		}
+	}
+}
+
+func (d astDump) document(doc *pxf.Document) {
+	fmt.Fprintf(d.w, "type_url %s body %d\n", quote(doc.TypeURL), doc.BodyOffset)
+	d.comments("", doc.LeadingComments)
+	for _, x := range doc.Directives {
+		fmt.Fprintf(d.w, "directive %s %s %s [%s] %s %v\n", pos(x.Pos), x.Name, x.Type,
+			strings.Join(x.Prefixes, " "), quote(string(x.Body)), x.Body != nil)
+		d.comments("", x.LeadingComments)
+	}
+	for _, x := range doc.Protos {
+		fmt.Fprintf(d.w, "proto %s %s %s %s\n", pos(x.Pos), x.Shape, x.TypeName, quote(string(x.Body)))
+		d.comments("", x.LeadingComments)
+	}
+	for _, x := range doc.Datasets {
+		fmt.Fprintf(d.w, "dataset %s %s [%s]\n", pos(x.Pos), x.Type, strings.Join(x.Columns, " "))
+		d.comments("", x.LeadingComments)
+		for _, r := range x.Rows {
+			fmt.Fprintf(d.w, "row %s\n", pos(r.Pos))
+			for _, c := range r.Cells {
+				if c == nil {
+					fmt.Fprintf(d.w, " empty\n")
+				} else {
+					d.value(" ", c)
+				}
+			}
+		}
+	}
+	d.entries("", doc.Entries)
+}
+
+// tolerant runs Parse and ParseTolerant over text, every prefix of it and
+// every text with one byte removed: the states an editor buffer goes through.
+func tolerant(root, file string) {
+	text, err := os.ReadFile(filepath.Join(root, file))
+	if err != nil {
+		return
+	}
+	w := bufio.NewWriter(os.Stdout)
+	defer w.Flush()
+	d := astDump{w}
+	one := func(label string, n int, in []byte) {
+		fmt.Fprintf(w, "=== %s %s %d\n", file, label, n)
+		doc, perr := pxf.Parse(in)
+		fmt.Fprintf(w, "parse: %s\n", status(perr))
+		if perr == nil {
+			d.document(doc)
+		}
+		tdoc, errs := pxf.ParseTolerant(in)
+		for i := range errs {
+			fmt.Fprintf(w, "error %d %s\n", errs[i].Pos.Offset, quote(errs[i].Error()))
+		}
+		d.document(tdoc)
+	}
+	for i := 0; i <= len(text); i++ {
+		one("prefix", i, text[:i])
+	}
+	for i := 0; i < len(text); i++ {
+		one("drop", i, append(append([]byte{}, text[:i]...), text[i+1:]...))
+	}
+}
+
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--quote-runes" {
 		quoteRunes()
+		return
+	}
+	if len(os.Args) == 3 && os.Args[1] == "--tolerant" {
+		f, err := os.Open(os.Args[2])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		defer f.Close()
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			p := strings.Split(sc.Text(), "\t")
+			tolerant(p[0], p[4])
+		}
 		return
 	}
 	if len(os.Args) != 3 {

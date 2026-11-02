@@ -47,6 +47,13 @@ class Result {
     return out;
   }
 
+  // PresentFields is every field the input mentioned: those with a value and
+  // those set to null. A layered config unions these across its layers, then
+  // runs defaults and required checks on the union.
+  std::vector<std::string> PresentFields() const {
+    return std::vector<std::string>(present_.begin(), present_.end());
+  }
+
   void MarkPresent(std::string path) { present_.insert(std::move(path)); }
   void MarkNull(std::string path) {
     null_.insert(path);

@@ -63,6 +63,22 @@ if ! diff "$work/go.quote" "$work/cpp.quote" > "$work/quote.diff"; then
 fi
 echo "$quoted strings quoted alike"
 
+# Every prefix and every one-byte deletion of every document, the states an
+# editor buffer goes through, through Parse and ParseTolerant.
+"$work/godiff.bin" --tolerant "$manifest" > "$work/go.tolerant"
+"$pxf_diff" --tolerant "$manifest" > "$work/cpp.tolerant"
+if ! cmp -s "$work/go.tolerant" "$work/cpp.tolerant"; then
+  echo "ParseTolerant differs:" >&2
+  diff "$work/go.tolerant" "$work/cpp.tolerant" | head -"${TOLERANT_DIFF_LINES:-40}" >&2 || true
+  [ -n "${DIFF_OUT:-}" ] && cp "$work/go.tolerant" "$DIFF_OUT.go.tolerant" &&
+    cp "$work/cpp.tolerant" "$DIFF_OUT.cpp.tolerant"
+  exit 1
+fi
+states=$(LC_ALL=C awk '/^=== /{n++} END{print n+0}' "$work/go.tolerant")
+broken=$(LC_ALL=C awk '/^error /{n++} END{print n+0}' "$work/go.tolerant")
+bad=$(LC_ALL=C awk '/[0-9]+ bad$/{n++} END{print n+0}' "$work/go.tolerant")
+echo "$states editor states parsed alike: $broken tolerant errors, $bad placeholders"
+
 docs=$(wc -l < "$manifest" | tr -d ' ')
 for f in go cpp; do
   ran=$(LC_ALL=C awk '/^=== /{n++} END{print n+0}' "$work/$f.out")

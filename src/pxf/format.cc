@@ -123,6 +123,18 @@ class Formatter {
     out_.push_back('\n');
   }
 
+  void FormatEntry(const TypeEntry& e, int level) {
+    WriteComments(e.leading_comments, level);
+    WriteIndent(level);
+    out_ += "@type = ";
+    WriteQuotedString(e.url, out_);
+    if (!e.trailing_comment.empty()) {
+      out_.push_back(' ');
+      out_ += e.trailing_comment;
+    }
+    out_.push_back('\n');
+  }
+
   void FormatEntry(const Block& b, int level) {
     WriteComments(b.leading_comments, level);
     WriteIndent(level);
@@ -160,6 +172,8 @@ class Formatter {
     out_.push_back('"');
   }
   void FormatValueImpl(const NullVal& /*v*/, int /*level*/) { out_ += "null"; }
+  // A placeholder has no source text. See BadVal.
+  void FormatValueImpl(const BadVal& /*v*/, int /*level*/) {}
   void FormatValueImpl(const IdentVal& v, int /*level*/) { out_ += v.name; }
   void FormatValueImpl(const TimestampVal& v, int /*level*/) { out_ += v.raw; }
   void FormatValueImpl(const DurationVal& v, int /*level*/) { out_ += v.raw; }
@@ -186,10 +200,14 @@ class Formatter {
 
 }  // namespace
 
+void AppendValue(std::string* out, const ValuePtr& value) {
+  Formatter f(*out);
+  f.FormatValue(value, 0);
+}
+
 std::string FormatValue(const ValuePtr& value) {
   std::string out;
-  Formatter f(out);
-  f.FormatValue(value, 0);
+  AppendValue(&out, value);
   return out;
 }
 

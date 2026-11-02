@@ -269,6 +269,153 @@ void Run(const std::string& root,
   RunMessage(s, d, text);
 }
 
+// AstDump writes a document's whole AST with every span, in a form the Go side
+// repeats byte for byte.
+class AstDump {
+ public:
+  explicit AstDump(std::string* out) : out_(*out) {}
+
+  void Document(const pxf::Document& doc) {
+    out_ += "type_url " + Quote(doc.type_url) + " body " + std::to_string(doc.body_offset) + "\n";
+    Comments("", doc.leading_comments);
+    for (const auto& x : doc.directives) {
+      out_ += "directive " + Pos(x.pos) + " " + x.name + " " + x.type + " [" + Spaced(x.prefixes) +
+              "] " + Quote(x.body) + " " + Bool(x.has_body) + "\n";
+      Comments("", x.leading_comments);
+    }
+    for (const auto& x : doc.protos) {
+      out_ += "proto " + Pos(x.pos) + " " + pxf::ProtoShapeName(x.shape) + " " + x.type_name + " " +
+              Quote(x.body) + "\n";
+      Comments("", x.leading_comments);
+    }
+    for (const auto& x : doc.datasets) {
+      out_ += "dataset " + Pos(x.pos) + " " + x.type + " [" + Spaced(x.columns) + "]\n";
+      Comments("", x.leading_comments);
+      for (const auto& r : x.rows) {
+        out_ += "row " + Pos(r.pos) + "\n";
+        for (const auto& c : r.cells) {
+          if (c.has_value()) {
+            Value(" ", *c);
+          } else {
+            out_ += " empty\n";
+          }
+        }
+      }
+    }
+    Entries("", doc.entries);
+  }
+
+ private:
+  static std::string Pos(const pxf::Position& p) {
+    return std::to_string(p.line) + ":" + std::to_string(p.column) + ":" + std::to_string(p.offset);
+  }
+  static std::string Bool(bool b) { return b ? "true" : "false"; }
+  static std::string Spaced(const std::vector<std::string>& v) {
+    std::string out;
+    for (size_t i = 0; i < v.size(); ++i) out += (i ? " " : "") + v[i];
+    return out;
+  }
+  void Comments(const std::string& ind, const std::vector<pxf::Comment>& cs) {
+    for (const auto& c : cs) {
+      out_ += ind + "comment " + Pos(c.pos) + " " + Quote(c.text) + "\n";
+    }
+  }
+  void Kind(const pxf::StringVal& v, const std::string&) {
+    out_ += "string " + Quote(v.value) + "\n";
+  }
+  void Kind(const pxf::IntVal& v, const std::string&) {
+    out_ += "int " + v.raw + " p" + v.prec + "\n";
+  }
+  void Kind(const pxf::FloatVal& v, const std::string&) {
+    out_ += "float " + v.raw + " p" + v.prec + "\n";
+  }
+  void Kind(const pxf::BoolVal& v, const std::string&) { out_ += "bool " + Bool(v.value) + "\n"; }
+  void Kind(const pxf::BytesVal& v, const std::string&) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    out_ += "bytes ";
+    for (uint8_t c : v.value) {
+      out_ += kHex[c >> 4];
+      out_ += kHex[c & 0xF];
+    }
+    out_ += "\n";
+  }
+  void Kind(const pxf::NullVal&, const std::string&) { out_ += "null\n"; }
+  void Kind(const pxf::IdentVal& v, const std::string&) { out_ += "ident " + v.name + "\n"; }
+  void Kind(const pxf::TimestampVal& v, const std::string&) { out_ += "timestamp " + v.raw + "\n"; }
+  void Kind(const pxf::DurationVal& v, const std::string&) { out_ += "duration " + v.raw + "\n"; }
+  void Kind(const pxf::BadVal&, const std::string&) { out_ += "bad\n"; }
+  void Kind(const pxf::ListVal& v, const std::string& ind) {
+    out_ += "list\n";
+    for (const auto& e : v.elements) Value(ind + " ", e);
+  }
+  void Kind(const pxf::BlockVal& v, const std::string& ind) {
+    out_ += "blockval\n";
+    Entries(ind + " ", v.entries);
+  }
+  void Value(const std::string& ind, const pxf::ValuePtr& v) {
+    auto [start, end] = pxf::ValueSpan(v);
+    out_ += ind + Pos(start) + "-" + Pos(end) + " ";
+    std::visit([&](const auto& p) { Kind(*p, ind); }, v);
+  }
+  void Entry(const pxf::Assignment& e, const std::string& ind) {
+    out_ += "assign " + Quote(e.key) + " " + Bool(e.key_quoted) +
+            " trail=" + Quote(e.trailing_comment) + "\n";
+    Comments(ind, e.leading_comments);
+    Value(ind + " ", e.value);
+  }
+  void Entry(const pxf::MapEntry& e, const std::string& ind) {
+    out_ += "map " + Quote(e.key) + " " + Bool(e.key_quoted) +
+            " trail=" + Quote(e.trailing_comment) + "\n";
+    Comments(ind, e.leading_comments);
+    Value(ind + " ", e.value);
+  }
+  void Entry(const pxf::TypeEntry& e, const std::string& ind) {
+    out_ += "type " + Quote(e.url) + " trail=" + Quote(e.trailing_comment) + "\n";
+    Comments(ind, e.leading_comments);
+  }
+  void Entry(const pxf::Block& e, const std::string& ind) {
+    out_ += "block " + Quote(e.name) + " " + Bool(e.name_quoted) + "\n";
+    Comments(ind, e.leading_comments);
+    Entries(ind + " ", e.entries);
+  }
+  void Entries(const std::string& ind, const std::vector<pxf::EntryPtr>& es) {
+    for (const auto& e : es) {
+      auto [start, end] = pxf::EntrySpan(e);
+      out_ += ind + Pos(start) + "-" + Pos(end) + " ";
+      std::visit([&](const auto& p) { Entry(*p, ind); }, e);
+    }
+  }
+
+  std::string& out_;
+};
+
+// Tolerant runs Parse and ParseTolerant over text, every prefix of it and every
+// text with one byte removed: the states an editor buffer goes through.
+void Tolerant(const std::string& root, const std::string& file) {
+  std::ifstream in(fs::path(root) / file, std::ios::binary);
+  if (!in) return;
+  std::stringstream ss;
+  ss << in.rdbuf();
+  const std::string text = ss.str();
+  const auto one = [&](const char* label, size_t n, const std::string& input) {
+    std::string out = "=== " + file + " " + label + " " + std::to_string(n) + "\n";
+    AstDump d(&out);
+    auto doc = pxf::Parse(input);
+    out += "parse: " + Text(doc.status()) + "\n";
+    if (doc.ok()) d.Document(*doc);
+    auto t = pxf::ParseTolerant(input);
+    for (const auto& e : t.errors) {
+      out += "error " + std::to_string(e.pos.offset) + " " + Quote(e.ToString()) + "\n";
+    }
+    d.Document(t.document);
+    std::cout << out;
+  };
+  for (size_t i = 0; i <= text.size(); ++i) one("prefix", i, text.substr(0, i));
+  for (size_t i = 0; i < text.size(); ++i) {
+    one("drop", i, text.substr(0, i) + text.substr(i + 1));
+  }
+}
+
 }  // namespace
 
 // QuoteRunes prints every rune through the quoter, so that the differential
@@ -311,6 +458,18 @@ void QuoteRunes() {
 int main(int argc, char** argv) {
   if (argc == 2 && std::string_view(argv[1]) == "--quote-runes") {
     QuoteRunes();
+    return 0;
+  }
+  if (argc == 3 && std::string_view(argv[1]) == "--tolerant") {
+    std::ifstream manifest(argv[2]);
+    std::string line;
+    while (std::getline(manifest, line)) {
+      std::vector<std::string> p;
+      std::istringstream cols(line);
+      std::string col;
+      while (std::getline(cols, col, '\t')) p.push_back(col);
+      Tolerant(p[0], p[4]);
+    }
     return 0;
   }
   if (argc != 3) {
