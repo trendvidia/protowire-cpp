@@ -128,8 +128,7 @@ TEST(PbStream, VarintOverflow) {
   Decoder dec(&s);
   StreamMsg m;
   Status st = dec.Decode(m);
-  EXPECT_EQ(st.message(),
-            "pb: stream framing corrupt: binary: varint overflows a 64-bit integer");
+  EXPECT_EQ(st.message(), "pb: stream framing corrupt: binary: varint overflows a 64-bit integer");
 }
 
 TEST(PbStream, InnerUnmarshalRecoverable) {
@@ -220,6 +219,39 @@ TEST(PbStream, WriteErrorIsReported) {
   std::ostringstream w;
   w.setstate(std::ios::failbit);
   EXPECT_EQ(Encoder(&w).Encode(StreamMsg{}).message(), "write failed");
+}
+
+// Each of these failed or passed differently from Go, which the stream
+// differential found; it runs them through Decode, this runs them directly.
+Status UnmarshalBytes(std::vector<uint8_t> data) {
+  StreamMsg m;
+  return protowire::pb::Unmarshal(data, m);
+}
+
+TEST(PbGoParity, FieldNumberZeroIsACorruptTag) {
+  EXPECT_EQ(UnmarshalBytes({0x00, 0x00}).message(), "corrupt tag");
+}
+
+TEST(PbGoParity, TenthVarintByteMustFit) {
+  std::vector<uint8_t> value(9, 0xff);
+  std::vector<uint8_t> data = {0x08};
+  data.insert(data.end(), value.begin(), value.end());
+  data.push_back(0x02);  // past 64 bits
+  EXPECT_EQ(UnmarshalBytes(data).message(), "field n: corrupt int");
+  data.back() = 0x01;
+  EXPECT_TRUE(UnmarshalBytes(data).ok());
+}
+
+TEST(PbGoParity, UnknownGroupIsSkipped) {
+  // Field 15: start group, one varint field inside, end group; then field 1.
+  EXPECT_TRUE(UnmarshalBytes({0x7b, 0x08, 0x01, 0x7c, 0x08, 0x05}).ok());
+  EXPECT_EQ(UnmarshalBytes({0x7b, 0x08, 0x01, 0x74}).message(), "corrupt field 15");  // wrong end
+  EXPECT_EQ(UnmarshalBytes({0x7c}).message(), "corrupt field 15");  // an end with no start
+}
+
+TEST(PbGoParity, DeepGroupsAreBounded) {
+  std::vector<uint8_t> data(200000, 0x7b);
+  EXPECT_EQ(UnmarshalBytes(data).message(), "corrupt field 15");
 }
 
 }  // namespace

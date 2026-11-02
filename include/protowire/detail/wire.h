@@ -72,6 +72,7 @@ inline int ConsumeVarint(std::span<const uint8_t> data, uint64_t& out) {
   uint64_t v = 0;
   for (size_t i = 0; i < data.size() && i < 10; ++i) {
     uint8_t b = data[i];
+    if (i == 9 && b > 1) return -1;  // past 64 bits
     v |= static_cast<uint64_t>(b & 0x7f) << (i * 7);
     if ((b & 0x80) == 0) {
       out = v;
@@ -85,7 +86,9 @@ inline int ConsumeTag(std::span<const uint8_t> data, FieldNumber& num, WireType&
   uint64_t v;
   int n = ConsumeVarint(data, v);
   if (n < 0) return -1;
-  num = static_cast<FieldNumber>(v >> 3);
+  const uint64_t field = v >> 3;
+  if (field == 0 || field > 0x7fffffff) return -1;
+  num = static_cast<FieldNumber>(field);
   type = static_cast<WireType>(v & 0x7);
   return n;
 }
@@ -118,8 +121,15 @@ inline int ConsumeBytes(std::span<const uint8_t> data, std::span<const uint8_t>&
   return n + static_cast<int>(len);
 }
 
+// The depth to which ConsumeFieldValue follows nested groups, as Go's
+// protowire.DefaultRecursionLimit.
+inline constexpr int kFieldValueRecursionLimit = 10000;
+
 // Skips a single field's value. Returns bytes consumed, or -1 on error.
-inline int ConsumeFieldValue(std::span<const uint8_t> data, FieldNumber num, WireType type) {
+inline int ConsumeFieldValue(std::span<const uint8_t> data,
+                             FieldNumber num,
+                             WireType type,
+                             int depth = kFieldValueRecursionLimit) {
   switch (type) {
     case kVarint: {
       uint64_t v;
@@ -137,9 +147,25 @@ inline int ConsumeFieldValue(std::span<const uint8_t> data, FieldNumber num, Wir
       uint32_t v;
       return ConsumeFixed32(data, v);
     }
-    case kStartGroup:
+    case kStartGroup: {
+      if (depth < 0) return -1;
+      const size_t size = data.size();
+      for (;;) {
+        FieldNumber inner;
+        WireType inner_type;
+        int n = ConsumeTag(data, inner, inner_type);
+        if (n < 0) return -1;
+        data = data.subspan(n);
+        if (inner_type == kEndGroup) {
+          if (inner != num) return -1;
+          return static_cast<int>(size - data.size());
+        }
+        n = ConsumeFieldValue(data, inner, inner_type, depth - 1);
+        if (n < 0) return -1;
+        data = data.subspan(n);
+      }
+    }
     case kEndGroup:
-      // Group support is not needed for proto3.
       return -1;
   }
   return -1;

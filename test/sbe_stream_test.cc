@@ -42,6 +42,10 @@ message Simple {
 message Unregistered {
   uint32 id = 1;
 }
+message Named {
+  option (sbe.template_id) = 3;
+  string name = 1 [(sbe.length) = 4];
+}
 )";
 
 class Errors : public gpb::compiler::MultiFileErrorCollector {
@@ -190,8 +194,7 @@ TEST_F(SbeStream, UnmarshalDescriptor) {
   EXPECT_EQ(Value(**got), -6);
 
   auto missing = codec_->UnmarshalDescriptor(*bytes, unregistered_);
-  EXPECT_EQ(missing.status().message(),
-            "sbe: no template registered for stream.test.Unregistered");
+  EXPECT_EQ(missing.status().message(), "sbe: no template registered for stream.test.Unregistered");
   std::vector<uint8_t> shortened(bytes->begin(), bytes->begin() + 3);
   EXPECT_FALSE(codec_->UnmarshalDescriptor(shortened, simple_).ok());
 }
@@ -206,6 +209,18 @@ TEST_F(SbeStream, UnmarshalDescriptorOutlivesItsCaller) {
     kept = *got;
   }
   EXPECT_EQ(Id(*kept), 5u);
+}
+
+TEST_F(SbeStream, StringDropsOnlyTrailingZeros) {
+  const gpb::Descriptor* named = simple_->file()->FindMessageTypeByName("Named");
+  const uint8_t wire[] = {4, 0, 3, 0, 1, 0, 0, 0, 'A', 0, 'C', 0};
+  auto got = codec_->UnmarshalDescriptor(wire, named);
+  ASSERT_TRUE(got.ok()) << got.status().message();
+  EXPECT_EQ((*got)->GetReflection()->GetString(**got, named->FindFieldByName("name")),
+            std::string("A\0C", 3));
+  auto view = codec_->NewView(wire);
+  ASSERT_TRUE(view.ok()) << view.status().message();
+  EXPECT_EQ(view->String("name"), std::string_view("A\0C", 3));
 }
 
 }  // namespace

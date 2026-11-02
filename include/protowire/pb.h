@@ -88,16 +88,17 @@ struct FieldDef {
   uint32_t number;
   Member Class::*ptr;
   bool zigzag = false;  // signed ints: zigzag (sint32/sint64) vs plain varint (int32/int64)
+  const char* name = "";  // the member, for error text
 };
 
 template <uint32_t N, class Class, class Member>
-constexpr FieldDef<Class, Member> MakeField(Member Class::*ptr) {
-  return {N, ptr, false};
+constexpr FieldDef<Class, Member> MakeField(Member Class::*ptr, const char* name) {
+  return {N, ptr, false, name};
 }
 
 template <uint32_t N, class Class, class Member>
-constexpr FieldDef<Class, Member> MakeFieldZigzag(Member Class::*ptr) {
-  return {N, ptr, true};
+constexpr FieldDef<Class, Member> MakeFieldZigzag(Member Class::*ptr, const char* name) {
+  return {N, ptr, true, name};
 }
 // clang-format on
 
@@ -429,19 +430,19 @@ inline Status UnmarshalScalar(std::span<const uint8_t> data,
   } else if constexpr (std::is_same_v<T, double>) {
     uint64_t bits;
     int n = wire::ConsumeFixed64(data, bits);
-    if (n < 0) return Status::Error("corrupt double");
+    if (n < 0) return Status::Error("corrupt float64");
     consumed = n;
     std::memcpy(&v, &bits, 8);
   } else if constexpr (std::is_same_v<T, float>) {
     uint32_t bits;
     int n = wire::ConsumeFixed32(data, bits);
-    if (n < 0) return Status::Error("corrupt float");
+    if (n < 0) return Status::Error("corrupt float32");
     consumed = n;
     std::memcpy(&v, &bits, 4);
   } else if constexpr (std::is_signed_v<T> && std::is_integral_v<T>) {
     uint64_t x;
     int n = wire::ConsumeVarint(data, x);
-    if (n < 0) return Status::Error("corrupt signed int");
+    if (n < 0) return Status::Error("corrupt int");
     consumed = n;
     if (zigzag) {
       v = static_cast<T>(wire::DecodeZigZag(x));
@@ -452,7 +453,7 @@ inline Status UnmarshalScalar(std::span<const uint8_t> data,
   } else if constexpr (std::is_unsigned_v<T> && std::is_integral_v<T>) {
     uint64_t x;
     int n = wire::ConsumeVarint(data, x);
-    if (n < 0) return Status::Error("corrupt unsigned int");
+    if (n < 0) return Status::Error("corrupt uint");
     consumed = n;
     v = static_cast<T>(x);
   } else if constexpr (std::is_same_v<T, std::string>) {
@@ -470,21 +471,21 @@ inline Status UnmarshalScalar(std::span<const uint8_t> data,
   } else if constexpr (std::is_same_v<T, BigInt>) {
     std::span<const uint8_t> bytes;
     int n = wire::ConsumeBytes(data, bytes);
-    if (n < 0) return Status::Error("corrupt BigInt");
+    if (n < 0) return Status::Error("corrupt embedded message");
     consumed = n;
     if (depth + 1 > lim.max_depth) return DepthError(lim);
     return UnmarshalBigIntMsg(bytes, v);
   } else if constexpr (std::is_same_v<T, Decimal>) {
     std::span<const uint8_t> bytes;
     int n = wire::ConsumeBytes(data, bytes);
-    if (n < 0) return Status::Error("corrupt Decimal");
+    if (n < 0) return Status::Error("corrupt embedded message");
     consumed = n;
     if (depth + 1 > lim.max_depth) return DepthError(lim);
     return UnmarshalDecimalMsg(bytes, v, lim.max_digits);
   } else if constexpr (std::is_same_v<T, BigFloat>) {
     std::span<const uint8_t> bytes;
     int n = wire::ConsumeBytes(data, bytes);
-    if (n < 0) return Status::Error("corrupt BigFloat");
+    if (n < 0) return Status::Error("corrupt embedded message");
     consumed = n;
     if (depth + 1 > lim.max_depth) return DepthError(lim);
     return UnmarshalBigFloatMsg(bytes, v);
@@ -542,15 +543,18 @@ inline Status UnmarshalField(std::span<const uint8_t> data,
       int sub_consumed = 0;
       if (enum_num == 1) {
         Status st = UnmarshalField(entry_bytes, 1, etyp, key, sub_consumed, zigzag, depth + 1, lim);
-        if (!st.ok()) return st;
+        if (!st.ok()) return Status::Error("map key: " + st.message());
         entry_bytes = entry_bytes.subspan(sub_consumed);
       } else if (enum_num == 2) {
         Status st = UnmarshalField(entry_bytes, 2, etyp, val, sub_consumed, zigzag, depth + 1, lim);
-        if (!st.ok()) return st;
+        if (!st.ok()) return Status::Error("map value: " + st.message());
         entry_bytes = entry_bytes.subspan(sub_consumed);
       } else {
         int skipped = wire::ConsumeFieldValue(entry_bytes, enum_num, etyp);
-        if (skipped < 0) return Status::Error("corrupt unknown field in map entry");
+        if (skipped < 0) {
+          return Status::Error("corrupt unknown field " + std::to_string(enum_num) +
+                               " in map entry");
+        }
         entry_bytes = entry_bytes.subspan(skipped);
       }
     }
@@ -612,13 +616,13 @@ inline Status UnmarshalStruct(std::span<const uint8_t> data, T& v, int depth, co
     if (n < 0) return Status::Error("corrupt tag");
     data = data.subspan(n);
 
-    bool matched = false;
+    const char* matched = nullptr;
     Status st = Status::OK();
     int consumed = 0;
     std::apply(
         [&](auto&&... f) {
           (((!matched && f.number == num)
-                ? (matched = true,
+                ? (matched = f.name,
                    st = UnmarshalField(data, num, type, v.*(f.ptr), consumed, f.zigzag, depth, lim),
                    0)
                 : 0),
@@ -627,11 +631,11 @@ inline Status UnmarshalStruct(std::span<const uint8_t> data, T& v, int depth, co
         T::_protowire_fields());
 
     if (matched) {
-      if (!st.ok()) return st;
+      if (!st.ok()) return Status::Error(std::string("field ") + matched + ": " + st.message());
       data = data.subspan(consumed);
     } else {
       int skipped = wire::ConsumeFieldValue(data, num, type);
-      if (skipped < 0) return Status::Error("corrupt unknown field");
+      if (skipped < 0) return Status::Error("corrupt field " + std::to_string(num));
       data = data.subspan(skipped);
     }
   }
@@ -737,13 +741,14 @@ class Decoder {
 // pairs for a struct. PROTOWIRE_FIELD(N, member) wraps one entry. Place
 // inside the struct definition, after all member declarations.
 
-#define PROTOWIRE_FIELD(N, MEMBER) ::protowire::pb::MakeField<(N)>(&_protowire_self_t::MEMBER)
+#define PROTOWIRE_FIELD(N, MEMBER) \
+  ::protowire::pb::MakeField<(N)>(&_protowire_self_t::MEMBER, #MEMBER)
 
 // Like PROTOWIRE_FIELD, but encodes signed integers with zigzag varint
 // (proto3 sint32 / sint64). More compact than plain int32 / int64 for
 // negative values.
 #define PROTOWIRE_ZIGZAG(N, MEMBER) \
-  ::protowire::pb::MakeFieldZigzag<(N)>(&_protowire_self_t::MEMBER)
+  ::protowire::pb::MakeFieldZigzag<(N)>(&_protowire_self_t::MEMBER, #MEMBER)
 
 #define PROTOWIRE_FIELDS(SELF, ...)           \
   using _protowire_self_t = SELF;             \

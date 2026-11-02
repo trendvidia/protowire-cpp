@@ -68,7 +68,7 @@ Status Codec::ValidateGroups(std::span<const uint8_t> data,
                              const MessageTemplate& tmpl,
                              size_t pos) const {
   for (const GroupTemplate& gt : tmpl.groups) {
-    if (data.size() < pos + 4) return Status::Error("sbe: truncated group header");
+    if (data.size() < pos + 4) return Status::Error("sbe: data too short for group header");
     const size_t entry_block = LoadU16(data.data() + pos);
     const size_t count = LoadU16(data.data() + pos + 2);
     pos += 4;

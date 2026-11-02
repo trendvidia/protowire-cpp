@@ -84,8 +84,8 @@ Status Decoder::Decode(google::protobuf::Message* msg) {
   }
   const int64_t body_len = static_cast<int64_t>(total) - kSofhHeaderLen;
   if (body_len > max_) {
-    err_ = Corrupt("frame size " + std::to_string(body_len) + " exceeds max " +
-                   std::to_string(max_));
+    err_ =
+        Corrupt("frame size " + std::to_string(body_len) + " exceeds max " + std::to_string(max_));
     return err_;
   }
   buf_.resize(static_cast<size_t>(body_len));
