@@ -40,7 +40,8 @@ add_dir "$spec/testdata" dataset test.proto
 add_dir "$spec/testdata" repeated test.proto
 add_dir "$spec/testdata" proto-imports
 SKIP_DIR=wkt-shape add_dir "$here/testdata" differential
-# Each of these schemas redefines well-known types, so each needs its own run.
+# Each of these schemas needs its own run: most redefine well-known types, and
+# google-path-own has a file at a google/protobuf path.
 for dir in "$here"/testdata/differential/wkt-shape/*/; do
   add_dir "$here/testdata" "differential/wkt-shape/$(basename "$dir")"
 done

@@ -18,6 +18,9 @@ std::optional<std::string> GetDefault(const google::protobuf::FieldDescriptor* f
 std::optional<std::string> KeyFieldName(const google::protobuf::FieldDescriptor* fd) {
   if (fd == nullptr) return std::nullopt;
   const auto& opts = fd->options();
+  // The default instance means no options were declared; see
+  // ReadFieldAnnotations.
+  if (&opts == &google::protobuf::FieldOptions::default_instance()) return std::nullopt;
   if (!opts.HasExtension(::pxf::key)) return std::nullopt;
   return opts.GetExtension(::pxf::key);
 }

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 TrendVidia, LLC.
 #include "protowire/pxf/wellknown.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -94,6 +95,15 @@ constexpr WktShape kWrappers[] = {
     Shape("google.protobuf.UInt64Value", kUInt64Value),
 };
 
+// LongestShapeName bounds the names WktShapeProblem has to look up.
+constexpr size_t LongestShapeName() {
+  size_t longest = 0;
+  for (const WktShape& shape : kShapes) longest = std::max(longest, shape.name.size());
+  for (const WktShape& shape : kWrappers) longest = std::max(longest, shape.name.size());
+  return longest;
+}
+constexpr size_t kLongestShapeName = LongestShapeName();
+
 bool FieldFits(const pb::FieldDescriptor* fd, const WktField& f) {
   if (fd == nullptr) return f.optional;
   return fd->type() == f.type && !fd->is_map() && fd->is_repeated() == f.repeated;
@@ -151,6 +161,9 @@ std::string ShapeProblem(const pb::Descriptor* d, const WktShape& shape) {
 
 std::string WktShapeProblem(const pb::Descriptor* d) {
   const std::string_view name = d->full_name();
+  // Bind-time validation asks this of every message in the closure, and most
+  // of descriptor.proto's names are longer than any here.
+  if (name.size() > kLongestShapeName) return "";
   if (name.rfind("google.protobuf.", 0) != 0 && name.rfind("pxf.", 0) != 0) return "";
   for (const WktShape& shape : kShapes) {
     if (shape.name == name) return ShapeProblem(d, shape);

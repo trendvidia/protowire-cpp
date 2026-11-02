@@ -383,18 +383,18 @@ CarrierOptions ParseAnnotationList(std::string_view b, const pb::FieldDescriptor
 // extension; then it is a known field and is re-serialized for the walk.
 std::string CarrierBytes(const pb::FieldOptions& opts) {
   std::string out;
-  const pb::Reflection* r = opts.GetReflection();
-  const pb::UnknownFieldSet& unknown = r->GetUnknownFields(opts);
+  const pb::UnknownFieldSet& unknown = opts.unknown_fields();
   for (int i = 0; i < unknown.field_count(); ++i) {
     const pb::UnknownField& u = unknown.field(i);
     if (u.number() == kExtAnnotations && u.type() == pb::UnknownField::TYPE_LENGTH_DELIMITED) {
       out.append(std::string(u.length_delimited()));
     }
   }
-  static const pb::FieldDescriptor* known = r->FindKnownExtensionByNumber(kExtAnnotations);
+  static const pb::FieldDescriptor* known =
+      opts.GetReflection()->FindKnownExtensionByNumber(kExtAnnotations);
   if (known != nullptr && known->cpp_type() == pb::FieldDescriptor::CPPTYPE_MESSAGE &&
-      !known->is_repeated() && r->HasField(opts, known)) {
-    out += r->GetMessage(opts, known).SerializeAsString();
+      !known->is_repeated() && opts.GetReflection()->HasField(opts, known)) {
+    out += opts.GetReflection()->GetMessage(opts, known).SerializeAsString();
   }
   return out;
 }
@@ -405,6 +405,10 @@ FieldAnnotations ReadFieldAnnotations(const google::protobuf::FieldDescriptor* f
   FieldAnnotations a;
   if (fd == nullptr) return a;
   const pb::FieldOptions& opts = fd->options();
+  // A field declared with no options shares the default instance, so there
+  // is nothing to read. Validation asks this of every field in the closure on
+  // every decode, and the lookups below cost tens of nanoseconds each.
+  if (&opts == &pb::FieldOptions::default_instance()) return a;
   a.required = opts.GetExtension(::pxf::required);
   if (opts.HasExtension(::pxf::default_)) a.def = opts.GetExtension(::pxf::default_);
 
