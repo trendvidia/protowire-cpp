@@ -39,6 +39,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <iosfwd>
 #include <map>
 #include <memory>
@@ -73,7 +74,8 @@ namespace protowire::pb {
 struct UnmarshalOptions {
   int max_message_size = 0;
   int max_nesting_depth = 0;
-  // Bounds the magnitude of pxf.Decimal.scale on the wire (a digit count).
+  // Bounds the magnitude of pxf.Decimal.scale on the wire (a digit count), and
+  // the digits a pxf.BigFloat's prec implies: prec 13603 at the default.
   int max_numeric_literal_digits = 0;
   // Bounds the magnitude of a pxf.BigFloat value's binary exponent: exponent
   // plus the mantissa's bit length.
@@ -235,8 +237,12 @@ Status UnmarshalBigIntMsg(std::span<const uint8_t> data, BigInt& out);
 // 0 selects the default.
 Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out, int max_digits);
 // max_exponent bounds the value's binary exponent (HARDENING.md
-// MaxBigFloatExponent); 0 selects the default.
-Status UnmarshalBigFloatMsg(std::span<const uint8_t> data, BigFloat& out, int max_exponent);
+// MaxBigFloatExponent) and max_digits the digits its prec implies
+// (MaxNumericLiteralDigits, protowire#499); 0 selects either default.
+Status UnmarshalBigFloatMsg(std::span<const uint8_t> data,
+                            BigFloat& out,
+                            int max_exponent,
+                            int max_digits);
 
 // ---- Marshal dispatch ----------------------------------------------------
 
@@ -262,6 +268,24 @@ inline bool IsZeroValue(const T& v) {
   }
 }
 
+// DoubleBits and FloatBits are the bits Marshal writes for a float field. A
+// struct field is a language value, so a NaN is written as the canonical
+// quiet NaN whatever its payload (draft -01 § Numeric Literals,
+// protowire#512, protowire-go#241).
+inline uint64_t DoubleBits(double v) {
+  if (v != v) return 0x7FF8000000000000ULL;
+  uint64_t bits;
+  std::memcpy(&bits, &v, 8);
+  return bits;
+}
+
+inline uint32_t FloatBits(float v) {
+  if (v != v) return 0x7FC00000U;
+  uint32_t bits;
+  std::memcpy(&bits, &v, 4);
+  return bits;
+}
+
 // IsPackable: proto3 encodes a repeated field of these element types
 // packed by default — one LEN record carrying the concatenated element
 // encodings. The marshaller writes that form and the decoder accepts both
@@ -276,13 +300,9 @@ inline void AppendPackedElement(std::vector<uint8_t>& payload, T v, bool zigzag)
   if constexpr (std::is_same_v<T, bool>) {
     wire::AppendVarint(payload, v ? 1 : 0);
   } else if constexpr (std::is_same_v<T, double>) {
-    uint64_t bits;
-    std::memcpy(&bits, &v, 8);
-    wire::AppendFixed64(payload, bits);
+    wire::AppendFixed64(payload, DoubleBits(v));
   } else if constexpr (std::is_same_v<T, float>) {
-    uint32_t bits;
-    std::memcpy(&bits, &v, 4);
-    wire::AppendFixed32(payload, bits);
+    wire::AppendFixed32(payload, FloatBits(v));
   } else if constexpr (std::is_signed_v<T>) {
     if (zigzag) {
       wire::AppendVarint(payload, wire::EncodeZigZag(static_cast<int64_t>(v)));
@@ -304,14 +324,10 @@ inline void MarshalScalar(std::vector<uint8_t>& out,
     wire::AppendVarint(out, v ? 1 : 0);
   } else if constexpr (std::is_same_v<T, double>) {
     wire::AppendTag(out, num, wire::kFixed64);
-    uint64_t bits;
-    std::memcpy(&bits, &v, 8);
-    wire::AppendFixed64(out, bits);
+    wire::AppendFixed64(out, DoubleBits(v));
   } else if constexpr (std::is_same_v<T, float>) {
     wire::AppendTag(out, num, wire::kFixed32);
-    uint32_t bits;
-    std::memcpy(&bits, &v, 4);
-    wire::AppendFixed32(out, bits);
+    wire::AppendFixed32(out, FloatBits(v));
   } else if constexpr (std::is_signed_v<T>) {
     wire::AppendTag(out, num, wire::kVarint);
     if (zigzag) {
@@ -511,7 +527,7 @@ inline Status UnmarshalScalar(std::span<const uint8_t> data,
     if (n < 0) return Status::Error("corrupt embedded message");
     consumed = n;
     if (depth + 1 > lim.max_depth) return DepthError(lim);
-    return UnmarshalBigFloatMsg(bytes, v, lim.max_big_float_exp);
+    return UnmarshalBigFloatMsg(bytes, v, lim.max_big_float_exp, lim.max_digits);
   } else if constexpr (HasFields<T>::value) {
     std::span<const uint8_t> bytes;
     int n = wire::ConsumeBytes(data, bytes);
