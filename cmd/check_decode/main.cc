@@ -52,6 +52,8 @@
 #include <google/protobuf/compiler/importer.h>
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/dynamic_message.h>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/message.h>
 
 #include "protowire/pb.h"
@@ -322,7 +324,13 @@ bool PbRender(const std::string& data,
 
   pb::DynamicMessageFactory factory(importer.pool());
   std::unique_ptr<pb::Message> msg(factory.GetPrototype(desc)->New());
-  if (!msg->ParseFromString(data)) {
+  // libprotobuf's reader stops at 100 levels, which would refuse a row past
+  // MaxNestingDepth before the encoder could (protowire#502); 10000 is
+  // protobuf-go's limit, the one protowire-go's harness reads with.
+  pb::io::ArrayInputStream raw(data.data(), static_cast<int>(data.size()));
+  pb::io::CodedInputStream in(&raw);
+  in.SetRecursionLimit(10000);
+  if (!msg->ParseFromCodedStream(&in) || !in.ConsumedEntireMessage()) {
     *err = "protobuf runtime refused the input";
     return false;
   }
