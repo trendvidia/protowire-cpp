@@ -26,6 +26,7 @@
 #include <google/protobuf/message.h>
 
 #include "protowire/detail/base64.h"
+#include "protowire/detail/checked_arith.h"
 #include "protowire/detail/duration.h"
 #include "protowire/detail/go_quote.h"
 #include "protowire/detail/rfc3339.h"
@@ -603,9 +604,23 @@ bool Nullable(const FieldDescriptor* fd) {
   return fd->has_presence() && !fd->is_repeated() && !fd->is_required();
 }
 
+// DurationFitsLiteral reports whether sub, a google.protobuf.Duration, can be
+// written as a literal. A literal holds 64 bits of nanoseconds, about 292
+// years, while the type reaches about 10,000 years; a longer value is written
+// as a block, which keeps it exactly (protowire-go#226, protowire-java#138).
+bool DurationFitsLiteral(const Message& sub) {
+  int64_t seconds;
+  int32_t nanos;
+  ReadDurationFields(sub, &seconds, &nanos);
+  int64_t total;
+  return !detail::MulOverflow(seconds, int64_t{1'000'000'000}, &total) &&
+         !detail::AddOverflow(total, static_cast<int64_t>(nanos), &total);
+}
+
 bool IsLiteralMessage(const Message& sub) {
   const auto* d = sub.GetDescriptor();
   if (IsSecret(d)) return !SecretHasMetadata(sub);
+  if (IsDuration(d)) return DurationFitsLiteral(sub);
   return IsTimestamp(d) || IsDuration(d) || WrapperInnerCppType(d) != -1 || IsBigInt(d) ||
          IsDecimal(d) || IsBigFloat(d);
 }
