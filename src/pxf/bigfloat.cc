@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <limits>
 #include <tuple>
 #include <utility>
 
@@ -408,6 +409,16 @@ Status ParseBigFloatLiteral(std::string_view literal,
     // A zero written without a suffix has no precision to keep.
     out->prec = suffixed ? prec : 0;
     return Status::OK();
+  }
+  // The mantissa is the value widened to prec bits, and big.Float holds at
+  // most 2^31-1 of them, so protowire-go refuses a wider non-zero value
+  // (protowire-go#231). Only a MaxNumericLiteralDigits raised past 646 million
+  // admits such a suffix; refused here before a mantissa that size is built.
+  if (prec > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
+    return Status::Error("big float literal " + Clip(literal) + ": precision p" +
+                         std::to_string(prec) +
+                         " exceeds the widest mantissa big.Float can hold, " +
+                         std::to_string(std::numeric_limits<int32_t>::max()) + " bits");
   }
   // Refuse what is certainly past the bound before building 10^exp10, whose
   // size is whatever the literal says. The value lies in
