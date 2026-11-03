@@ -37,4 +37,16 @@ std::optional<uint32_t> GetFieldUint32Option(const google::protobuf::FieldDescri
 std::optional<std::string> GetFieldStringOption(const google::protobuf::FieldDescriptor* fd,
                                                 int field_number);
 
+// Before protowire v1.12.0, (sbe.schema_id) and (sbe.template_id) were 50100
+// and 50200. A descriptor compiled then carries them as unknown option fields.
+inline constexpr int kRetiredSchemaID = 50100;
+inline constexpr int kRetiredTemplateID = 50200;
+
+// StaleFileError and StaleMessageError are protowire-go's diagnosis for a
+// descriptor that carries its option at the retired number, or empty when it
+// does not. A number the descriptor's pool declares as an extension is a known
+// option, not a stale one.
+std::string StaleFileError(const google::protobuf::FileDescriptor* fd);
+std::string StaleMessageError(const google::protobuf::Descriptor* md);
+
 }  // namespace protowire::sbe
