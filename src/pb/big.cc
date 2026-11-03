@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "protowire/detail/bigprec.h"
 #include "protowire/detail/status.h"
 #include "protowire/detail/wire.h"
 
@@ -539,9 +540,13 @@ Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out, int max_
   return Status::OK();
 }
 
-Status UnmarshalBigFloatMsg(std::span<const uint8_t> data, BigFloat& out, int max_exponent) {
+Status UnmarshalBigFloatMsg(std::span<const uint8_t> data,
+                            BigFloat& out,
+                            int max_exponent,
+                            int max_digits) {
   out = {};
   if (max_exponent <= 0) max_exponent = kMaxBigFloatExponent;
+  if (max_digits <= 0) max_digits = kMaxNumericLiteralDigits;
   Status st = ReadFields(data,
                          "BigFloat",
                          out,
@@ -567,9 +572,9 @@ Status UnmarshalBigFloatMsg(std::span<const uint8_t> data, BigFloat& out, int ma
                              uint64_t x;
                              int n = wire::ConsumeVarint(d, x);
                              if (n < 0) return Status::Error("corrupt prec in BigFloat");
-                             // big.Float's largest precision, which SetPrec clamps to.
-                             v.prec = static_cast<uint32_t>(
-                                 std::min<uint64_t>(x, std::numeric_limits<uint32_t>::max()));
+                             // uint32: keep the low 32 bits, as a protobuf reader
+                             // does and as exponent does above (protowire-go#230).
+                             v.prec = static_cast<uint32_t>(x);
                              consumed = n;
                            } else if (num == 4) {
                              uint64_t x;
@@ -586,6 +591,17 @@ Status UnmarshalBigFloatMsg(std::span<const uint8_t> data, BigFloat& out, int ma
     out.mantissa.clear();
     out.exponent = 0;
     return Status::OK();
+  }
+  // prec is bounded as a literal's precision suffix is: by the digits its
+  // literal needs, which MaxNumericLiteralDigits caps (prec 13603 at the
+  // default). Marshal writes the mantissa widened to prec bits, so an 11-byte
+  // message at prec 2^31-1 would re-encode to 256 MiB. Checked before anything
+  // is built for the value, zeros included (draft -01 § Mandatory Limits,
+  // protowire#499).
+  if (const int64_t n = ::protowire::detail::BigFloatPrecDigits(out.prec); n > max_digits) {
+    return Status::Error("pxf.BigFloat prec " + std::to_string(out.prec) + " implies " +
+                         std::to_string(n) +
+                         " digits; MaxNumericLiteralDigits=" + std::to_string(max_digits));
   }
   TrimLeadingZeros(out.mantissa);
   const int64_t bits = BitLen(out.mantissa);
