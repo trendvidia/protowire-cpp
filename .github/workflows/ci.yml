@@ -154,7 +154,7 @@ jobs:
           repository: trendvidia/protowire-go
           path: .deps/protowire-go
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           # The release that generated src/detail/go_isprint.inc: strconv's
           # Unicode tables follow the toolchain, not go.mod.
