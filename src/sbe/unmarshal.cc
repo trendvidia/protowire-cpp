@@ -72,7 +72,19 @@ Status DecodeScalarField(const uint8_t* p, const FieldTemplate& ft, pb::Message*
     return Status::OK();
   }
   uint64_t bits = LoadScalar(p, ft.size);
-  switch (fd->cpp_type()) {
+  // A signed encoding is sign-extended into a signed field, as protowire-go
+  // reads it and as View does: an int16 -1234 in an int32 field stays -1234.
+  const auto cpp = fd->cpp_type();
+  if (cpp == pb::FieldDescriptor::CPPTYPE_INT32 || cpp == pb::FieldDescriptor::CPPTYPE_INT64) {
+    if (ft.encoding == kEncInt8) {
+      bits = static_cast<uint64_t>(int64_t{static_cast<int8_t>(bits)});
+    } else if (ft.encoding == kEncInt16) {
+      bits = static_cast<uint64_t>(int64_t{static_cast<int16_t>(bits)});
+    } else if (ft.encoding == kEncInt32) {
+      bits = static_cast<uint64_t>(int64_t{static_cast<int32_t>(bits)});
+    }
+  }
+  switch (cpp) {
     case pb::FieldDescriptor::CPPTYPE_BOOL:
       r->SetBool(msg, fd, bits != 0);
       break;

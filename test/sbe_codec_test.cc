@@ -470,3 +470,72 @@ TEST(SbeCut, OverlongStringCutOnCharacterBoundary) {
 }
 
 }  // namespace
+
+namespace {
+
+// A narrow signed encoding is sign-extended into a signed field on decode, as
+// protowire-go and View read it (#120).
+constexpr const char* kSignedProto = R"(
+syntax = "proto3";
+package sbe.signed;
+import "sbe/annotations.proto";
+option (sbe.schema_id) = 3;
+option (sbe.version) = 0;
+message Signed {
+  option (sbe.template_id) = 1;
+  int32 a8 = 1 [(sbe.encoding) = "int8"];
+  int32 a16 = 2 [(sbe.encoding) = "int16"];
+  int64 b8 = 3 [(sbe.encoding) = "int8"];
+  int64 b16 = 4 [(sbe.encoding) = "int16"];
+  int64 b32 = 5 [(sbe.encoding) = "int32"];
+  sint32 c16 = 6 [(sbe.encoding) = "int16"];
+}
+)";
+
+TEST(SbeSigned, NarrowSignedEncodingsKeepTheirSign) {
+  pb::compiler::DiskSourceTree tree;
+  tree.MapPath("", PROTO_DIR);
+  tree.MapPath("", WKT_PROTO_DIR);
+  tree.MapPath("", protowire_test::FixtureDir());
+  {
+    FILE* f = std::fopen((protowire_test::FixtureDir() + "/signed.proto").c_str(), "w");
+    std::fwrite(kSignedProto, 1, std::strlen(kSignedProto), f);
+    std::fclose(f);
+  }
+  CollectErrors errors;
+  pb::compiler::Importer importer(&tree, &errors);
+  const pb::FileDescriptor* file = importer.Import("signed.proto");
+  ASSERT_NE(file, nullptr) << errors.last_;
+  const pb::Descriptor* desc = file->FindMessageTypeByName("Signed");
+  pb::DynamicMessageFactory factory(importer.pool());
+  auto codec = protowire::sbe::Codec::New({file});
+  ASSERT_TRUE(codec.ok()) << codec.status().ToString();
+
+  std::unique_ptr<pb::Message> msg(factory.GetPrototype(desc)->New());
+  const pb::Reflection* r = msg->GetReflection();
+  r->SetInt32(msg.get(), desc->FindFieldByName("a8"), -100);
+  r->SetInt32(msg.get(), desc->FindFieldByName("a16"), -1234);
+  r->SetInt64(msg.get(), desc->FindFieldByName("b8"), -1);
+  r->SetInt64(msg.get(), desc->FindFieldByName("b16"), -32768);
+  r->SetInt64(msg.get(), desc->FindFieldByName("b32"), -2147483648LL);
+  r->SetInt32(msg.get(), desc->FindFieldByName("c16"), -7);
+  auto data = codec->Marshal(*msg);
+  ASSERT_TRUE(data.ok()) << data.status().ToString();
+
+  std::unique_ptr<pb::Message> got(factory.GetPrototype(desc)->New());
+  ASSERT_TRUE(codec->Unmarshal(*data, got.get()).ok());
+  EXPECT_EQ(r->GetInt32(*got, desc->FindFieldByName("a8")), -100);
+  EXPECT_EQ(r->GetInt32(*got, desc->FindFieldByName("a16")), -1234);
+  EXPECT_EQ(r->GetInt64(*got, desc->FindFieldByName("b8")), -1);
+  EXPECT_EQ(r->GetInt64(*got, desc->FindFieldByName("b16")), -32768);
+  EXPECT_EQ(r->GetInt64(*got, desc->FindFieldByName("b32")), -2147483648LL);
+  EXPECT_EQ(r->GetInt32(*got, desc->FindFieldByName("c16")), -7);
+
+  // View reads the same values.
+  auto view = codec->NewView(*data);
+  ASSERT_TRUE(view.ok()) << view.status().ToString();
+  EXPECT_EQ(view->Int("a16"), -1234);
+  EXPECT_EQ(view->Int("b32"), -2147483648LL);
+}
+
+}  // namespace
