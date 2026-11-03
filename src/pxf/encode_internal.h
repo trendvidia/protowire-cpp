@@ -7,6 +7,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <unordered_set>
 
 #include <google/protobuf/descriptor.h>
@@ -15,6 +16,8 @@
 #include "protowire/detail/status.h"
 
 namespace protowire::pxf {
+
+class TypeResolver;
 
 // NullSet holds the paths of the fields written as null.
 using NullSet = std::unordered_set<std::string>;
@@ -43,6 +46,17 @@ Status WriteValueCell(const google::protobuf::Message& msg,
                       const google::protobuf::FieldDescriptor* fd,
                       const NullSet* null_set,
                       std::string* out);
+
+// AnyBodyReadsBack reports whether body, the entries of an Any block at the
+// given depth, decodes to exactly want, the bytes of the Any's value. Only a
+// reader knows everything a body can lose, so this asks one: it uses the
+// default limits and runs the post-decode pass, as UnmarshalFull does, because
+// a value that pass would change is not safe for that reader.
+bool AnyBodyReadsBack(std::string_view body,
+                      const google::protobuf::Descriptor* desc,
+                      TypeResolver* resolver,
+                      int depth,
+                      std::string_view want);
 
 // EmptyCollection is the literal for a list or map field with nothing in it.
 const char* EmptyCollection(const google::protobuf::FieldDescriptor* fd);

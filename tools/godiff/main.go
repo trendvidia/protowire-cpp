@@ -487,6 +487,10 @@ func main() {
 		streams(os.Args[2], os.Args[3], os.Args[4])
 		return
 	}
+	if len(os.Args) == 3 && os.Args[1] == "--pb-big" {
+		pbBig(os.Args[2])
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "--tolerant" {
 		f, err := os.Open(os.Args[2])
 		if err != nil {
