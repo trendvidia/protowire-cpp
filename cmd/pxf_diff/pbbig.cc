@@ -76,7 +76,7 @@ void DecodeBig(const std::string& kind,
     line += " " + FloatValue(h.F) + " " + (i.ok() ? *i : std::string(i.status().message()));
     for (const pb::BigFloat& r : h.R) line += " " + FloatValue(r);
   }
-  if (remarshal && base != "past" && base != "dec-neg") line += " " + Hex(pb::Marshal(h));
+  if (remarshal && base != "past") line += " " + Hex(pb::Marshal(h));
   std::cout << line << "\n";
 }
 

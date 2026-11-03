@@ -30,10 +30,10 @@ func floatValue(f *big.Float) string {
 	return fmt.Sprintf("%d %t %d", f.Prec(), f.Signbit(), f.MantExp(nil))
 }
 
-// decodeBig prints what one decode gave. kind says what can be compared: Go
-// keeps a Decimal as a big.Rat, and writes it back reduced, so a Decimal is
-// compared by value and only a reduced one by its bytes. "past" is a value Go's
-// Marshal refuses and this port's cannot yet (#93), or one it crashes on.
+// decodeBig prints what one decode gave. kind says what can be compared: a
+// Decimal is compared by value, at the digits after the colon, and by its bytes.
+// "past" is a value Go's Marshal refuses and this port's cannot yet (#93), or
+// one it crashes on.
 func decodeBig(w *bufio.Writer, kind string, data []byte, limit int, remarshal bool) {
 	var h bigHolder
 	if err := (pb.UnmarshalOptions{MaxBigFloatExponent: limit}).Unmarshal(data, &h); err != nil {
@@ -51,7 +51,7 @@ func decodeBig(w *bufio.Writer, kind string, data []byte, limit int, remarshal b
 			line += " " + floatValue(&h.R[i])
 		}
 	}
-	if remarshal && base != "past" && base != "dec-neg" {
+	if remarshal && base != "past" {
 		out, err := pb.Marshal(&h)
 		if err != nil {
 			line += " " + status(err)

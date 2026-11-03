@@ -23,6 +23,11 @@ struct BigInt {
 };
 
 // Byte-backed Decimal. value = (-1)^negative × unscaled × 10^(-scale).
+//
+// The fields hold what they were given, and FormatDecimal keeps it, so "1.00"
+// stays "1.00". pb::Marshal writes the value at its smallest scale >= 0, as
+// protowire-go does: {100, 2} goes out as {1, 0}. The PXF text path does not go
+// through pb::Marshal, and keeps the scale of a literal.
 struct Decimal {
   std::vector<uint8_t> unscaled;
   int32_t scale = 0;
