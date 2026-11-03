@@ -10,7 +10,7 @@
 //
 // Contract:
 //
-//   check_decode --format <pxf|pb|sbe|envelope> \
+//   check_decode --format <pxf|pxf-pb|pb|pb-render|pb-text|sbe|envelope> \
 //                --schema <fully.qualified.MessageType> \
 //                --proto  <path-to-adversarial.proto> \
 //                --input  <path> \
@@ -19,6 +19,10 @@
 //   Exit 0 → input was accepted (decode succeeded)
 //   Exit 1 → input was rejected (decode returned a clean error)
 //   Other  → bug in the decoder (panic / abort / OOM / hang / SIGSEGV / ...)
+//
+// pb-text and pxf-pb also write their output on stdout, for the text gate and
+// the write gate (protowire/scripts/cross_text_check.sh and
+// cross_write_check.sh).
 //
 // Mirrors the Go reference at protowire-go/scripts/check_decode/main.go:
 // PXF and SBE bind the message from --proto, compiled at runtime; PB goes
@@ -49,6 +53,11 @@
 #include <system_error>
 #include <vector>
 
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #include <google/protobuf/compiler/importer.h>
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/dynamic_message.h>
@@ -57,6 +66,7 @@
 #include "protowire/pb.h"
 #include "protowire/pb_big.h"
 #include "protowire/pxf.h"
+#include "protowire/pxf/go_wire.h"
 #include "protowire/sbe.h"
 
 namespace {
@@ -293,6 +303,7 @@ bool PxfDecode(std::string_view data,
   opts.max_numeric_literal_digits = lim.max_numeric_literal_digits;
   opts.max_bytes_literal_length = lim.max_bytes_literal_length;
   opts.max_repeated_count = lim.max_repeated_count;
+  opts.max_big_float_exponent = lim.max_big_float_exponent;
   auto status = protowire::pxf::Unmarshal(data, msg.get(), opts);
   if (!status.ok()) {
     *err = std::string(status.message());
@@ -301,17 +312,72 @@ bool PxfDecode(std::string_view data,
   return true;
 }
 
+// WriteStdout writes bytes unchanged, which a text-mode stdout would not on
+// Windows.
+bool WriteStdout(std::string_view bytes, std::string* err) {
+#if defined(_WIN32)
+  _setmode(_fileno(stdout), _O_BINARY);
+#endif
+  if (std::fwrite(bytes.data(), 1, bytes.size(), stdout) != bytes.size() ||
+      std::fflush(stdout) != 0) {
+    *err = "writing stdout failed";
+    return false;
+  }
+  return true;
+}
+
+// PxfPb writes the PB bytes for a PXF document on stdout, for the write gate
+// (protowire/scripts/cross_write_check.sh, protowire#509). It decodes as
+// dump_envelope does, with the full decode that validates (pxf.required) and
+// applies (pxf.default), and writes as protowire-go's deterministic marshal
+// does, so map entries are sorted by key.
+bool PxfPb(std::string_view data,
+           const std::string& schema,
+           const std::string& proto_path,
+           const Limits& lim,
+           std::string* err) {
+  if (proto_path.empty()) {
+    *err = "--proto is required for format=pxf-pb";
+    return false;
+  }
+  pb::compiler::DiskSourceTree tree;
+  CollectErrors errors;
+  pb::compiler::Importer importer(&tree, &errors);
+  const pb::Descriptor* desc = LoadDescriptor(proto_path, schema, &importer, &tree, &errors, err);
+  if (desc == nullptr) return false;
+
+  pb::DynamicMessageFactory factory(importer.pool());
+  std::unique_ptr<pb::Message> msg(factory.GetPrototype(desc)->New());
+  protowire::pxf::UnmarshalOptions opts;
+  opts.max_message_size = lim.max_message_size;
+  opts.max_nesting_depth = lim.max_nesting_depth;
+  opts.max_numeric_literal_digits = lim.max_numeric_literal_digits;
+  opts.max_bytes_literal_length = lim.max_bytes_literal_length;
+  opts.max_repeated_count = lim.max_repeated_count;
+  opts.max_big_float_exponent = lim.max_big_float_exponent;
+  auto result = protowire::pxf::UnmarshalFull(data, msg.get(), opts);
+  if (!result.ok()) {
+    *err = std::string(result.status().message());
+    return false;
+  }
+  return WriteStdout(protowire::pxf::SerializeGoOrder(*msg), err);
+}
+
 // The producer's side of the bounds (HARDENING.md § Arbitrary-precision
 // magnitudes): the stock protobuf runtime reads the bytes, storing the fields
 // and bounding nothing, and they are then written as PXF. pb::Unmarshal is
 // bypassed on purpose, or it would refuse the row and the encoder would go
 // untested, which is how a hang here stayed hidden (protowire#448).
+//
+// With print set it is pb-text, which also writes the PXF on stdout for the
+// text gate (protowire/scripts/cross_text_check.sh, protowire#503).
 bool PbRender(const std::string& data,
               const std::string& schema,
               const std::string& proto_path,
+              bool print,
               std::string* err) {
   if (proto_path.empty()) {
-    *err = "--proto is required for format=pb-render";
+    *err = std::string("--proto is required for format=") + (print ? "pb-text" : "pb-render");
     return false;
   }
   pb::compiler::DiskSourceTree tree;
@@ -331,7 +397,7 @@ bool PbRender(const std::string& data,
     *err = std::string(out.status().message());
     return false;
   }
-  return true;
+  return !print || WriteStdout(*out, err);
 }
 
 template <class T>
@@ -405,7 +471,7 @@ bool SbeDecode(std::string_view data,
 
 [[noreturn]] void Usage(int code) {
   std::fprintf(stderr,
-               "usage: check_decode --format <pxf|pb|sbe|envelope> "
+               "usage: check_decode --format <pxf|pxf-pb|pb|pb-render|pb-text|sbe|envelope> "
                "--schema <FQN> --input <path> [--proto <path>] [--limit NAME=VALUE ...]\n");
   std::exit(code);
 }
@@ -461,10 +527,12 @@ int main(int argc, char** argv) {
   bool ok = false;
   if (format == "pxf") {
     ok = PxfDecode(data, schema, proto_path, lim, &err);
+  } else if (format == "pxf-pb") {
+    ok = PxfPb(data, schema, proto_path, lim, &err);
   } else if (format == "pb") {
     ok = PbDecode(data, schema, lim, &err);
-  } else if (format == "pb-render") {
-    ok = PbRender(std::string(data), schema, proto_path, &err);
+  } else if (format == "pb-render" || format == "pb-text") {
+    ok = PbRender(std::string(data), schema, proto_path, format == "pb-text", &err);
   } else if (format == "sbe") {
     ok = SbeDecode(data, schema, proto_path, lim, &err);
   } else if (format == "envelope") {
