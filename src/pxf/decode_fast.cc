@@ -82,9 +82,26 @@ bool ParseInteger(std::string_view s, T& out) {
   return r.ec == std::errc() && r.ptr == last;
 }
 
+// CanonicalNaN returns v, or the canonical quiet NaN if v is a NaN: a PXF
+// `nan` is stored as 0x7FF8000000000000, or 0x7FC00000 in a float, whatever
+// the parser produced (draft -01 § Numeric Literals, protowire#512,
+// protowire-go#241).
+template <class T>
+T CanonicalNaN(T v) {
+  if (!std::isnan(v)) return v;
+  if constexpr (std::is_same_v<T, float>) {
+    const uint32_t bits = 0x7FC00000U;
+    std::memcpy(&v, &bits, sizeof(v));
+  } else {
+    const uint64_t bits = 0x7FF8000000000000ULL;
+    std::memcpy(&v, &bits, sizeof(v));
+  }
+  return v;
+}
+
 // ParseFinite reads a number as strconv.ParseFloat does: a finite literal too
 // large for T is an error, where strtod would give an infinity, and `inf` and
-// `nan` are the spellings of those values.
+// `nan` are the spellings of those values. A nan is the canonical one.
 template <class T>
 bool ParseFinite(std::string_view s, T& out) {
   std::string buf(s);
@@ -95,13 +112,7 @@ bool ParseFinite(std::string_view s, T& out) {
     out = std::strtod(buf.c_str(), &end);
   }
   if (end == buf.c_str() || static_cast<size_t>(end - buf.c_str()) != buf.size()) return false;
-  if constexpr (std::is_same_v<T, double>) {
-    // Go's math.NaN(), so that a nan has one set of bytes.
-    if (std::isnan(out)) {
-      const uint64_t bits = 0x7FF8000000000001ULL;
-      std::memcpy(&out, &bits, sizeof(out));
-    }
-  }
+  out = CanonicalNaN(out);
   return !std::isinf(out) || s == "inf" || s == "+inf" || s == "-inf";
 }
 
@@ -1879,7 +1890,7 @@ Status ApplyScalarDefault(Message* msg,
     case FieldDescriptor::CPPTYPE_FLOAT: {
       double d = 0;
       if (!detail::GoParseFloat(def, 32, &d, &why)) return InvalidDefault("float", def, named, why);
-      r->SetFloat(msg, target, static_cast<float>(d));
+      r->SetFloat(msg, target, CanonicalNaN(static_cast<float>(d)));
       return Status::OK();
     }
     case FieldDescriptor::CPPTYPE_DOUBLE: {
@@ -1887,7 +1898,7 @@ Status ApplyScalarDefault(Message* msg,
       if (!detail::GoParseFloat(def, 64, &d, &why)) {
         return InvalidDefault("double", def, named, why);
       }
-      r->SetDouble(msg, target, d);
+      r->SetDouble(msg, target, CanonicalNaN(d));
       return Status::OK();
     }
     default:

@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <memory>
@@ -275,6 +276,79 @@ TEST(Pb, MapEntryAlwaysCarriesKeyAndValue) {
   EXPECT_EQ(got.names.at(0), "");
   ASSERT_TRUE(got.opt.at("k").has_value());
   EXPECT_EQ(*got.opt.at("k"), 0);
+}
+
+// A struct field is a language value, so Marshal writes a NaN as the canonical
+// quiet NaN whatever its payload: singular, packed and as a map value
+// (protowire#512, protowire-go#241).
+struct NaNHolder {
+  double d = 0;
+  float f = 0;
+  std::vector<double> ds;
+  std::vector<float> fs;
+  std::map<int32_t, double> dm;
+  PROTOWIRE_FIELDS(NaNHolder,
+                   PROTOWIRE_FIELD(1, d),
+                   PROTOWIRE_FIELD(2, f),
+                   PROTOWIRE_FIELD(3, ds),
+                   PROTOWIRE_FIELD(4, fs),
+                   PROTOWIRE_FIELD(5, dm))
+};
+
+TEST(Pb, MarshalWritesCanonicalNaN) {
+  double d;
+  const uint64_t d_payload = 0x7FF8000000000001ULL;
+  std::memcpy(&d, &d_payload, sizeof(d));
+  float f;
+  const uint32_t f_payload = 0x7FC00001U;
+  std::memcpy(&f, &f_payload, sizeof(f));
+  NaNHolder h;
+  h.d = d;
+  h.f = f;
+  h.ds = {d};
+  h.fs = {f};
+  h.dm[1] = d;
+  const std::vector<uint8_t> want = {
+      0x09, 0,    0,    0,    0,    0,    0, 0xf8, 0x7f,                       // d
+      0x15, 0,    0,    0xc0, 0x7f,                                            // f
+      0x1a, 0x08, 0,    0,    0,    0,    0, 0,    0xf8, 0x7f,                 // ds, packed
+      0x22, 0x04, 0,    0,    0xc0, 0x7f,                                      // fs, packed
+      0x2a, 0x0b, 0x08, 0x01, 0x11, 0,    0, 0,    0,    0,    0, 0xf8, 0x7f,  // dm
+  };
+  EXPECT_EQ(Marshal(h), want);
+}
+
+// protowire-go#239: Go wrote a false map key or value, and a false list
+// element, as 1. This port writes each as 0, the bytes protobuf writes for
+// map<bool, bool> {false: false, true: false} and repeated bool [false].
+struct FalseBoolHolder {
+  std::map<bool, bool> bm;
+  std::vector<bool> bl;
+  std::map<std::string, bool> sm;
+  PROTOWIRE_FIELDS(FalseBoolHolder,
+                   PROTOWIRE_FIELD(1, bm),
+                   PROTOWIRE_FIELD(2, bl),
+                   PROTOWIRE_FIELD(3, sm))
+};
+
+TEST(Pb, FalseBoolIsWrittenAsZero) {
+  FalseBoolHolder h;
+  h.bm = {{false, false}, {true, false}};
+  h.bl = {false};
+  h.sm = {{"a", false}};
+  const std::vector<uint8_t> want = {
+      0x0a, 0x04, 0x08, 0x00, 0x10, 0x00,        // bm {false: false}
+      0x0a, 0x04, 0x08, 0x01, 0x10, 0x00,        // bm {true: false}
+      0x12, 0x01, 0x00,                          // bl, packed
+      0x1a, 0x05, 0x0a, 0x01, 0x61, 0x10, 0x00,  // sm {"a": false}
+  };
+  const std::vector<uint8_t> got = Marshal(h);
+  EXPECT_EQ(got, want);
+  FalseBoolHolder back;
+  ASSERT_TRUE(Unmarshal(got, back).ok());
+  EXPECT_EQ(back.bm, h.bm);
+  EXPECT_EQ(back.bl, h.bl);
+  EXPECT_EQ(back.sm, h.sm);
 }
 
 // ---- HARDENING.md § Mandatory limits (#25, #26) --------------------------
