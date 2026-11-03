@@ -29,6 +29,7 @@
 #include "protowire/detail/duration.h"
 #include "protowire/detail/go_quote.h"
 #include "protowire/detail/rfc3339.h"
+#include "protowire/limits.h"
 #include "protowire/pxf/wellknown.h"
 
 namespace protowire::pxf {
@@ -353,23 +354,33 @@ Status Encoder::TryEncodeAny(const FieldDescriptor* fd,
                              bool* encoded) {
   const auto* d = any.GetDescriptor();
   const std::string type_url = any.GetReflection()->GetString(any, d->FindFieldByName("type_url"));
-  if (type_url.empty()) return Status::OK();
+  // An Any at the depth limit is not unpacked: its block has no room for a
+  // body's submessages, and stopping here bounds a chain of Anys.
+  if (type_url.empty() || level >= kMaxNestingDepth) return Status::OK();
   const auto* inner_desc = opts_.type_resolver->FindMessageByURL(type_url);
   if (inner_desc == nullptr) return Status::OK();
   pb::DynamicMessageFactory factory(inner_desc->file()->pool());
   std::unique_ptr<Message> inner(factory.GetPrototype(inner_desc)->New());
-  if (!inner->ParseFromString(any.GetReflection()->GetString(any, d->FindFieldByName("value")))) {
-    return Status::OK();
-  }
+  const std::string value = any.GetReflection()->GetString(any, d->FindFieldByName("value"));
+  if (!inner->ParseFromString(value)) return Status::OK();
+  const size_t start = out_.size();
   WriteBlockOpen(level, fd->name());
   Indent(level + 1);
   out_ += "@type = ";
   EmitString(type_url);
   out_ += "\n";
+  const size_t body_start = out_.size();
   std::string saved = Enter(fd->name());
   Status st = EncodeMessage(*inner, level + 1);
   path_prefix_ = std::move(saved);
   if (!st.ok()) return st;
+  // A body that would not read back as the same value is taken back, and
+  // the Any stays as its own fields, which always read back.
+  const std::string_view body = std::string_view(out_).substr(body_start);
+  if (!AnyBodyReadsBack(body, inner_desc, opts_.type_resolver, level, value)) {
+    out_.resize(start);
+    return Status::OK();
+  }
   Indent(level);
   out_ += "}\n";
   *encoded = true;

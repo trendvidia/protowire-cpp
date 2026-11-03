@@ -45,6 +45,7 @@
 
 #include "bigfloat.h"
 #include "carrier.h"
+#include "encode_internal.h"
 #include "parser_internal.h"
 #include "protowire/detail/base64.h"
 #include "protowire/detail/duration.h"
@@ -286,6 +287,16 @@ class DirectDecoder {
     Advance();
     if (auto s = ConsumeDirectives(); !s.ok()) return s;
     return DecodeFields(root_, /*in_block=*/false);
+  }
+
+  // RunAnyBody decodes the root as the body of an Any block whose '{' sits at
+  // depth, and takes the post-decode pass. The input ends in the block's '}'.
+  Status RunAnyBody(int depth) {
+    null_mask_fd_ = nullptr;
+    depth_ = depth;
+    Advance();
+    if (Status s = DecodeFields(root_, /*in_block=*/true); !s.ok()) return s;
+    return post_.Run(root_, nullptr, "");
   }
 
   // RunPostDecode is the post-decode pass over the root. Any bodies took it
@@ -2148,6 +2159,26 @@ StatusOr<Result> UnmarshalFull(std::string_view data, Message* msg, UnmarshalOpt
   if (!st.ok()) return st;
   if (has_report) r.SetReport(std::move(report));
   return r;
+}
+
+bool AnyBodyReadsBack(std::string_view body,
+                      const Descriptor* desc,
+                      TypeResolver* resolver,
+                      int depth,
+                      std::string_view want) {
+  if (body.size() >= static_cast<size_t>(kMaxMessageSize)) return false;
+  std::string input;
+  input.reserve(body.size() + 1);
+  input.append(body);
+  input += '}';
+  pb::DynamicMessageFactory factory(desc->file()->pool());
+  std::unique_ptr<Message> inner(factory.GetPrototype(desc)->New());
+  UnmarshalOptions opts;
+  opts.type_resolver = resolver;
+  Result result;
+  DirectDecoder d(input, inner.get(), &result, opts);
+  if (!d.RunAnyBody(depth).ok()) return false;
+  return SerializeGoOrder(*inner) == want;
 }
 
 namespace {

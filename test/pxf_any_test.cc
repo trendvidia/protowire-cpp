@@ -2,6 +2,7 @@
 // Copyright (c) 2026 TrendVidia, LLC.
 // Tests for google.protobuf.Any sugar (block syntax with @type = "...").
 
+#include "protowire/limits.h"
 #include "protowire/pxf.h"
 
 #include <gtest/gtest.h>
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <google/protobuf/any.pb.h>
 #include <google/protobuf/compiler/importer.h>
@@ -35,6 +37,7 @@ constexpr const char* kProto = R"(
 syntax = "proto3";
 package any.test;
 import "google/protobuf/any.proto";
+import "pxf/annotations.proto";
 
 message ErrorDetail {
   int32  code   = 1;
@@ -43,6 +46,15 @@ message ErrorDetail {
 
 message Event {
   string id = 1;
+  google.protobuf.Any payload = 2;
+}
+
+message NeedsName {
+  optional string name = 1 [(pxf.required) = true];
+}
+
+message Node {
+  Node next = 1;
   google.protobuf.Any payload = 2;
 }
 )";
@@ -67,6 +79,7 @@ class PxfAny : public ::testing::Test {
  protected:
   void SetUp() override {
     source_tree_.MapPath("", WKT_PROTO_DIR);
+    source_tree_.MapPath("", PROTO_DIR);
     source_tree_.MapPath("", protowire_test::FixtureDir());
     std::string proto_path = protowire_test::FixtureDir() + "/event.proto";
     FILE* f = std::fopen(proto_path.c_str(), "w");
@@ -186,6 +199,168 @@ payload {
   msg1->SerializeToString(&s1);
   msg2->SerializeToString(&s2);
   EXPECT_EQ(s1, s2);
+}
+
+// MarshalPayload writes event with its payload set to value as type_url.
+std::string MarshalPayload(pbuf::Message* event,
+                           const pbuf::Descriptor* desc,
+                           protowire::pxf::TypeResolver* resolver,
+                           const std::string& type_url,
+                           const std::string& value) {
+  auto* any = event->GetReflection()->MutableMessage(event, desc->FindFieldByName("payload"));
+  const pbuf::Descriptor* any_desc = any->GetDescriptor();
+  any->GetReflection()->SetString(any, any_desc->FindFieldByName("type_url"), type_url);
+  any->GetReflection()->SetString(any, any_desc->FindFieldByName("value"), value);
+  protowire::pxf::MarshalOptions opts;
+  opts.type_resolver = resolver;
+  auto out = protowire::pxf::Marshal(*event, opts);
+  EXPECT_TRUE(out.ok()) << out.status().ToString();
+  return out.ok() ? *out : std::string();
+}
+
+// A canonical value is the control: it proves the rows below stay raw because
+// of their value, not because no body is ever written.
+TEST_F(PxfAny, BodyWrittenWhenItReadsBack) {
+  auto msg = NewEvent();
+  const std::string text = MarshalPayload(msg.get(),
+                                          desc_,
+                                          resolver_.get(),
+                                          "any.test.ErrorDetail",
+                                          std::string("\x08\x2a\x12\x01r", 5));
+  EXPECT_NE(text.find("@type = \"any.test.ErrorDetail\""), std::string::npos) << text;
+  EXPECT_NE(text.find("code = 42"), std::string::npos) << text;
+}
+
+TEST_F(PxfAny, FieldsOutOfOrderStayRaw) {
+  auto msg = NewEvent();
+  const std::string text = MarshalPayload(msg.get(),
+                                          desc_,
+                                          resolver_.get(),
+                                          "any.test.ErrorDetail",
+                                          std::string("\x12\x01r\x08\x2a", 5));
+  EXPECT_EQ(text.find("@type"), std::string::npos) << text;
+  EXPECT_NE(text.find("type_url = \"any.test.ErrorDetail\""), std::string::npos) << text;
+  EXPECT_NE(text.find("value = b\""), std::string::npos) << text;
+}
+
+TEST_F(PxfAny, UnknownFieldStaysRaw) {
+  auto msg = NewEvent();
+  // Field 9, a varint, which ErrorDetail does not declare.
+  const std::string text = MarshalPayload(
+      msg.get(), desc_, resolver_.get(), "any.test.ErrorDetail", std::string("\x48\x01", 2));
+  EXPECT_EQ(text.find("@type"), std::string::npos) << text;
+}
+
+TEST_F(PxfAny, BodyTheReaderRefusesStaysRaw) {
+  auto msg = NewEvent();
+  // An empty value re-encodes to the same empty bytes, and only the
+  // post-decode pass refuses it, because name is required.
+  const std::string text =
+      MarshalPayload(msg.get(), desc_, resolver_.get(), "any.test.NeedsName", "");
+  EXPECT_EQ(text.find("@type"), std::string::npos) << text;
+  EXPECT_NE(text.find("type_url = \"any.test.NeedsName\""), std::string::npos) << text;
+}
+
+// The text must read back through both readers, the whole point of the check.
+TEST_F(PxfAny, RawAnyReadsBackUnchanged) {
+  auto msg = NewEvent();
+  const std::string value("\x12\x01r\x08\x2a", 5);
+  const std::string text =
+      MarshalPayload(msg.get(), desc_, resolver_.get(), "any.test.ErrorDetail", value);
+  auto back = NewEvent();
+  protowire::pxf::UnmarshalOptions opts;
+  opts.type_resolver = resolver_.get();
+  ASSERT_TRUE(protowire::pxf::UnmarshalFull(text, back.get(), opts).ok()) << text;
+  std::string got;
+  const pbuf::Reflection* r = back->GetReflection();
+  const pbuf::Message& any = r->GetMessage(*back, desc_->FindFieldByName("payload"));
+  got = any.GetReflection()->GetString(any, any.GetDescriptor()->FindFieldByName("value"));
+  EXPECT_EQ(got, value);
+}
+
+// One level below the limit the Any is unpacked, unless its body nests past
+// the limit once it sits at its real depth; at the limit it is not unpacked.
+TEST_F(PxfAny, AnyAtTheDepthLimitStaysRaw) {
+  const auto* node = importer_->pool()->FindMessageTypeByName("any.test.Node");
+  ASSERT_NE(node, nullptr);
+  const std::string value("\x08\x2a", 2);
+  for (int depth : {protowire::kMaxNestingDepth - 1, protowire::kMaxNestingDepth}) {
+    std::unique_ptr<pbuf::Message> root(factory_->GetPrototype(node)->New());
+    pbuf::Message* cur = root.get();
+    for (int i = 0; i < depth; ++i) {
+      cur = cur->GetReflection()->MutableMessage(cur, node->FindFieldByName("next"));
+    }
+    auto* any = cur->GetReflection()->MutableMessage(cur, node->FindFieldByName("payload"));
+    const pbuf::Descriptor* any_desc = any->GetDescriptor();
+    any->GetReflection()->SetString(
+        any, any_desc->FindFieldByName("type_url"), "any.test.ErrorDetail");
+    any->GetReflection()->SetString(any, any_desc->FindFieldByName("value"), value);
+    protowire::pxf::MarshalOptions opts;
+    opts.type_resolver = resolver_.get();
+    auto out = protowire::pxf::Marshal(*root, opts);
+    ASSERT_TRUE(out.ok()) << out.status().ToString();
+    const bool unpacked = out->find("@type") != std::string::npos;
+    EXPECT_EQ(unpacked, depth < protowire::kMaxNestingDepth) << "depth " << depth;
+  }
+
+  // A Node holding a Node: its submessage is one level too deep at depth 99.
+  std::unique_ptr<pbuf::Message> root(factory_->GetPrototype(node)->New());
+  pbuf::Message* cur = root.get();
+  for (int i = 0; i < protowire::kMaxNestingDepth - 1; ++i) {
+    cur = cur->GetReflection()->MutableMessage(cur, node->FindFieldByName("next"));
+  }
+  auto* any = cur->GetReflection()->MutableMessage(cur, node->FindFieldByName("payload"));
+  const pbuf::Descriptor* any_desc = any->GetDescriptor();
+  any->GetReflection()->SetString(any, any_desc->FindFieldByName("type_url"), "any.test.Node");
+  any->GetReflection()->SetString(
+      any, any_desc->FindFieldByName("value"), std::string("\x0a\x02\x0a\x00", 4));
+  protowire::pxf::MarshalOptions opts;
+  opts.type_resolver = resolver_.get();
+  auto out = protowire::pxf::Marshal(*root, opts);
+  ASSERT_TRUE(out.ok()) << out.status().ToString();
+  EXPECT_EQ(out->find("@type"), std::string::npos);
+}
+
+// A chain past the limit costs what one at the limit does: the walk stops
+// there, so a longer chain asks the resolver nothing more.
+TEST_F(PxfAny, ChainPastTheLimitIsNotWalked) {
+  class Counting : public protowire::pxf::TypeResolver {
+   public:
+    explicit Counting(protowire::pxf::TypeResolver* inner) : inner_(inner) {}
+    const pbuf::Descriptor* FindMessageByURL(std::string_view url) override {
+      ++calls;
+      return inner_->FindMessageByURL(url);
+    }
+    int calls = 0;
+
+   private:
+    protowire::pxf::TypeResolver* inner_;
+  };
+
+  const auto* node = importer_->pool()->FindMessageTypeByName("any.test.Node");
+  ASSERT_NE(node, nullptr);
+  const pbuf::FieldDescriptor* payload = node->FindFieldByName("payload");
+  const auto lookups = [&](int links) {
+    std::string value;
+    std::unique_ptr<pbuf::Message> root;
+    for (int i = 0; i < links; ++i) {
+      root.reset(factory_->GetPrototype(node)->New());
+      auto* any = root->GetReflection()->MutableMessage(root.get(), payload);
+      const pbuf::Descriptor* any_desc = any->GetDescriptor();
+      any->GetReflection()->SetString(any, any_desc->FindFieldByName("type_url"), "any.test.Node");
+      any->GetReflection()->SetString(any, any_desc->FindFieldByName("value"), value);
+      value = root->SerializeAsString();
+    }
+    Counting resolver(resolver_.get());
+    protowire::pxf::MarshalOptions opts;
+    opts.type_resolver = &resolver;
+    auto out = protowire::pxf::Marshal(*root, opts);
+    EXPECT_TRUE(out.ok()) << out.status().ToString();
+    return resolver.calls;
+  };
+  const int at_the_limit = lookups(protowire::kMaxNestingDepth + 10);
+  EXPECT_GT(at_the_limit, 0);
+  EXPECT_EQ(lookups(protowire::kMaxNestingDepth + 200), at_the_limit);
 }
 
 }  // namespace
