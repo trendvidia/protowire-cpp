@@ -529,13 +529,76 @@ TEST(PbHardening, BigFloatExponentBoundEdges) {
   EXPECT_FALSE(Marshal(h).empty());
 }
 
-TEST(PbHardening, BigFloatPrecisionClampsToBigFloatsLargest) {
+// prec is a uint32, so a wider varint keeps its low 32 bits, as a protobuf
+// reader does (protowire-go#230). The wanted precs are what protobuf-go's
+// uint32 field gives for the same bytes, measured on #106.
+TEST(PbHardening, BigFloatPrecKeepsTheLow32Bits) {
+  {  // 2^32 is prec 0: a zero, whatever the mantissa says.
+    BigFloatHolder h;
+    ASSERT_TRUE(Unmarshal(BigFloatWire({25}, -3, uint64_t{1} << 32), h).ok());
+    EXPECT_EQ(h.F.prec, 0u);
+    EXPECT_TRUE(h.F.IsZero());
+  }
+  for (const auto& [wire_prec, want] : std::vector<std::pair<uint64_t, uint32_t>>{
+           {(uint64_t{1} << 32) + 1, 1}, {(uint64_t{1} << 32) + 53, 53}}) {
+    BigFloatHolder h;
+    ASSERT_TRUE(Unmarshal(BigFloatWire({25}, -3, wire_prec), h).ok()) << wire_prec;
+    EXPECT_EQ(h.F.prec, want) << wire_prec;
+  }
+  // 2^64-1 is 2^32-1 bits, which the precision bound then refuses (#108).
   BigFloatHolder h;
-  ASSERT_TRUE(Unmarshal(BigFloatWire({25}, -5, uint64_t{1} << 32), h).ok());
-  EXPECT_EQ(h.F.prec, std::numeric_limits<uint32_t>::max());
-  // Go's Marshal crashes here. This one must not allocate 512 MiB instead: it
-  // keeps the mantissa as it is, and five bytes of prec buy nothing.
-  EXPECT_LT(Marshal(h).size(), 32u);
+  auto st = Unmarshal(BigFloatWire({25}, -3, ~uint64_t{0}), h);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("prec 4294967295 implies"), std::string::npos) << st.ToString();
+}
+
+// A prec is bounded as a precision suffix is: by the digits its literal
+// needs, which MaxNumericLiteralDigits caps (protowire#499). The error text is
+// protowire-go's.
+TEST(PbHardening, BigFloatPrecBound) {
+  {  // 13603 bits is the last at the default, and decodes exactly.
+    BigFloatHolder h;
+    ASSERT_TRUE(Unmarshal(BigFloatWire({25}, -3, 13603), h).ok());
+    EXPECT_EQ(h.F.prec, 13603u);
+    EXPECT_EQ(h.F.mantissa, std::vector<uint8_t>{25});
+    EXPECT_EQ(h.F.exponent, -3);
+  }
+  for (uint64_t prec :
+       {uint64_t{13604}, uint64_t{1} << 27, uint64_t{2147483647}, uint64_t{4294967295}}) {
+    BigFloatHolder h;
+    auto st = Unmarshal(BigFloatWire({25}, -3, prec), h);
+    ASSERT_FALSE(st.ok()) << prec;
+    EXPECT_NE(st.message().find("pxf.BigFloat prec " + std::to_string(prec) + " implies "),
+              std::string::npos)
+        << st.ToString();
+    EXPECT_NE(st.message().find("digits; MaxNumericLiteralDigits=4096"), std::string::npos)
+        << st.ToString();
+  }
+  {  // A zero carries its prec, so it is bounded too.
+    BigFloatHolder h;
+    EXPECT_FALSE(Unmarshal(BigFloatWire({}, 0, 13604), h).ok());
+    EXPECT_TRUE(Unmarshal(BigFloatWire({}, 0, 13603), h).ok());
+  }
+  {  // The option moves the bound: 10 digits allow 2^29 (9 digits, plus one).
+    protowire::pb::UnmarshalOptions opts;
+    opts.max_numeric_literal_digits = 10;
+    BigFloatHolder h;
+    EXPECT_TRUE(Unmarshal(BigFloatWire({25}, -3, 29), h, opts).ok());
+    auto st = Unmarshal(BigFloatWire({25}, -3, 30), h, opts);
+    ASSERT_FALSE(st.ok());
+    EXPECT_NE(st.message().find("prec 30 implies 11 digits; MaxNumericLiteralDigits=10"),
+              std::string::npos)
+        << st.ToString();
+    opts.max_numeric_literal_digits = 5000;
+    EXPECT_TRUE(Unmarshal(BigFloatWire({25}, -3, 13604), h, opts).ok());
+  }
+  // Pinned divergence, open on #93: Go's Marshal refuses a prec past the
+  // default bound, and pb::Marshal, which returns no Status, writes it. Only a
+  // hand-built value or a raised decode option reaches this. It fails the day
+  // that decision lands.
+  BigFloatHolder h;
+  h.F = {{25}, -3, 13604, false};
+  EXPECT_FALSE(Marshal(h).empty());
 }
 
 // Each row's bytes are what protowire-go's Marshal wrote for the row's fields,

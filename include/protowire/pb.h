@@ -73,7 +73,8 @@ namespace protowire::pb {
 struct UnmarshalOptions {
   int max_message_size = 0;
   int max_nesting_depth = 0;
-  // Bounds the magnitude of pxf.Decimal.scale on the wire (a digit count).
+  // Bounds the magnitude of pxf.Decimal.scale on the wire (a digit count), and
+  // the digits a pxf.BigFloat's prec implies: prec 13603 at the default.
   int max_numeric_literal_digits = 0;
   // Bounds the magnitude of a pxf.BigFloat value's binary exponent: exponent
   // plus the mantissa's bit length.
@@ -235,8 +236,12 @@ Status UnmarshalBigIntMsg(std::span<const uint8_t> data, BigInt& out);
 // 0 selects the default.
 Status UnmarshalDecimalMsg(std::span<const uint8_t> data, Decimal& out, int max_digits);
 // max_exponent bounds the value's binary exponent (HARDENING.md
-// MaxBigFloatExponent); 0 selects the default.
-Status UnmarshalBigFloatMsg(std::span<const uint8_t> data, BigFloat& out, int max_exponent);
+// MaxBigFloatExponent) and max_digits the digits its prec implies
+// (MaxNumericLiteralDigits, protowire#499); 0 selects either default.
+Status UnmarshalBigFloatMsg(std::span<const uint8_t> data,
+                            BigFloat& out,
+                            int max_exponent,
+                            int max_digits);
 
 // ---- Marshal dispatch ----------------------------------------------------
 
@@ -511,7 +516,7 @@ inline Status UnmarshalScalar(std::span<const uint8_t> data,
     if (n < 0) return Status::Error("corrupt embedded message");
     consumed = n;
     if (depth + 1 > lim.max_depth) return DepthError(lim);
-    return UnmarshalBigFloatMsg(bytes, v, lim.max_big_float_exp);
+    return UnmarshalBigFloatMsg(bytes, v, lim.max_big_float_exp, lim.max_digits);
   } else if constexpr (HasFields<T>::value) {
     std::span<const uint8_t> bytes;
     int n = wire::ConsumeBytes(data, bytes);
