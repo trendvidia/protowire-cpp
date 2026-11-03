@@ -1,0 +1,14 @@
+syntax = "proto2";
+package groups.v1;
+import "sbe/annotations.proto";
+option (sbe.schema_id) = 2;
+message G {
+  option (sbe.template_id) = 1;
+  optional int32 a = 1;
+  repeated group Row = 2 {
+    optional int32 v = 3;
+  }
+  optional group Single = 4 {
+    optional string s = 5;
+  }
+}

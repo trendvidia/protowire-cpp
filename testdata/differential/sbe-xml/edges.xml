@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- No package, two <types>, refs, unknown elements and types, entities, CDATA. -->
+<messageSchema id=" 9 " version="" byteOrder="bigEndian" description="a &amp; b">
+    <types>
+        <enum name="orderStatusCode" encodingType="char">
+            <validValue name="newOrder"> 0 </validValue>
+            <validValue name="partiallyFilled"><![CDATA[1]]></validValue>
+            <validValue name="DONE">2<!-- c --></validValue>
+            <unknown>ignored</unknown>
+        </enum>
+        <composite name="Price">
+            <type name="mantissa" primitiveType="int64"/>
+            <ref name="currencyCode" type="orderStatusCode"/>
+            <type name="exponent" primitiveType="int8"/>
+        </composite>
+        <set name="Flags" encodingType="uint8"><choice name="a">0</choice></set>
+    </types>
+    <types>
+        <type name="Wide" primitiveType="uint16"/>
+        <type name="uint8" primitiveType="int16"/>
+    </types>
+    <sbe:message name="Edge" id="7" description="x">
+        <field name="URLValue" id="1" type="Wide"/>
+        <field name="orderID" id="2" type="orderStatusCode"/>
+        <field name="price" id="3" type="Price"/>
+        <field name="mystery" id="4" type="Mystery"/>
+        <field name="shadowed" id="5" type="uint8"/>
+        <field name="a" id="6" type="float"/>
+        <data name="blob" id="8" type="varData"/>
+        <group name="entries" id="10">
+            <field name="lastPx" id="1" type="double"/>
+            <group name="nested" id="2"><field name="z" id="1" type="int8"/></group>
+        </group>
+        <group name="class" id="11"><field name="k" id="1" type="uint64"/></group>
+        <group name="s" id="12"></group>
+        <group name="legs" id="13"><field name="side" id="1" type="char"/></group>
+    </sbe:message>
+    <message name="Plain" id="8"/>
+    <other:message name="Prefixed" id="9" xmlns:other="urn:x"/>
+</messageSchema>

@@ -30,6 +30,7 @@
 #include "protowire/detail/stream.h"
 #include "protowire/limits.h"
 #include "protowire/sbe/template.h"
+#include "protowire/sbe/xml.h"
 
 namespace protowire::sbe {
 

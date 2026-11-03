@@ -1,0 +1,3 @@
+syntax = "proto3";
+package none.v1;
+message M { int32 a = 1; }

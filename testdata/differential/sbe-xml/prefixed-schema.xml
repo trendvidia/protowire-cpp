@@ -1,0 +1,1 @@
+<p:messageSchema xmlns:p="urn:p" p:package="pre.v1" id="4"><p:types><p:type name="t" primitiveType="uint32"/></p:types><p:message name="M" id="1"><p:field name="f" id="1" type="t"/></p:message></p:messageSchema>
