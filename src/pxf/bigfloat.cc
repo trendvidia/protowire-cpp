@@ -2,6 +2,8 @@
 // Copyright (c) 2026 TrendVidia, LLC.
 #include "bigfloat.h"
 
+#include "protowire/detail/bigprec.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <tuple>
@@ -259,15 +261,6 @@ uint64_t RoundToBits(Nat* m, uint64_t bits, bool sticky) {
   return shift;
 }
 
-// Pow2Digits returns the number of decimal digits of 2^p:
-// floor(p × log10(2)) + 1, with log10(2) as a 64-bit fraction.
-int64_t Pow2Digits(uint32_t p) {
-  constexpr uint64_t kLog10Of2 = 0x4d104d427de7fbccULL;  // floor(log10(2) × 2^64)
-  const uint64_t high = p * (kLog10Of2 >> 32);
-  const uint64_t low = p * (kLog10Of2 & 0xffffffffULL);
-  return static_cast<int64_t>((high + (low >> 32)) >> 32) + 1;
-}
-
 std::string Clip(std::string_view s) {
   constexpr size_t kMax = 40;
   if (s.size() <= kMax) return std::string(s);
@@ -385,7 +378,7 @@ Status ParseBigFloatLiteral(std::string_view literal,
                            ": precision suffix p" + Clip(prec_digits) +
                            " is not a positive bit count");
     }
-    const int64_t n = Pow2Digits(prec) + 1;
+    const int64_t n = ::protowire::detail::BigFloatPrecDigits(prec);
     if (n > max_digits) {
       return Status::Error("big float literal " + Clip(literal) + "p" + std::to_string(prec) +
                            ": precision p" + std::to_string(prec) + " renders to " +
@@ -482,7 +475,7 @@ StatusOr<std::string> FormatBigFloatLiteral(const BigFloatFields& f,
     return Status::Error("pxf.BigFloat binary exponent " + std::to_string(bin) +
                          " exceeds MaxBigFloatExponent=" + std::to_string(max_exponent));
   }
-  const int64_t digits = Pow2Digits(f.prec) + 1;
+  const int64_t digits = ::protowire::detail::BigFloatPrecDigits(f.prec);
   if (digits > max_digits) {
     return Status::Error("pxf.BigFloat prec " + std::to_string(f.prec) + " bits renders to " +
                          std::to_string(digits) +
