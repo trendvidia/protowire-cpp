@@ -102,6 +102,13 @@ struct MarshalOptions {
   // Fields to write as `field = null`, for a message with no _null mask set.
   // The Result must outlive the call.
   const Result* null_fields = nullptr;
+  // The deepest document Marshal writes, counted as a decoder counts it: the
+  // root is depth 0, and every '{' or '[' is one descent. A message that needs
+  // more is an error, because a reader at the same limit would refuse the
+  // document (HARDENING.md § Recursion, protowire#502). An Any past the limit
+  // is not: it stays as type_url and value. 0 selects kMaxNestingDepth. Raise
+  // it only with UnmarshalOptions::max_nesting_depth on every reader.
+  int max_nesting_depth = 0;
 };
 
 }  // namespace protowire::pxf

@@ -290,15 +290,26 @@ TEST_F(PxfAny, RawAnyReadsBackUnchanged) {
 }
 
 // One level below the limit the Any is unpacked, unless its body nests past
-// the limit once it sits at its real depth; at the limit it is not unpacked.
-TEST_F(PxfAny, AnyAtTheDepthLimitStaysRaw) {
+// the limit once it sits at its real depth. At the limit its block, raw or
+// not, would hold contents a reader at that limit refuses, so Marshal refuses
+// the message (protowire#502); raising the writer's limit writes it.
+TEST_F(PxfAny, AnyAtTheDepthLimit) {
   const auto* node = importer_->pool()->FindMessageTypeByName("any.test.Node");
   ASSERT_NE(node, nullptr);
   const std::string value("\x08\x2a", 2);
-  for (int depth : {protowire::kMaxNestingDepth - 1, protowire::kMaxNestingDepth}) {
+  const struct {
+    int depth;
+    int limit;  // 0 is the default
+    bool written;
+  } cases[] = {
+      {protowire::kMaxNestingDepth - 1, 0, true},
+      {protowire::kMaxNestingDepth, 0, false},
+      {protowire::kMaxNestingDepth, protowire::kMaxNestingDepth + 1, true},
+  };
+  for (const auto& c : cases) {
     std::unique_ptr<pbuf::Message> root(factory_->GetPrototype(node)->New());
     pbuf::Message* cur = root.get();
-    for (int i = 0; i < depth; ++i) {
+    for (int i = 0; i < c.depth; ++i) {
       cur = cur->GetReflection()->MutableMessage(cur, node->FindFieldByName("next"));
     }
     auto* any = cur->GetReflection()->MutableMessage(cur, node->FindFieldByName("payload"));
@@ -308,10 +319,23 @@ TEST_F(PxfAny, AnyAtTheDepthLimitStaysRaw) {
     any->GetReflection()->SetString(any, any_desc->FindFieldByName("value"), value);
     protowire::pxf::MarshalOptions opts;
     opts.type_resolver = resolver_.get();
+    opts.max_nesting_depth = c.limit;
     auto out = protowire::pxf::Marshal(*root, opts);
-    ASSERT_TRUE(out.ok()) << out.status().ToString();
-    const bool unpacked = out->find("@type") != std::string::npos;
-    EXPECT_EQ(unpacked, depth < protowire::kMaxNestingDepth) << "depth " << depth;
+    const std::string where =
+        "depth " + std::to_string(c.depth) + ", limit " + std::to_string(c.limit);
+    if (!c.written) {
+      ASSERT_FALSE(out.ok()) << where;
+      EXPECT_EQ(out.status().message(), "pxf: nesting depth exceeds MaxNestingDepth=100") << where;
+      continue;
+    }
+    ASSERT_TRUE(out.ok()) << where << ": " << out.status().ToString();
+    EXPECT_NE(out->find("@type"), std::string::npos) << where;
+    std::unique_ptr<pbuf::Message> back(factory_->GetPrototype(node)->New());
+    protowire::pxf::UnmarshalOptions uopts;
+    uopts.type_resolver = resolver_.get();
+    uopts.max_nesting_depth = c.limit;
+    ASSERT_TRUE(protowire::pxf::Unmarshal(*out, back.get(), uopts).ok()) << where;
+    EXPECT_EQ(back->SerializeAsString(), root->SerializeAsString()) << where;
   }
 
   // A Node holding a Node: its submessage is one level too deep at depth 99.

@@ -13,6 +13,7 @@ number says nothing about any other port. See the Releases section of
 
 ### Added
 
+- **`pxf::MarshalOptions::max_nesting_depth`** (#107, protowire#502). `0` means `kMaxNestingDepth`. Raise it only when every reader raises `UnmarshalOptions::max_nesting_depth` to match.
 - **`pb::Encoder` and `pb::Decoder`,** with `SetMaxFrameSize`, `kDefaultMaxFrameSize` and `kErrFramingCorrupt` (#83), protobuf's length-delimited framing over a `std::ostream` and `std::istream`. `Decoder` takes `UnmarshalOptions`, applied to each frame.
 - **`sbe::Codec::NewEncoder` and `NewDecoder`,** with the same limits, framed by a Simple Open Framing Header, and **`sbe::Codec::UnmarshalDescriptor`,** which allocates the message (#83).
 - **`pb::UnmarshalOptions::max_big_float_exponent`** (#93). `pb::Unmarshal` now refuses a `pxf.BigFloat` whose binary exponent is past `kMaxBigFloatExponent`, on both signs, before it stores the value (protowire#281). **This rejects messages that were accepted before.** `check_decode` passes `--limit MaxBigFloatExponent=N` to the pb decoder as well.
@@ -21,6 +22,7 @@ number says nothing about any other port. See the Releases section of
 
 ### Changed
 
+- **`pxf::Marshal` refuses a message nested past `kMaxNestingDepth`** (#107, protowire#502), as protowire-go does (protowire-go#236), with `pxf: nesting depth exceeds MaxNestingDepth=100`. Depth is counted as a decoder counts it: the root is depth 0, and each `{` or `[` is one level, so a list of lists stops at 50. It used to write a document that a reader at the same limit refused. **This narrows what encodes.** `AppendDatasetRow` refuses too. An Any whose body would be too deep stays as `type_url` and `value`, so an Any's contents never cause a refusal; only an Any that itself sits past the limit does. An Any's value is also no longer cut off at libprotobuf's 100-level parse limit when the writer's limit is raised. `pb::Marshal` cannot refuse yet (#93).
 - **A schema that redefines a well-known type with the wrong shape is refused at bind time** (draft -01 §wkt-shapes, protowire#487, protowire-go#218). This narrows what binds. A message named, say, `pxf.Secret` or `google.protobuf.Timestamp` without the fields the codec reads now gives a violation of the new kind `ViolationKind::kWellKnownShape`. Copies of the canonical schemas are unaffected, and field numbers are not checked. The check also reaches a schema's own file at a `google/protobuf/` path, which the closure walk used to skip.
 
 ### Fixed

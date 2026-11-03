@@ -23,6 +23,8 @@
 
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/dynamic_message.h>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/message.h>
 
 #include "protowire/detail/base64.h"
@@ -44,7 +46,10 @@ namespace {
 
 class Encoder {
  public:
-  Encoder(const MarshalOptions& opts, std::string& out) : opts_(opts), out_(out) {}
+  Encoder(const MarshalOptions& opts, std::string& out)
+      : opts_(opts),
+        out_(out),
+        max_depth_(opts.max_nesting_depth > 0 ? opts.max_nesting_depth : kMaxNestingDepth) {}
 
   // SetNullSet names the fields written as `field = null`, by the path
   // UnmarshalFull records them under. Paths are only built once there is a
@@ -109,8 +114,20 @@ class Encoder {
   void EmitBytes(std::string_view raw);
   void EmitFloat(double v, bool is_float);
 
+  // CheckDepth refuses a block or list whose contents sit at level, the
+  // decoder's depth there (HARDENING.md § Recursion). It records the refusal,
+  // so that an Any whose body is too deep can stay raw instead.
+  Status CheckDepth(int level) {
+    if (level <= max_depth_) return Status::OK();
+    depth_refused_ = true;
+    return Status::Error("pxf: nesting depth exceeds MaxNestingDepth=" +
+                         std::to_string(max_depth_));
+  }
+
   const MarshalOptions& opts_;
   std::string& out_;
+  int max_depth_;
+  bool depth_refused_ = false;
   const NullSet* null_set_ = nullptr;
   bool cell_bodies_ = false;
   std::string path_prefix_;
@@ -357,13 +374,22 @@ Status Encoder::TryEncodeAny(const FieldDescriptor* fd,
   const std::string type_url = any.GetReflection()->GetString(any, d->FindFieldByName("type_url"));
   // An Any at the depth limit is not unpacked: its block has no room for a
   // body's submessages, and stopping here bounds a chain of Anys.
-  if (type_url.empty() || level >= kMaxNestingDepth) return Status::OK();
+  if (type_url.empty() || level >= max_depth_) return Status::OK();
   const auto* inner_desc = opts_.type_resolver->FindMessageByURL(type_url);
   if (inner_desc == nullptr) return Status::OK();
   pb::DynamicMessageFactory factory(inner_desc->file()->pool());
   std::unique_ptr<Message> inner(factory.GetPrototype(inner_desc)->New());
   const std::string value = any.GetReflection()->GetString(any, d->FindFieldByName("value"));
-  if (!inner->ParseFromString(value)) return Status::OK();
+  {
+    // libprotobuf stops at 100 levels by default, which would keep a body the
+    // writer's raised limit allows raw. A value nests no deeper in protobuf
+    // than its body does in text, so one deeper than the room left could not
+    // be written as a body anyway.
+    pb::io::ArrayInputStream raw(value.data(), static_cast<int>(value.size()));
+    pb::io::CodedInputStream in(&raw);
+    in.SetRecursionLimit(max_depth_ - level);
+    if (!inner->ParseFromCodedStream(&in) || !in.ConsumedEntireMessage()) return Status::OK();
+  }
   const size_t start = out_.size();
   WriteBlockOpen(level, fd->name());
   Indent(level + 1);
@@ -372,13 +398,22 @@ Status Encoder::TryEncodeAny(const FieldDescriptor* fd,
   out_ += "\n";
   const size_t body_start = out_.size();
   std::string saved = Enter(fd->name());
+  const bool refused_before = depth_refused_;
+  depth_refused_ = false;
   Status st = EncodeMessage(*inner, level + 1);
   path_prefix_ = std::move(saved);
+  if (!st.ok() && depth_refused_) {
+    // The value is too deep to unpack here; its bytes are not.
+    depth_refused_ = refused_before;
+    out_.resize(start);
+    return Status::OK();
+  }
+  depth_refused_ = refused_before;
   if (!st.ok()) return st;
   // A body that would not read back as the same value is taken back, and
   // the Any stays as its own fields, which always read back.
   const std::string_view body = std::string_view(out_).substr(body_start);
-  if (!AnyBodyReadsBack(body, inner_desc, opts_.type_resolver, level, value)) {
+  if (!AnyBodyReadsBack(body, inner_desc, opts_.type_resolver, level, max_depth_, value)) {
     out_.resize(start);
     return Status::OK();
   }
@@ -454,6 +489,7 @@ Status Encoder::EncodeListField(const Message& msg, const FieldDescriptor* fd, i
   if (const FieldDescriptor* key_fd = KeyField(fd); key_fd != nullptr && n > 0) {
     if (KeyedFormEligible(msg, fd, key_fd)) return EncodeKeyedList(msg, fd, key_fd, level);
   }
+  if (Status st = CheckDepth(level + 1); !st.ok()) return st;
   WriteFieldPrefix(level, fd->name());
   out_ += "[\n";
   for (int i = 0; i < n; ++i) {
@@ -485,6 +521,7 @@ Status Encoder::EncodeListField(const Message& msg, const FieldDescriptor* fd, i
 Status Encoder::EncodeMapField(const Message& msg, const FieldDescriptor* fd, int level) {
   const Reflection* r = msg.GetReflection();
   int n = r->FieldSize(msg, fd);
+  if (Status st = CheckDepth(level + 1); !st.ok()) return st;
   WriteFieldPrefix(level, fd->name());
   out_ += "{\n";
   const FieldDescriptor* key_fd = fd->message_type()->map_key();
@@ -551,6 +588,7 @@ Status Encoder::EncodeMessage(const Message& msg, int level) {
   // nested messages don't inherit the skip.
   const FieldDescriptor* skip_key = skip_key_fd_;
   skip_key_fd_ = nullptr;
+  if (Status st = CheckDepth(level); !st.ok()) return st;
   for (int i = 0; i < desc->field_count(); ++i) {
     const FieldDescriptor* fd = desc->field(i);
     if (skip_key != nullptr && fd == skip_key) continue;
@@ -575,6 +613,9 @@ Status Encoder::EncodeMessage(const Message& msg, int level) {
         WriteFieldPrefix(level, fd->name());
         out_ += "null\n";
       } else if (write) {  // the zero value, written out
+        if (fd->is_repeated()) {
+          if (Status st = CheckDepth(level + 1); !st.ok()) return st;
+        }
         WriteFieldPrefix(level, fd->name());
         if (fd->is_repeated()) {
           out_ += EmptyCollection(fd);
