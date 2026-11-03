@@ -352,3 +352,121 @@ TEST_F(SbeHardening, TemplateIdMismatchRejected) {
 }
 
 }  // namespace
+
+namespace {
+
+// Draft -01 § SBE Annotations (protowire#495): an overlong string is cut at the
+// last whole character at or before the limit and NUL-padded, so it still
+// decodes; a bytes field is cut at the limit. Mirrors
+// TestOverlongStringCutOnCharacterBoundary in protowire-go (#246).
+constexpr const char* kCutProto = R"(
+syntax = "proto3";
+package sbe.cut;
+
+import "sbe/annotations.proto";
+
+option (sbe.schema_id) = 2;
+option (sbe.version) = 0;
+
+message CutCode {
+  string text = 1 [(sbe.length) = 8];
+}
+
+message CutRow {
+  string tag = 1 [(sbe.length) = 8];
+}
+
+message Cut {
+  option (sbe.template_id) = 2;
+  string text = 1 [(sbe.length) = 8];
+  bytes raw = 2 [(sbe.length) = 8];
+  CutCode code = 3;
+  repeated CutRow rows = 4;
+}
+)";
+
+TEST(SbeCut, OverlongStringCutOnCharacterBoundary) {
+  pb::compiler::DiskSourceTree tree;
+  tree.MapPath("", PROTO_DIR);
+  tree.MapPath("", WKT_PROTO_DIR);
+  tree.MapPath("", protowire_test::FixtureDir());
+  {
+    FILE* f = std::fopen((protowire_test::FixtureDir() + "/cut.proto").c_str(), "w");
+    std::fwrite(kCutProto, 1, std::strlen(kCutProto), f);
+    std::fclose(f);
+  }
+  CollectErrors errors;
+  pb::compiler::Importer importer(&tree, &errors);
+  const pb::FileDescriptor* file = importer.Import("cut.proto");
+  ASSERT_NE(file, nullptr) << errors.last_;
+  const pb::Descriptor* desc = file->FindMessageTypeByName("Cut");
+  ASSERT_NE(desc, nullptr);
+  pb::DynamicMessageFactory factory(importer.pool());
+  auto codec = protowire::sbe::Codec::New({file});
+  ASSERT_TRUE(codec.ok()) << codec.status().ToString();
+
+  const auto marshal = [&](const std::string& text) {
+    std::unique_ptr<pb::Message> msg(factory.GetPrototype(desc)->New());
+    const pb::Reflection* r = msg->GetReflection();
+    r->SetString(msg.get(), desc->FindFieldByName("text"), text);
+    r->SetString(msg.get(), desc->FindFieldByName("raw"), text);
+    pb::Message* code = r->MutableMessage(msg.get(), desc->FindFieldByName("code"));
+    code->GetReflection()->SetString(code, code->GetDescriptor()->FindFieldByName("text"), text);
+    pb::Message* row = r->AddMessage(msg.get(), desc->FindFieldByName("rows"));
+    row->GetReflection()->SetString(row, row->GetDescriptor()->FindFieldByName("tag"), text);
+    auto frame = codec->Marshal(*msg);
+    EXPECT_TRUE(frame.ok()) << frame.status().ToString();
+    return frame.ok() ? *frame : std::vector<uint8_t>();
+  };
+  // Header 8; block: text 0-8, raw 8-16, code.text 16-24; group header 4; the
+  // one row's tag 28-36.
+  constexpr size_t kBlock = 8;
+  const struct {
+    const char* name;
+    size_t at;
+  } sites[] = {
+      {"root field", kBlock}, {"composite field", kBlock + 16}, {"group field", kBlock + 28}};
+  const struct {
+    const char* name;
+    std::string in, text;
+  } cases[] = {
+      {"2-byte character across the limit", "ABCDEFG\xc3\xa9", "ABCDEFG"},
+      {"3-byte character across the limit", "ABCDEF\xe2\x82\xac", "ABCDEF"},
+      {"3-byte character, one byte over", "ABCDE\xe2\x82\xacx", "ABCDE\xe2\x82\xac"},
+      {"4-byte character across the limit", "ABCDE\xf0\x9f\x98\x80", "ABCDE"},
+      {"limit between two 4-byte characters",
+       "\xf0\x9f\x98\x80\xf0\x9f\x98\x80\xf0\x9f\x98\x80",
+       "\xf0\x9f\x98\x80\xf0\x9f\x98\x80"},
+      {"cut already on a boundary", "ABCDEFGHI", "ABCDEFGH"},
+      {"fits exactly", "ABCDEF\xc3\xa9", "ABCDEF\xc3\xa9"},
+  };
+  for (const auto& c : cases) {
+    const std::vector<uint8_t> frame = marshal(c.in);
+    ASSERT_GE(frame.size(), kBlock + 36) << c.name;
+    std::vector<uint8_t> want(c.text.begin(), c.text.end());
+    want.resize(8, 0);
+    for (const auto& s : sites) {
+      EXPECT_EQ(std::vector<uint8_t>(frame.begin() + s.at, frame.begin() + s.at + 8), want)
+          << c.name << ", " << s.name;
+    }
+    EXPECT_EQ(std::vector<uint8_t>(frame.begin() + kBlock + 8, frame.begin() + kBlock + 16),
+              std::vector<uint8_t>(c.in.begin(), c.in.begin() + 8))
+        << c.name << ", bytes field";
+    std::unique_ptr<pb::Message> got(factory.GetPrototype(desc)->New());
+    if (!codec->Unmarshal(frame, got.get()).ok()) {
+      ADD_FAILURE() << c.name << " does not decode";
+      continue;
+    }
+    EXPECT_EQ(got->GetReflection()->GetString(*got, desc->FindFieldByName("text")), c.text)
+        << c.name;
+  }
+
+  // The issue's example: ABCDEFGé in a string field and in a bytes field.
+  const std::vector<uint8_t> frame = marshal("ABCDEFG\xc3\xa9");
+  EXPECT_EQ(std::vector<uint8_t>(frame.begin() + kBlock, frame.begin() + kBlock + 8),
+            (std::vector<uint8_t>{0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x00}));
+  EXPECT_EQ(std::vector<uint8_t>(frame.begin() + kBlock + 8, frame.begin() + kBlock + 16),
+            (std::vector<uint8_t>{0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0xC3}));
+}
+
+}  // namespace
