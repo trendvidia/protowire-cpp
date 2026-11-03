@@ -37,6 +37,7 @@ constexpr const char* kProto = R"(
 syntax = "proto3";
 package any.test;
 import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
 import "pxf/annotations.proto";
 
 message ErrorDetail {
@@ -56,6 +57,16 @@ message NeedsName {
 message Node {
   Node next = 1;
   google.protobuf.Any payload = 2;
+}
+
+message Bag {
+  map<string, int32> counts = 1;
+  google.protobuf.Timestamp at = 2;
+  ErrorDetail detail = 3;
+}
+
+message WithDefault {
+  optional int32 level = 1 [(pxf.default) = "7"];
 }
 )";
 
@@ -361,6 +372,103 @@ TEST_F(PxfAny, ChainPastTheLimitIsNotWalked) {
   const int at_the_limit = lookups(protowire::kMaxNestingDepth + 10);
   EXPECT_GT(at_the_limit, 0);
   EXPECT_EQ(lookups(protowire::kMaxNestingDepth + 200), at_the_limit);
+}
+
+// protowire#501: each case that decodes to other bytes is written so that
+// reading the text back gives the Any's exact value bytes. A body cannot read
+// back unchanged in any of them, so each Any stays raw.
+TEST_F(PxfAny, EveryChangingCaseReadsBackToTheSameBytes) {
+  struct Case {
+    const char* name;
+    const char* type_url;
+    std::string value;
+  };
+  const Case cases[] = {
+      {"unknown field nested", "any.test.Bag", std::string("\x1a\x02\x48\x01", 4)},
+      {"map out of key order",
+       "any.test.Bag",
+       std::string("\x0a\x05\x0a\x01"
+                   "b"
+                   "\x10\x01"
+                   "\x0a\x05\x0a\x01"
+                   "a"
+                   "\x10\x02",
+                   14)},
+      {"explicit zero", "any.test.ErrorDetail", std::string("\x08\x00", 2)},
+      // seconds = 253402300800, 10000-01-01T00:00:00Z: past what a literal holds.
+      {"timestamp past the literal",
+       "any.test.Bag",
+       std::string("\x12\x07\x08\x80\x83\xd1\xff\xaf\x07", 9)},
+      {"unset default", "any.test.WithDefault", ""},
+      {"unset required", "any.test.NeedsName", ""},
+  };
+  for (const Case& c : cases) {
+    auto msg = NewEvent();
+    const std::string text = MarshalPayload(msg.get(), desc_, resolver_.get(), c.type_url, c.value);
+    EXPECT_EQ(text.find("@type"), std::string::npos) << c.name << ":\n" << text;
+    auto back = NewEvent();
+    protowire::pxf::UnmarshalOptions opts;
+    opts.type_resolver = resolver_.get();
+    if (!protowire::pxf::Unmarshal(text, back.get(), opts).ok()) {
+      ADD_FAILURE() << c.name << " does not read back:\n" << text;
+      continue;
+    }
+    const pbuf::Message& any =
+        back->GetReflection()->GetMessage(*back, desc_->FindFieldByName("payload"));
+    const pbuf::Descriptor* any_desc = any.GetDescriptor();
+    EXPECT_EQ(any.GetReflection()->GetString(any, any_desc->FindFieldByName("type_url")),
+              c.type_url)
+        << c.name;
+    EXPECT_EQ(any.GetReflection()->GetString(any, any_desc->FindFieldByName("value")), c.value)
+        << c.name << ":\n"
+        << text;
+  }
+}
+
+// The control for the cases above: the same Bag in key order, with no zeros
+// written and a Timestamp a literal holds, is written as a body.
+TEST_F(PxfAny, BagInCanonicalFormIsABody) {
+  auto msg = NewEvent();
+  const std::string value(
+      "\x0a\x05\x0a\x01"
+      "a"
+      "\x10\x02"
+      "\x0a\x05\x0a\x01"
+      "b"
+      "\x10\x01"
+      "\x12\x02\x08\x01",
+      18);
+  const std::string text = MarshalPayload(msg.get(), desc_, resolver_.get(), "any.test.Bag", value);
+  EXPECT_NE(text.find("@type = \"any.test.Bag\""), std::string::npos) << text;
+}
+
+// A chain of Anys longer than MaxNestingDepth still reads back: the encoder
+// leaves the Any at the limit raw rather than writing text no reader accepts.
+TEST_F(PxfAny, ChainPastTheLimitReadsBack) {
+  const auto* node = importer_->pool()->FindMessageTypeByName("any.test.Node");
+  ASSERT_NE(node, nullptr);
+  const pbuf::FieldDescriptor* payload = node->FindFieldByName("payload");
+  std::string value;
+  std::unique_ptr<pbuf::Message> root;
+  for (int i = 0; i < protowire::kMaxNestingDepth + 10; ++i) {
+    root.reset(factory_->GetPrototype(node)->New());
+    auto* any = root->GetReflection()->MutableMessage(root.get(), payload);
+    const pbuf::Descriptor* any_desc = any->GetDescriptor();
+    any->GetReflection()->SetString(any, any_desc->FindFieldByName("type_url"), "any.test.Node");
+    any->GetReflection()->SetString(any, any_desc->FindFieldByName("value"), value);
+    value = root->SerializeAsString();
+  }
+  protowire::pxf::MarshalOptions mopts;
+  mopts.type_resolver = resolver_.get();
+  auto out = protowire::pxf::Marshal(*root, mopts);
+  ASSERT_TRUE(out.ok()) << out.status().ToString();
+  ASSERT_NE(out->find("@type"), std::string::npos);
+  ASSERT_NE(out->find("type_url"), std::string::npos);
+  std::unique_ptr<pbuf::Message> back(factory_->GetPrototype(node)->New());
+  protowire::pxf::UnmarshalOptions uopts;
+  uopts.type_resolver = resolver_.get();
+  ASSERT_TRUE(protowire::pxf::Unmarshal(*out, back.get(), uopts).ok());
+  EXPECT_EQ(back->SerializeAsString(), root->SerializeAsString());
 }
 
 }  // namespace
