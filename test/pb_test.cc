@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -573,9 +574,58 @@ TEST(Pb, BigFloatWireIsGos) {
 }
 
 TEST(Pb, DecimalScaleIsAPlainVarint) {
+  // Decimal {unscaled: 05, scale: -2}. Marshal never writes a negative scale,
+  // so this is read rather than round-tripped.
+  BigNumStruct got;
+  ASSERT_TRUE(Unmarshal(std::vector<uint8_t>{0x12,
+                                             0x0e,
+                                             0x0a,
+                                             0x01,
+                                             0x05,
+                                             0x10,
+                                             0xfe,
+                                             0xff,
+                                             0xff,
+                                             0xff,
+                                             0xff,
+                                             0xff,
+                                             0xff,
+                                             0xff,
+                                             0xff,
+                                             0x01},
+                        got)
+                  .ok());
+  EXPECT_EQ(got.price.scale, -2);
+  EXPECT_EQ(*protowire::pb::FormatDecimal(got.price), "500");
+}
+
+// protowire-go holds a big.Rat, so it writes a value's smallest non-negative
+// scale. The rows of testdata/differential/pb-bignum/wire.txt compare the bytes
+// with Go's; these pin the cases the differential cannot reach.
+TEST(Pb, DecimalIsWrittenReduced) {
+  BigNumStruct v;
+  ASSERT_TRUE(protowire::pb::ParseDecimal("1.00", v.price));
+  EXPECT_EQ(Marshal(v), (std::vector<uint8_t>{0x12, 0x03, 0x0a, 0x01, 0x01}));
+  // The struct keeps what it was given, and so does its text.
+  EXPECT_EQ(v.price.scale, 2);
+  EXPECT_EQ(*protowire::pb::FormatDecimal(v.price), "1.00");
+
+  v.price = {};
+  v.price.unscaled = {5};
+  v.price.scale = -2;  // 500
+  EXPECT_EQ(Marshal(v), (std::vector<uint8_t>{0x12, 0x04, 0x0a, 0x02, 0x01, 0xf4}));
+
+  v.price = {};
+  v.price.scale = 2;  // a zero is the field's zero value at any scale
+  EXPECT_TRUE(Marshal(v).empty());
+}
+
+TEST(Pb, DecimalPastTheScaleBoundKeepsItsForm) {
+  // Go's Marshal refuses these and pb::Marshal cannot (#93), and the negative
+  // one would otherwise ask for 2 GiB of zeros.
   BigNumStruct v;
   v.price.unscaled = {5};
-  v.price.scale = -2;
+  v.price.scale = std::numeric_limits<int32_t>::min();
   EXPECT_EQ(Marshal(v),
             (std::vector<uint8_t>{0x12,
                                   0x0e,
@@ -583,19 +633,18 @@ TEST(Pb, DecimalScaleIsAPlainVarint) {
                                   0x01,
                                   0x05,
                                   0x10,
-                                  0xfe,
-                                  0xff,
-                                  0xff,
-                                  0xff,
-                                  0xff,
+                                  0x80,
+                                  0x80,
+                                  0x80,
+                                  0x80,
+                                  0xf8,
                                   0xff,
                                   0xff,
                                   0xff,
                                   0xff,
                                   0x01}));
-  BigNumStruct got;
-  ASSERT_TRUE(Unmarshal(Marshal(v), got).ok());
-  EXPECT_EQ(got.price.scale, -2);
+  v.price.scale = 4097;
+  EXPECT_EQ(Marshal(v), (std::vector<uint8_t>{0x12, 0x06, 0x0a, 0x01, 0x05, 0x10, 0x81, 0x20}));
 }
 
 TEST(Pb, BigNumbersDecodeToValues) {

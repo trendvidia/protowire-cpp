@@ -252,6 +252,79 @@ StatusOr<std::string> FormatDecimal(const Decimal& v) {
 
 // --- Wire-format nested-message helpers (called from pb.h templates) -----
 
+namespace {
+
+// Reduce works on base 2^32 limbs, least significant first, a batch of nine
+// digits at a time. One digit at a time over bytes took 48 s on a 4 MiB value,
+// and a message that size must not be able to stall Marshal.
+constexpr uint32_t kPow10[] = {
+    1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000};
+constexpr int kBatchDigits = 9;
+
+std::vector<uint32_t> ToLimbs(const std::vector<uint8_t>& mag) {
+  std::vector<uint32_t> limbs((mag.size() + 3) / 4, 0);
+  for (size_t i = 0; i < mag.size(); ++i) {
+    const size_t pos = mag.size() - 1 - i;  // bytes from the least significant
+    limbs[i / 4] |= static_cast<uint32_t>(mag[pos]) << (8 * (i % 4));
+  }
+  return limbs;
+}
+
+std::vector<uint8_t> FromLimbs(const std::vector<uint32_t>& limbs) {
+  std::vector<uint8_t> mag(limbs.size() * 4);
+  for (size_t i = 0; i < mag.size(); ++i) {
+    mag[mag.size() - 1 - i] = static_cast<uint8_t>(limbs[i / 4] >> (8 * (i % 4)));
+  }
+  TrimLeadingZeros(mag);
+  return mag;
+}
+
+void MultiplyLimbs(std::vector<uint32_t>& limbs, uint32_t factor) {
+  uint64_t carry = 0;
+  for (uint32_t& limb : limbs) {
+    const uint64_t v = uint64_t{limb} * factor + carry;
+    limb = static_cast<uint32_t>(v);
+    carry = v >> 32;
+  }
+  if (carry != 0) limbs.push_back(static_cast<uint32_t>(carry));
+}
+
+// Leaves the quotient in quotient and returns the remainder.
+uint32_t DivideLimbs(const std::vector<uint32_t>& limbs,
+                     uint32_t divisor,
+                     std::vector<uint32_t>& quotient) {
+  quotient.resize(limbs.size());
+  uint64_t rem = 0;
+  for (size_t i = limbs.size(); i-- > 0;) {
+    const uint64_t cur = (rem << 32) | limbs[i];
+    quotient[i] = static_cast<uint32_t>(cur / divisor);
+    rem = cur % divisor;
+  }
+  while (!quotient.empty() && quotient.back() == 0) quotient.pop_back();
+  return static_cast<uint32_t>(rem);
+}
+
+// Rewrites a non-zero unscaled × 10^(-scale) with the smallest scale >= 0 that
+// holds it exactly, which is what a big.Rat comes back as.
+void Reduce(std::vector<uint8_t>& unscaled, int64_t& scale) {
+  std::vector<uint32_t> limbs = ToLimbs(unscaled);
+  while (scale < 0) {
+    const int step = static_cast<int>(std::min<int64_t>(kBatchDigits, -scale));
+    MultiplyLimbs(limbs, kPow10[step]);
+    scale += step;
+  }
+  std::vector<uint32_t> quotient;
+  for (int step : {kBatchDigits, 1}) {
+    while (scale >= step && DivideLimbs(limbs, kPow10[step], quotient) == 0) {
+      limbs.swap(quotient);
+      scale -= step;
+    }
+  }
+  unscaled = FromLimbs(limbs);
+}
+
+}  // namespace
+
 namespace detail {
 
 void MarshalBigIntMsg(const BigInt& v, std::vector<uint8_t>& out) {
@@ -265,16 +338,33 @@ void MarshalBigIntMsg(const BigInt& v, std::vector<uint8_t>& out) {
   }
 }
 
+// Writes the form protowire-go writes, which is one per value: Go holds a
+// big.Rat, which has no scale to keep, so 1.00 goes out as 1 and 5e2 as 500. The
+// text path does not come through here, and keeps the scale a literal gave it.
 void MarshalDecimalMsg(const Decimal& v, std::vector<uint8_t>& out) {
-  if (!v.unscaled.empty()) {
-    wire::AppendTag(out, 1, wire::kBytes);
-    wire::AppendBytes(out, v.unscaled);
+  std::vector<uint8_t> unscaled = v.unscaled;
+  TrimLeadingZeros(unscaled);
+  if (unscaled.empty()) return;  // a zero at any scale, with no sign
+
+  int64_t scale = v.scale;
+  // Past the bound there is no decoder to agree with, Go's Marshal refuses, and
+  // pb::Marshal cannot (#93): such a value keeps the form it was given, which
+  // is the same number. The bound also stops scale -2^31 asking for 2 GiB.
+  if (scale >= -int64_t{kMaxNumericLiteralDigits} && scale != 0) {
+    Reduce(unscaled, scale);
   }
-  if (v.scale != 0) {
+  if (scale > kMaxNumericLiteralDigits || scale < -int64_t{kMaxNumericLiteralDigits}) {
+    unscaled = v.unscaled;
+    scale = v.scale;
+  }
+
+  wire::AppendTag(out, 1, wire::kBytes);
+  wire::AppendBytes(out, unscaled);
+  if (scale != 0) {
     // `int32 scale = 2`: a plain varint, a negative value sign-extended to 64
     // bits. Zigzag is sint32, which this field is not.
     wire::AppendTag(out, 2, wire::kVarint);
-    wire::AppendVarint(out, static_cast<uint64_t>(static_cast<int64_t>(v.scale)));
+    wire::AppendVarint(out, static_cast<uint64_t>(scale));
   }
   if (v.negative) {
     wire::AppendTag(out, 3, wire::kVarint);
