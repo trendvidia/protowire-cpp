@@ -79,6 +79,21 @@ uint64_t EncodeScalar(const pb::Message& msg, const FieldTemplate& ft) {
   }
 }
 
+// CutLength is how many bytes of s fit in a field of size bytes. A string is
+// cut at the last whole UTF-8 character at or before the limit, since a
+// byte-exact cut can leave half a character and a strict decoder then rejects
+// the whole message; a bytes field is cut at the limit (draft -01 § SBE
+// Annotations, protowire#495, protowire-go#246). The rest is NUL-padded.
+size_t CutLength(const std::string& s, size_t size, bool is_string) {
+  if (s.size() <= size) return s.size();
+  size_t n = size;
+  if (is_string) {
+    // A continuation byte is 10xxxxxx; back up to the start of its character.
+    while (n > 0 && (static_cast<uint8_t>(s[n]) & 0xC0) == 0x80) --n;
+  }
+  return n;
+}
+
 void WriteFixedString(std::vector<uint8_t>& buf,
                       size_t offset,
                       const FieldTemplate& ft,
@@ -86,7 +101,7 @@ void WriteFixedString(std::vector<uint8_t>& buf,
   while (buf.size() < offset + ft.size) buf.push_back(0);
   std::string scratch;
   const std::string& s = msg.GetReflection()->GetStringReference(msg, ft.fd, &scratch);
-  size_t n = std::min<size_t>(s.size(), ft.size);
+  const size_t n = CutLength(s, ft.size, ft.fd->type() == pb::FieldDescriptor::TYPE_STRING);
   std::memcpy(buf.data() + offset, s.data(), n);
   for (size_t i = n; i < ft.size; ++i) buf[offset + i] = 0;
 }
