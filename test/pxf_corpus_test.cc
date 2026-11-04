@@ -423,7 +423,7 @@ TEST(PxfCorpus, NullsLeaveTheFieldUnsetAndNull) {
     EXPECT_EQ(msg->ByteSizeLong(), 0u);
     ++ran;
   }
-  EXPECT_EQ(ran, kHasEditions ? 9 : 8);
+  EXPECT_EQ(ran, kHasEditions ? 8 : 7);
 }
 
 // An escaped line feed in a cell survives BindRow's trip through PXF text.
@@ -465,6 +465,7 @@ const std::map<std::string, DatasetFixture>& DatasetVerdicts() {
       {"string-newline-in-cell.pxf", {false}},
       {"null-on-scalar-cell.pxf", {false}},
       {"null-on-optional-cell.pxf", {true}},
+      {"null-on-required-cell.pxf", {false}},
       {"dotted-column.pxf", {true}},
       {"dotted-grouping.pxf", {true}},
       {"dotted-null-leaf.pxf", {true}},

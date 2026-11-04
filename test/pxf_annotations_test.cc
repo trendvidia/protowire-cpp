@@ -107,10 +107,15 @@ TEST_F(PxfAnnotations, RequiredMissingErrors) {
   EXPECT_NE(r.status().message().find("name"), std::string::npos);
 }
 
-TEST_F(PxfAnnotations, RequiredNullCountsAsPresent) {
+// A required field holds a value: null is rejected as absence is
+// (protowire-go#268).
+TEST_F(PxfAnnotations, RequiredRejectsNull) {
   auto msg = NewCfg();
   auto r = protowire::pxf::UnmarshalFull(R"(name = null)", msg.get());
-  EXPECT_TRUE(r.ok()) << r.status().message();
+  ASSERT_FALSE(r.ok());
+  EXPECT_NE(r.status().ToString().find(R"(1:8: null is not allowed on required field "name")"),
+            std::string::npos)
+      << r.status().ToString();
 }
 
 TEST_F(PxfAnnotations, DefaultsAppliedWhenAbsent) {

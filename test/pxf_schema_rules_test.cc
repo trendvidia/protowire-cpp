@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -314,6 +315,117 @@ TEST_P(Rules, BoolDefaultIsExact) {
     ASSERT_FALSE(r.ok());
     EXPECT_NE(r.status().message().find("invalid default bool \"True\""), std::string::npos)
         << r.status().ToString();
+  }
+}
+
+// A required field holds a value, so null on it is rejected as absence is
+// (protowire-go#268), in either spelling and whatever the field's type or
+// presence: in a body, a nested body, a @dataset cell and a dotted cell, by
+// Unmarshal as well as UnmarshalFull. The spec corpus asserts the message's
+// prefix (trendvidia/protowire#569).
+TEST_P(Rules, RequiredRejectsNull) {
+  pb::DescriptorProto* req;
+  auto file = Base(&req);
+  file.add_dependency("google/protobuf/wrappers.proto");
+  req->set_name("Req");
+  auto* sub = file.add_message_type();
+  sub->set_name("Sub");
+  AddField(sub, "x", pb::FieldDescriptorProto::TYPE_INT32);
+  auto* outer = file.add_message_type();
+  outer->set_name("Outer");
+  AddField(outer, "in", kMsg, ".rules.v1.Req");
+  req = file.mutable_message_type(0);
+  auto* r = AddField(req, "r", pb::FieldDescriptorProto::TYPE_INT32);
+  r->set_proto3_optional(true);
+  r->set_oneof_index(0);
+  req->add_oneof_decl()->set_name("_r");
+  AddField(req, "w", kMsg, ".google.protobuf.Int32Value");
+  AddField(req, "s", kMsg, ".rules.v1.Sub");
+  AddField(req, "plain", pb::FieldDescriptorProto::TYPE_INT32);
+  for (auto& f : *req->mutable_field()) SetRequired(f.mutable_options(), GetParam());
+
+  Pool pool;
+  const pb::FileDescriptor* fd = pool.Build(file);
+  ASSERT_NE(fd, nullptr);
+  const pb::Descriptor* req_d = fd->FindMessageTypeByName("Req");
+  const pb::Descriptor* outer_d = fd->FindMessageTypeByName("Outer");
+  pb::DynamicMessageFactory factory;
+  auto New = [&](const pb::Descriptor* d) {
+    return std::unique_ptr<pb::Message>(factory.GetPrototype(d)->New());
+  };
+
+  const std::vector<std::string> fields = {"r", "w", "s", "plain"};
+  // The same literal serves as a body value and as a cell.
+  const std::map<std::string, std::string> values = {
+      {"r", "0"}, {"w", "0"}, {"s", "{}"}, {"plain", "0"}};
+  auto body = [&](const std::string& null) {
+    std::string b;
+    for (const auto& f : fields) b += f + " = " + (f == null ? "null" : values.at(f)) + "\n";
+    return b;
+  };
+  auto row = [&](const std::string& null) {
+    std::string out = "(";
+    for (size_t i = 0; i < fields.size(); ++i) {
+      if (i > 0) out += ", ";
+      out += fields[i] == null ? "null" : values.at(fields[i]);
+    }
+    return out + ")\n";
+  };
+  std::string cols, dotted;
+  for (size_t i = 0; i < fields.size(); ++i) {
+    if (i > 0) {
+      cols += ", ";
+      dotted += ", ";
+    }
+    cols += fields[i];
+    dotted += "in." + fields[i];
+  }
+  auto bind = [&](const pb::Descriptor* d, const std::string& text) {
+    auto doc = pxf::Parse(text);
+    if (!doc.ok()) return doc.status();
+    for (const auto& ds : doc->datasets) {
+      for (const auto& rw : ds.rows) {
+        auto msg = New(d);
+        if (protowire::Status s = pxf::BindRow(msg.get(), ds.columns, rw); !s.ok()) return s;
+      }
+    }
+    return protowire::Status::OK();
+  };
+  auto full = [&](const pb::Descriptor* d, const std::string& text) {
+    auto msg = New(d);
+    auto res = pxf::UnmarshalFull(text, msg.get());
+    return res.ok() ? protowire::Status::OK() : res.status();
+  };
+  const std::string req_ds = "@dataset rules.v1.Req (" + cols + ")\n";
+  const std::string outer_ds = "@dataset rules.v1.Outer (" + dotted + ")\n";
+
+  // Zero values satisfy every one of them.
+  {
+    auto msg = New(req_d);
+    EXPECT_TRUE(pxf::Unmarshal(body(""), msg.get()).ok());
+  }
+  EXPECT_TRUE(full(req_d, body("")).ok());
+  EXPECT_TRUE(full(outer_d, "in {\n" + body("") + "}\n").ok());
+  protowire::Status ok_bind = bind(req_d, req_ds + row(""));
+  EXPECT_TRUE(ok_bind.ok()) << ok_bind.ToString();
+  ok_bind = bind(outer_d, outer_ds + row(""));
+  EXPECT_TRUE(ok_bind.ok()) << ok_bind.ToString();
+
+  for (const auto& f : fields) {
+    SCOPED_TRACE(f);
+    const std::string want = "null is not allowed on required field \"" + f + "\"";
+    auto msg = New(req_d);
+    protowire::Status st = pxf::Unmarshal(body(f), msg.get());
+    EXPECT_NE(st.message().find(want), std::string::npos) << "Unmarshal: " << st.ToString();
+    st = full(req_d, body(f));
+    EXPECT_NE(st.message().find(want), std::string::npos) << "UnmarshalFull: " << st.ToString();
+    st = full(outer_d, "in {\n" + body(f) + "}\n");
+    EXPECT_NE(st.message().find(want), std::string::npos) << "nested: " << st.ToString();
+    st = bind(req_d, req_ds + row(f));
+    EXPECT_NE(st.message().find("column " + f + ": " + want), std::string::npos)
+        << "cell: " << st.ToString();
+    st = bind(outer_d, outer_ds + row(f));
+    EXPECT_NE(st.message().find(want), std::string::npos) << "dotted cell: " << st.ToString();
   }
 }
 
