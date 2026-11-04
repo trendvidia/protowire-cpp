@@ -17,9 +17,11 @@ target_link_libraries(protowire_detail_test PRIVATE
 gtest_discover_tests(protowire_detail_test)
 
 if(TARGET protowire_pb AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pb_test.cc)
-  add_executable(protowire_pb_test pb_test.cc pb_stream_test.cc pb_utf8_test.cc)
+  add_executable(protowire_pb_test pb_test.cc pb_stream_test.cc pb_utf8_test.cc pb_values_table_test.cc)
   target_link_libraries(protowire_pb_test PRIVATE
     protowire_pb GTest::gtest GTest::gtest_main)
+  target_compile_definitions(protowire_pb_test PRIVATE
+    TESTDATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../testdata")
   gtest_discover_tests(protowire_pb_test)
 endif()
 
@@ -37,7 +39,10 @@ if(TARGET protowire_pxf)
             pxf_fast_test pxf_full_roundtrip_test pxf_escapes_test
             pxf_annotations_test pxf_format_test pxf_tolerant_test pxf_check_test pxf_directive_test
             pxf_schema_test pxf_schema_rules_test pxf_secret_test pxf_element_defaults_test pxf_result_directives_test pxf_dataset_reader_test
-            pxf_proto_directive_test pxf_map_keys_test pxf_keyed_test pxf_hardening_test pxf_go_parity_test pxf_dataset_writer_test pxf_rewriter_test pxf_wkt_shape_test pxf_nan_test)
+            pxf_proto_directive_test pxf_map_keys_test pxf_keyed_test pxf_hardening_test pxf_go_parity_test pxf_dataset_writer_test pxf_rewriter_test pxf_wkt_shape_test
+            pxf_nan_test
+            pxf_duration_block_test
+            pxf_marshal_depth_test)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${f}.cc)
       list(APPEND _pxf_test_srcs ${f}.cc)
     endif()

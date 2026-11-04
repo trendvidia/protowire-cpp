@@ -49,13 +49,15 @@ Status WriteValueCell(const google::protobuf::Message& msg,
 
 // AnyBodyReadsBack reports whether body, the entries of an Any block at the
 // given depth, decodes to exactly want, the bytes of the Any's value. Only a
-// reader knows everything a body can lose, so this asks one: it uses the
-// default limits and runs the post-decode pass, as UnmarshalFull does, because
-// a value that pass would change is not safe for that reader.
+// reader knows everything a body can lose, so this asks one: max_depth is the
+// writer's limit and the other limits are the defaults, and it runs the
+// post-decode pass, as UnmarshalFull does, because a value that pass would
+// change is not safe for that reader.
 bool AnyBodyReadsBack(std::string_view body,
                       const google::protobuf::Descriptor* desc,
                       TypeResolver* resolver,
                       int depth,
+                      int max_depth,
                       std::string_view want);
 
 // EmptyCollection is the literal for a list or map field with nothing in it.

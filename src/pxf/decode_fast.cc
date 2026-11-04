@@ -2176,6 +2176,7 @@ bool AnyBodyReadsBack(std::string_view body,
                       const Descriptor* desc,
                       TypeResolver* resolver,
                       int depth,
+                      int max_depth,
                       std::string_view want) {
   if (body.size() >= static_cast<size_t>(kMaxMessageSize)) return false;
   std::string input;
@@ -2186,6 +2187,7 @@ bool AnyBodyReadsBack(std::string_view body,
   std::unique_ptr<Message> inner(factory.GetPrototype(desc)->New());
   UnmarshalOptions opts;
   opts.type_resolver = resolver;
+  opts.max_nesting_depth = max_depth;
   Result result;
   DirectDecoder d(input, inner.get(), &result, opts);
   if (!d.RunAnyBody(depth).ok()) return false;
