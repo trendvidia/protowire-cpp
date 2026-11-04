@@ -13,9 +13,13 @@
 #include "protowire/pxf/format.h"
 #include "protowire/detail/go_quote.h"
 
+#include <algorithm>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <variant>
+#include <vector>
 
 #include "format_internal.h"
 #include "protowire/detail/base64.h"
@@ -236,16 +240,150 @@ std::string FormatValue(const ValuePtr& value) {
   return out;
 }
 
+namespace {
+
+// TopDirective is one of a Document's directives other than @type.
+using TopDirective = std::variant<const Directive*, const DatasetDirective*, const ProtoDirective*>;
+
+// TopDirectives returns doc's directives other than @type, which the
+// Document keeps in three lists, merged back into source order: an
+// anonymous @proto binds the typed directive after it, so the order is
+// part of the meaning.
+std::vector<TopDirective> TopDirectives(const Document& doc) {
+  std::vector<std::pair<int, TopDirective>> all;
+  all.reserve(doc.directives.size() + doc.datasets.size() + doc.protos.size());
+  for (const auto& d : doc.directives) all.emplace_back(d.pos.offset, &d);
+  for (const auto& d : doc.datasets) all.emplace_back(d.pos.offset, &d);
+  for (const auto& d : doc.protos) all.emplace_back(d.pos.offset, &d);
+  std::stable_sort(
+      all.begin(), all.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+  std::vector<TopDirective> out;
+  out.reserve(all.size());
+  for (const auto& a : all) out.push_back(a.second);
+  return out;
+}
+
+// FormatNamedDirective writes `@<name> prefix* [{body}]`, the body as it
+// was written: it is raw text, which the directive's consumer decodes.
+void FormatNamedDirective(const Directive& d, std::string& out) {
+  out.push_back('@');
+  out += d.name;
+  for (const auto& p : d.prefixes) {
+    out.push_back(' ');
+    out += p;
+  }
+  if (d.has_body) {
+    out += " {";
+    out += d.body;
+    out.push_back('}');
+  }
+  out.push_back('\n');
+}
+
+// FormatDataset writes the header, then one row per line. An absent cell
+// is left empty; null is written.
+void FormatDataset(const DatasetDirective& d, Formatter& f, std::string& out) {
+  out += "@dataset";
+  if (!d.type.empty()) {
+    out.push_back(' ');
+    out += d.type;
+  }
+  out += " (";
+  for (size_t i = 0; i < d.columns.size(); ++i) {
+    if (i > 0) out += ", ";
+    out += d.columns[i];
+  }
+  out += ")\n";
+  for (const auto& row : d.rows) {
+    out.push_back('(');
+    for (size_t i = 0; i < row.cells.size(); ++i) {
+      if (i > 0) out += ", ";
+      const auto& cell = row.cells[i];
+      if (cell.has_value()) f.FormatValue(*cell, 0);
+    }
+    out += ")\n";
+  }
+}
+
+// FormatProto writes a @proto directive in the shape it was read in.
+void FormatProto(const ProtoDirective& d, std::string& out) {
+  out += "@proto";
+  switch (d.shape) {
+    case ProtoShape::kAnonymous:
+      out += " {";
+      out += d.body;
+      out.push_back('}');
+      break;
+    case ProtoShape::kNamed:
+      out.push_back(' ');
+      out += d.type_name;
+      out += " {";
+      out += d.body;
+      out.push_back('}');
+      break;
+    case ProtoShape::kSource:
+      out += R"( """)";
+      out += d.body;
+      out += R"(""")";
+      break;
+    case ProtoShape::kDescriptor:
+      out += " b\"";
+      out += detail::Base64EncodeStd(d.body);
+      out.push_back('"');
+      break;
+  }
+  out.push_back('\n');
+}
+
+}  // namespace
+
+// FormatDocument keeps every directive, with its dataset rows, in document
+// order (trendvidia/protowire#558, #130; protowire-go#262). @type is written
+// first: it binds no anonymous @proto, so moving it changes nothing. The
+// other directives follow in source order, each after its comments: a named
+// directive's body and a @proto body as written, and a dataset as its header
+// and then one row per line, an absent cell left empty. A document whose only
+// directive is @type formats as it always has.
 std::string FormatDocument(const Document& doc) {
   std::string out;
+  Formatter f(out);
+  const std::vector<TopDirective> others = TopDirectives(doc);
+  if (others.empty()) {
+    if (!doc.type_url.empty()) {
+      out += "@type ";
+      out += doc.type_url;
+      out += "\n\n";
+    }
+    f.WriteComments(doc.leading_comments, 0);
+    f.FormatEntries(doc.entries, 0);
+    return out;
+  }
+
   if (!doc.type_url.empty()) {
     out += "@type ";
     out += doc.type_url;
-    out += "\n\n";
+    out.push_back('\n');
   }
-  Formatter f(out);
   f.WriteComments(doc.leading_comments, 0);
-  f.FormatEntries(doc.entries, 0);
+  for (const auto& top : others) {
+    std::visit(
+        [&](const auto* d) {
+          using T = std::decay_t<decltype(*d)>;
+          f.WriteComments(d->leading_comments, 0);
+          if constexpr (std::is_same_v<T, Directive>) {
+            FormatNamedDirective(*d, out);
+          } else if constexpr (std::is_same_v<T, DatasetDirective>) {
+            FormatDataset(*d, f, out);
+          } else {
+            FormatProto(*d, out);
+          }
+        },
+        top);
+  }
+  if (!doc.entries.empty()) {
+    out.push_back('\n');
+    f.FormatEntries(doc.entries, 0);
+  }
   return out;
 }
 
