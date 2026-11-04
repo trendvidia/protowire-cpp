@@ -12,6 +12,7 @@
 
 #include <google/protobuf/dynamic_message.h>
 
+#include "encoding_range.h"
 #include "protowire/detail/utf8.h"
 
 namespace protowire::sbe {
@@ -72,17 +73,55 @@ Status DecodeScalarField(const uint8_t* p, const FieldTemplate& ft, pb::Message*
     return Status::OK();
   }
   uint64_t bits = LoadScalar(p, ft.size);
-  // A signed encoding is sign-extended into a signed field, as protowire-go
-  // reads it and as View does: an int16 -1234 in an int32 field stays -1234.
   const auto cpp = fd->cpp_type();
-  if (cpp == pb::FieldDescriptor::CPPTYPE_INT32 || cpp == pb::FieldDescriptor::CPPTYPE_INT64) {
-    if (ft.encoding == kEncInt8) {
-      bits = static_cast<uint64_t>(int64_t{static_cast<int8_t>(bits)});
-    } else if (ft.encoding == kEncInt16) {
-      bits = static_cast<uint64_t>(int64_t{static_cast<int16_t>(bits)});
-    } else if (ft.encoding == kEncInt32) {
-      bits = static_cast<uint64_t>(int64_t{static_cast<int32_t>(bits)});
+  const EncodingRange rg = RangeOf(ft);
+
+  if (ft.encoding == kEncFloat || ft.encoding == kEncDouble) {
+    double f = 0;
+    if (ft.encoding == kEncFloat) {
+      const auto b = static_cast<uint32_t>(bits);
+      float narrow = 0;
+      std::memcpy(&narrow, &b, 4);
+      f = narrow;
+    } else {
+      std::memcpy(&f, &bits, 8);
+      if (rg.read_check && !FloatFits(f)) {
+        return Status::Error("sbe: field " + std::string(fd->full_name()) + ": wire value " +
+                             GoG(f) + " does not fit a float field, ±" +
+                             GoG(std::numeric_limits<float>::max()));
+      }
     }
+    if (cpp == pb::FieldDescriptor::CPPTYPE_FLOAT) {
+      r->SetFloat(msg, fd, static_cast<float>(f));
+    } else {
+      r->SetDouble(msg, fd, f);
+    }
+    return Status::OK();
+  }
+
+  // An integer primitive, sign- or zero-extended per the primitive (draft -01
+  // § SBE Annotations), then stored by the field's kind. A value the field
+  // cannot hold is refused rather than cut to its low bits (protowire-go#252).
+  if (rg.enc_signed) {
+    switch (ft.size) {
+      case 1:
+        bits = static_cast<uint64_t>(int64_t{static_cast<int8_t>(bits)});
+        break;
+      case 2:
+        bits = static_cast<uint64_t>(int64_t{static_cast<int16_t>(bits)});
+        break;
+      case 4:
+        bits = static_cast<uint64_t>(int64_t{static_cast<int32_t>(bits)});
+        break;
+      default:
+        break;
+    }
+  }
+  if (rg.read_check && !InRange(bits, !rg.enc_signed, rg.field_lo, rg.field_hi)) {
+    return Status::Error("sbe: field " + std::string(fd->full_name()) + ": wire value " +
+                         IntString(bits, !rg.enc_signed) + " (" + ft.encoding +
+                         ") does not fit a " + std::string(fd->type_name()) + " field, [" +
+                         std::to_string(rg.field_lo) + ", " + std::to_string(rg.field_hi) + "]");
   }
   switch (cpp) {
     case pb::FieldDescriptor::CPPTYPE_BOOL:
@@ -100,21 +139,8 @@ Status DecodeScalarField(const uint8_t* p, const FieldTemplate& ft, pb::Message*
     case pb::FieldDescriptor::CPPTYPE_UINT64:
       r->SetUInt64(msg, fd, bits);
       break;
-    case pb::FieldDescriptor::CPPTYPE_FLOAT: {
-      uint32_t b = static_cast<uint32_t>(bits);
-      float f;
-      std::memcpy(&f, &b, 4);
-      r->SetFloat(msg, fd, f);
-      break;
-    }
-    case pb::FieldDescriptor::CPPTYPE_DOUBLE: {
-      double d;
-      std::memcpy(&d, &bits, 8);
-      r->SetDouble(msg, fd, d);
-      break;
-    }
     case pb::FieldDescriptor::CPPTYPE_ENUM:
-      r->SetEnumValue(msg, fd, static_cast<int>(bits));
+      r->SetEnumValue(msg, fd, static_cast<int32_t>(bits));
       break;
     default:
       break;
