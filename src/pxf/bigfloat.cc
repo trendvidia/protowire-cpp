@@ -89,6 +89,19 @@ class Nat {
     }
   }
 
+  // Sub returns a - b. a must not be less than b.
+  static Nat Sub(const Nat& a, const Nat& b) {
+    Nat out = a;
+    int64_t borrow = 0;
+    for (size_t i = 0; i < out.w_.size(); ++i) {
+      const int64_t t = int64_t{out.w_[i]} - (i < b.w_.size() ? int64_t{b.w_[i]} : 0) - borrow;
+      out.w_[i] = static_cast<uint32_t>(t);
+      borrow = t < 0 ? 1 : 0;
+    }
+    out.Trim();
+    return out;
+  }
+
   // DivSmall divides in place and returns the remainder.
   uint32_t DivSmall(uint32_t d) {
     uint64_t rem = 0;
@@ -281,6 +294,35 @@ bool ExceedsBound(int64_t e, int limit) {
   return e > limit || e < -static_cast<int64_t>(limit);
 }
 
+// RoundedBinaryExponent is the binary exponent e, value in [2^(e-1), 2^e),
+// of num/den rounded to prec bits, ties to even, as ParseBigFloatLiteral
+// rounds it. It never builds a prec-bit number, so a wide prec costs
+// nothing here. num and den must not be zero.
+//
+// The exact value's exponent comes from the two bit lengths and one
+// comparison. Rounding raises it by one exactly when the value rounds up to
+// 2^e: when it is at least 2^e (1 - 2^-(prec+1)), the tie between 2^e and
+// the largest prec-bit value below it, whose mantissa is odd. With A the
+// integer for 2^e and B the one for the value on a common scale, and
+// g = A - B > 0, that is g 2^(prec+1) <= A. Since g >= 1, it cannot hold
+// once prec + 1 reaches A's bit length, so the shift below is never wider
+// than A, whose size the literal bounds.
+int64_t RoundedBinaryExponent(const Nat& num, const Nat& den, uint32_t prec) {
+  // num/den lies in (2^(e-1), 2^(e+1)) for e the difference of bit lengths.
+  int64_t e = static_cast<int64_t>(num.BitLen()) - static_cast<int64_t>(den.BitLen());
+  const auto scaled = [&](int64_t at) {
+    // A for 2^at, and B for the value, both scaled to integers.
+    return std::pair<Nat, Nat>{at >= 0 ? den.Shl(static_cast<uint64_t>(at)) : den,
+                               at >= 0 ? num : num.Shl(static_cast<uint64_t>(-at))};
+  };
+  auto [a, b] = scaled(e);
+  if (Nat::Cmp(b, a) >= 0) std::tie(a, b) = scaled(++e);
+  const uint64_t shift = uint64_t{prec} + 1;
+  if (shift >= a.BitLen()) return e;
+  const bool carries = Nat::Cmp(Nat::Sub(a, b).Shl(shift), a) <= 0;
+  return carries ? e + 1 : e;
+}
+
 // ParsePrecision reads a suffix's digits. Longer than any uint32 is refused
 // on its length, so `1p999…` costs nothing.
 bool ParsePrecision(std::string_view digits, uint32_t* out) {
@@ -441,6 +483,21 @@ Status ParseBigFloatLiteral(std::string_view literal,
   } else {
     den = Nat::Pow10(-lit.exp10);
   }
+  // Both limits are on the value rounded to prec, and both are asked before
+  // the value is widened to prec bits, which for a wide prec is the costly
+  // part. The wire carries the exponent less prec as an int32
+  // (pxf/bignum.proto), so a small value at a wide prec has no encoding
+  // (protowire-go#231). protowire-go asks this one first.
+  const int64_t bin = RoundedBinaryExponent(num, den, prec);
+  if (bin - static_cast<int64_t>(prec) < std::numeric_limits<int32_t>::min()) {
+    return Status::Error("big float literal " + Clip(literal) +
+                         " is below the wire's exponent range");
+  }
+  if (ExceedsBound(bin, max_exponent)) {
+    return Status::Error(
+        "big float literal " + Clip(literal) + " has binary exponent " + std::to_string(bin) +
+        ", and MaxBigFloatExponent=" + std::to_string(max_exponent) + " bounds its magnitude");
+  }
   // Scale so the integer quotient has at least prec + 2 bits; the remainder
   // then only ever acts as a sticky bit.
   const int64_t scale = static_cast<int64_t>(prec) + 2 - static_cast<int64_t>(num.BitLen()) +
@@ -456,11 +513,11 @@ Status ParseBigFloatLiteral(std::string_view literal,
     q = q.Shr(1);
     ++exponent;
   }
-  const int64_t bin = BinaryExponent(q, exponent);
-  if (ExceedsBound(bin, max_exponent)) {
+  // RoundedBinaryExponent found this exponent without the division.
+  if (BinaryExponent(q, exponent) != bin) {
     return Status::Error(
-        "big float literal " + Clip(literal) + " has binary exponent " + std::to_string(bin) +
-        ", and MaxBigFloatExponent=" + std::to_string(max_exponent) + " bounds its magnitude");
+        "big float literal " + Clip(literal) + ": internal error: rounded binary exponent " +
+        std::to_string(BinaryExponent(q, exponent)) + ", expected " + std::to_string(bin));
   }
   out->mantissa = q.ToBytes();
   out->exponent = exponent;
