@@ -68,6 +68,15 @@ Status ApplyDefault(google::protobuf::Message* msg,
 
 // --- Encoding --------------------------------------------------------------
 
+// Marshal formats msg as PXF text.
+//
+// An unset field is left out, except where a reader that applies
+// (pxf.default) and checks (pxf.required) would not read the absent field back
+// as unset. A proto3 scalar without presence is written as its zero value, and
+// a required list or map as `[]` or `{}`. An unset message-typed field with a
+// default is written `null`. An unset `optional` or oneof scalar with a default
+// is left out, and reads back as its default. An unset required field with
+// presence is an error, unless opts.emit_defaults writes it as zero.
 StatusOr<std::string> Marshal(const google::protobuf::Message& msg, MarshalOptions opts = {});
 
 // --- AST helpers (re-exports from parser.h / format.h) --------------------
