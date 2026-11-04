@@ -134,6 +134,10 @@ StatusOr<std::vector<FieldTemplate>> BuildCompositeFields(const pb::Descriptor* 
       return Status::Error("composite " + std::string(md->full_name()) +
                            " contains list/map field " + std::string(fd->name()));
     }
+    if (fd->real_containing_oneof() != nullptr) {
+      return Status::Error("composite " + std::string(md->full_name()) + " contains oneof field " +
+                           std::string(fd->name()));
+    }
     if (fd->cpp_type() == pb::FieldDescriptor::CPPTYPE_MESSAGE) {
       uint16_t sub_size = 0;
       auto subs = BuildCompositeFields(fd->message_type(), &sub_size);
@@ -236,6 +240,9 @@ StatusOr<MessageTemplate> BuildTemplate(const pb::Descriptor* md,
   for (const pb::FieldDescriptor* fd : SortedFields(md)) {
     if (fd->is_map()) {
       return Status::Error("sbe: map field " + FieldPath(md, fd) + " not supported");
+    }
+    if (fd->real_containing_oneof() != nullptr) {
+      return Status::Error("sbe: oneof field " + FieldPath(md, fd) + " not supported");
     }
     if (fd->is_repeated() && fd->cpp_type() == pb::FieldDescriptor::CPPTYPE_MESSAGE) {
       auto gt = BuildGroupTemplate(fd);
