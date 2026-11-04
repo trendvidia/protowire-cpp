@@ -308,7 +308,7 @@ bool PxfDecode(std::string_view data,
   opts.max_big_float_exponent = lim.max_big_float_exponent;
   auto status = protowire::pxf::Unmarshal(data, msg.get(), opts);
   if (!status.ok()) {
-    *err = std::string(status.message());
+    *err = status.ToString();  // "line:col: msg", as Go prints it
     return false;
   }
   return true;
@@ -359,7 +359,7 @@ bool PxfPb(std::string_view data,
   opts.max_big_float_exponent = lim.max_big_float_exponent;
   auto result = protowire::pxf::UnmarshalFull(data, msg.get(), opts);
   if (!result.ok()) {
-    *err = std::string(result.status().message());
+    *err = result.status().ToString();  // "line:col: msg", as Go prints it
     return false;
   }
   return WriteStdout(protowire::pxf::SerializeGoOrder(*msg), err);

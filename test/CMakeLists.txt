@@ -81,3 +81,16 @@ if(TARGET protowire_sbe)
     gtest_discover_tests(protowire_sbe_test)
   endif()
 endif()
+
+# check_decode prints a PXF rejection with its position, as protowire-go's
+# does (#145). The spec's gates compare these lines across ports.
+if(TARGET check_decode)
+  foreach(fmt pxf pxf-pb)
+    add_test(NAME check_decode_position_${fmt}
+      COMMAND check_decode --format ${fmt} --schema test.v1.AllTypes
+        --proto ${CMAKE_CURRENT_SOURCE_DIR}/../testdata/test.proto
+        --input ${CMAKE_CURRENT_SOURCE_DIR}/../testdata/check_decode/unknown-field.pxf)
+    set_tests_properties(check_decode_position_${fmt} PROPERTIES
+      PASS_REGULAR_EXPRESSION "reject: 3:3: unknown field \"nope\" in test\\.v1\\.AllTypes")
+  endforeach()
+endif()
