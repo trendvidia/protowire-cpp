@@ -690,7 +690,8 @@ void QuoteRunes() {
 int RunRewrite(const char* dir);  // rewrite.cc
 
 int RunStreams(const std::string& root, const std::string& dir, const std::string& proto_dir);
-int RunPbBig(const std::string& file);  // pbbig.cc
+int RunPbBig(const std::string& file);                                // pbbig.cc
+int RunSbeXML(const std::string& dir, const std::string& proto_dir);  // sbexml.cc
 
 int main(int argc, char** argv) {
   if (argc == 5 && std::string_view(argv[1]) == "--streams") {
@@ -698,6 +699,7 @@ int main(int argc, char** argv) {
   }
   if (argc == 3 && std::string_view(argv[1]) == "--rewrite") return RunRewrite(argv[2]);
   if (argc == 3 && std::string_view(argv[1]) == "--pb-big") return RunPbBig(argv[2]);
+  if (argc == 4 && std::string_view(argv[1]) == "--sbe-xml") return RunSbeXML(argv[2], argv[3]);
   if (argc == 2 && std::string_view(argv[1]) == "--quote-runes") {
     QuoteRunes();
     return 0;

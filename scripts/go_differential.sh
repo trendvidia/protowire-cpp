@@ -168,6 +168,26 @@ if [ "$rows" -lt 150 ] || [ "$damaged" -lt 2000 ] || [ "$bounded" -lt 10 ]; then
 fi
 echo "$rows big-number decodes and $damaged damaged ones alike: $accepted accepted, $bounded past the bound"
 
+# SBE XML schemas through XMLToProto, and .proto files through ProtoToXML: the
+# text each writes, or its error.
+sbexml_dir=$here/testdata/differential/sbe-xml
+"$work/godiff.bin" --sbe-xml "$sbexml_dir" "$spec/proto" > "$work/go.sbexml"
+"$pxf_diff" --sbe-xml "$sbexml_dir" "$spec/proto" > "$work/cpp.sbexml"
+if ! cmp -s "$work/go.sbexml" "$work/cpp.sbexml"; then
+  echo "SBE XML conversion differs:" >&2
+  diff "$work/go.sbexml" "$work/cpp.sbexml" | head -"${SBEXML_DIFF_LINES:-40}" >&2 || true
+  [ -n "${DIFF_OUT:-}" ] && cp "$work/go.sbexml" "$DIFF_OUT.go.sbexml" &&
+    cp "$work/cpp.sbexml" "$DIFF_OUT.cpp.sbexml"
+  exit 1
+fi
+converted=$(LC_ALL=C awk '/^=== /{n++} END{print n+0}' "$work/go.sbexml")
+sbe_errors=$(LC_ALL=C awk '/^error: /{n++} END{print n+0}' "$work/go.sbexml")
+if [ "$converted" -lt 10 ]; then
+  echo "SBE XML ran only $converted conversions" >&2
+  exit 2
+fi
+echo "$converted SBE schemas converted alike, $sbe_errors of them refused"
+
 docs=$(wc -l < "$manifest" | tr -d ' ')
 for f in go cpp; do
   ran=$(LC_ALL=C awk '/^=== /{n++} END{print n+0}' "$work/$f.out")

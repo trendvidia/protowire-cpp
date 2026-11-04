@@ -1,0 +1,57 @@
+syntax = "proto3";
+package shapes.v1;
+import "sbe/annotations.proto";
+
+option (sbe.schema_id) = 7;
+option (sbe.version) = 3;
+
+enum Color {
+  COLOR_RED = 0;
+  COLOR_DARK_BLUE = 1;
+  GREEN = 2;
+}
+
+message Header {
+  uint32 seq = 1;
+  bytes raw = 2 [(sbe.length) = 6];
+  Color tint = 3;
+  Point origin = 4;
+}
+
+message Point {
+  sint32 x = 1;
+  sfixed64 y = 2;
+}
+
+message Shape {
+  option (sbe.template_id) = 5;
+  enum Kind {
+    KIND_CIRCLE = 0;
+    KIND_SQUARE = 1;
+  }
+  fixed32 id = 3;
+  string name = 1 [(sbe.length) = 16];
+  string label = 2 [(sbe.length) = 4];
+  string free_text = 4;
+  bytes blob = 5 [(sbe.length) = 16];
+  bytes tiny = 6 [(sbe.length) = 1];
+  Kind kind = 7;
+  Header header = 8;
+  bool visible = 9;
+  int64 area_mm2 = 10 [(sbe.encoding) = "int32"];
+  map<string, int32> tags = 11;
+  repeated Vertex vertices = 12;
+  repeated uint32 packed_ids = 13;
+  double weight = 14;
+  float ratio = 15;
+  uint64 big = 16;
+  message Vertex {
+    Point at = 1;
+    string tag = 2 [(sbe.length) = 4];
+    Color color = 3;
+  }
+}
+
+message Empty {
+  option (sbe.template_id) = 6;
+}

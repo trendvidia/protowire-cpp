@@ -1,0 +1,9 @@
+syntax = "proto3";
+package stale.v1;
+import "google/protobuf/descriptor.proto";
+// The pre-v1.12.0 number of (sbe.schema_id).
+extend google.protobuf.FileOptions {
+  uint32 old_schema_id = 50100;
+}
+option (old_schema_id) = 1;
+message M { int32 a = 1; }
