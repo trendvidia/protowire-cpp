@@ -642,7 +642,8 @@ MarshalOptions CellOptions() {
 }  // namespace
 
 bool Nullable(const FieldDescriptor* fd) {
-  return fd->has_presence() && !fd->is_repeated() && !fd->is_required();
+  // IsRequired reads the field's options, so it is asked last.
+  return fd->has_presence() && !fd->is_repeated() && !fd->is_required() && !IsRequired(fd);
 }
 
 // DurationFitsLiteral reports whether sub, a google.protobuf.Duration, can be

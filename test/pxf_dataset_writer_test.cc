@@ -778,10 +778,10 @@ TEST_F(DatasetWriter, RefusesInvalidSchema) {
 }
 
 // A field with presence in the message's _null mask is null, as Marshal writes
-// it, so a default stays off and a required field is satisfied; that includes
-// an optional scalar. A plain scalar in the mask is written as if the mask did
-// not name it, by the writer and by Marshal alike: null on it is a decode
-// error.
+// it, so a default stays off; that includes an optional scalar. A plain scalar
+// in the mask is written as if the mask did not name it, by the writer and by
+// Marshal alike: null on it is a decode error. So is null on a required field
+// (protowire-go#268), so the mask does not make an unset one writable.
 TEST_F(DatasetWriter, NullMask) {
   Compile("null.proto", R"(syntax = "proto3";
 package dswnull.v1;
@@ -801,7 +801,7 @@ message N {
   const Columns cols = {"w", "dw", "rw", "n", "o"};
 
   MessagePtr m = New(desc);
-  auto full = pxf::UnmarshalFull("w = null\ndw = null\nrw = null\no = null\n", m.get());
+  auto full = pxf::UnmarshalFull("w = null\ndw = null\nrw = 4\no = null\n", m.get());
   ASSERT_TRUE(full.ok()) << full.status().message();
   const pb::Reflection* r = m->GetReflection();
   r->SetInt32(m.get(), desc->FindFieldByName("n"), 3);
@@ -809,15 +809,31 @@ message N {
   pb::Message* w = r->MutableMessage(m.get(), desc->FindFieldByName("w"));
   w->GetReflection()->SetString(w, wrapper->FindFieldByName("value"), "set anyway");
   // A scalar in the mask: no decode puts one there, but a mask from another
-  // producer can carry one. Marshal and the writer both write its value.
+  // producer can carry one. Marshal and the writer both write its value. A
+  // set required field in the mask is written as its value too.
   pb::Message* mask = r->MutableMessage(m.get(), desc->FindFieldByName("_null"));
-  mask->GetReflection()->AddString(mask, mask->GetDescriptor()->FindFieldByName("paths"), "n");
+  const auto* paths_fd = mask->GetDescriptor()->FindFieldByName("paths");
+  mask->GetReflection()->AddString(mask, paths_fd, "n");
+  mask->GetReflection()->AddString(mask, paths_fd, "rw");
   auto marshalled = pxf::Marshal(*m);
   ASSERT_TRUE(marshalled.ok()) << marshalled.status().message();
-  EXPECT_EQ(*marshalled, "w = null\ndw = null\nrw = null\nn = 3\no = null\n");
+  EXPECT_EQ(*marshalled, "w = null\ndw = null\nrw = 4\nn = 3\no = null\n");
 
-  const std::string row = Row(*m, cols);
-  EXPECT_EQ(row, "(null, null, null, 3, null)\n");
+  std::string row = Row(*m, cols);
+  EXPECT_EQ(row, "(null, null, 4, 3, null)\n");
+
+  // Unset, the mask does not save it: null is no text for a required field,
+  // so the writer refuses. (Marshal's refusal of an unset required field is
+  // protowire-cpp#129.)
+  const auto* rw_fd = desc->FindFieldByName("rw");
+  MessagePtr rw_saved = New(rw_fd->message_type());
+  rw_saved->CopyFrom(r->GetMessage(*m, rw_fd));
+  r->ClearField(m.get(), rw_fd);
+  EXPECT_EQ(RowError(*m, cols),
+            "pxf: @dataset column \"rw\": unset, and the field is (pxf.required)");
+  r->MutableMessage(m.get(), rw_fd)->CopyFrom(*rw_saved);
+  row = Row(*m, cols);
+  EXPECT_EQ(row, "(null, null, 4, 3, null)\n");
 
   // The null o reads back unset, not as its default, and in the mask.
   std::istringstream in(Header(desc, cols) + row);
@@ -833,6 +849,7 @@ message N {
   // Without the mask, the set wrapper is its value and the unset required one
   // is refused.
   r->ClearField(m.get(), desc->FindFieldByName("_null"));
+  r->ClearField(m.get(), rw_fd);
   EXPECT_EQ(RowError(*m, cols),
             "pxf: @dataset column \"rw\": unset, and the field is (pxf.required)");
 }

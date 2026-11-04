@@ -624,6 +624,14 @@ class DirectDecoder {
                       "null is not allowed on scalar field " + name +
                           ": the field is required, so it must be set");
     }
+    // A field with (pxf.required) or @required holds a value, so null is
+    // rejected as absence is, whatever its type and presence
+    // (protowire-go#268, trendvidia/protowire#569).
+    if (IsRequired(fd)) {
+      return PosError(
+          pos,
+          "null is not allowed on required field " + name + ": a required field holds a value");
+    }
     if (!fd->has_presence()) {
       return PosError(pos,
                       "null is not allowed on scalar field " + name +
