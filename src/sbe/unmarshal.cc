@@ -192,6 +192,15 @@ Status Codec::UnmarshalInto(std::span<const uint8_t> data,
     return Status::Error("sbe: template ID mismatch: got " + std::to_string(template_id) +
                          ", want " + std::to_string(tmpl->template_id));
   }
+  // A template id is unique only within a schema, so the template id alone
+  // does not say the bytes are this message's: they may be another schema's
+  // message with the same id. The version is not checked.
+  uint16_t schema_id = LoadU16(data.data() + 4);
+  if (schema_id != tmpl->schema_id) {
+    return Status::Error("sbe: schema ID mismatch: got " + std::to_string(schema_id) + ", want " +
+                         std::to_string(tmpl->schema_id) + " for template " +
+                         std::to_string(tmpl->template_id));
+  }
   if (block_length < tmpl->block_length) {
     return Status::Error("sbe: wire blockLength " + std::to_string(block_length) +
                          " < schema blockLength " + std::to_string(tmpl->block_length) +
