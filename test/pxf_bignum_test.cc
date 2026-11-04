@@ -174,6 +174,31 @@ TEST_F(PxfBigNum, DecimalLiteralPastTheCapIsRefused) {
       << out.status().message();
 }
 
+// big.Float holds at most 2^31-1 mantissa bits, so a non-zero literal with a
+// wider suffix is refused, in protowire-go's words (protowire-go#231). Only a
+// digit cap raised past 646 million admits such a suffix. A zero has no
+// mantissa and is accepted.
+TEST_F(PxfBigNum, BigFloatWiderThanBigFloatIsRefused) {
+  protowire::pxf::UnmarshalOptions opts;
+  opts.max_numeric_literal_digits = 2000000000;
+  const std::pair<const char*, const char*> refused[] = {
+      {"rate = 1p2147483648\n",
+       "big float literal 1: precision p2147483648 exceeds the widest mantissa big.Float can hold, "
+       "2147483647 bits"},
+      {"rate = -1.5p4294967295\n",
+       "big float literal -1.5: precision p4294967295 exceeds the widest mantissa big.Float can "
+       "hold, 2147483647 bits"},
+  };
+  for (const auto& [doc, want] : refused) {
+    auto msg = NewWallet();
+    auto st = protowire::pxf::Unmarshal(doc, msg.get(), opts);
+    ASSERT_FALSE(st.ok()) << doc;
+    EXPECT_NE(st.message().find(want), std::string::npos) << st.ToString();
+  }
+  auto msg = NewWallet();
+  EXPECT_TRUE(protowire::pxf::Unmarshal("rate = 0p2147483648\n", msg.get(), opts).ok());
+}
+
 TEST_F(PxfBigNum, BigFloatRoundTrips) {
   // An unsuffixed literal reads at 256 bits, and the suffix written back
   // says so.
