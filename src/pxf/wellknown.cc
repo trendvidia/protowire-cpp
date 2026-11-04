@@ -320,7 +320,9 @@ bool SetDecimalFromString(pb::Message* msg, std::string_view literal) {
     const pb::FieldDescriptor* fd = msg->GetDescriptor()->FindFieldByName("scale");
     msg->GetReflection()->SetInt32(msg, fd, d.scale);
   }
-  SetBoolField(msg, "negative", d.negative);
+  // The sign is the literal's, as protowire-go reads it: -0 and -0.00 keep
+  // negative, which ParseDecimal drops for a zero.
+  SetBoolField(msg, "negative", d.negative || (!literal.empty() && literal[0] == '-'));
   return true;
 }
 
@@ -367,7 +369,11 @@ StatusOr<std::string> ReadDecimalAsString(const pb::Message& msg) {
   d.unscaled = GetBytes(msg, "unscaled");
   d.scale = GetInt32Field(msg, "scale");
   d.negative = GetBoolField(msg, "negative");
-  return protowire::pb::FormatDecimal(d);
+  auto text = protowire::pb::FormatDecimal(d);
+  // A zero keeps its sign, as protowire-go writes it: -0 and -0.00 read back
+  // with negative set. FormatDecimal drops it for a zero.
+  if (text.ok() && d.negative && d.IsZero()) return "-" + *text;
+  return text;
 }
 
 StatusOr<std::string> ReadBigFloatAsString(const pb::Message& msg) {

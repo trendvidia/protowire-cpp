@@ -17,6 +17,14 @@ pxf_diff=${PXF_DIFF:-$here/build/bin/pxf_diff}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
+# test/pb_values_table_test.cc reads a copy of the spec's struct-binding table
+# (protowire#509), since CI's unit tests have no spec checkout.
+if ! cmp -s "$here/testdata/values/values.tsv" "$spec/testdata/values/values.tsv"; then
+  echo "testdata/values/values.tsv differs from the spec's; copy it and update the twins:" >&2
+  diff "$here/testdata/values/values.tsv" "$spec/testdata/values/values.tsv" >&2 || true
+  exit 1
+fi
+
 manifest="$work/manifest"
 : > "$manifest"
 add_dir() { # root dir [extra protos] [type of a document with no @type]
