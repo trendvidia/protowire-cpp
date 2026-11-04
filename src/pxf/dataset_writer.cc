@@ -247,20 +247,20 @@ const char* EmptyCollection(const FieldDescriptor* fd) {
   return fd->is_map() ? "{}" : "[]";
 }
 
-// CellUnset decides how a value cell writes fd, which msg does not set. Inside
-// a cell, as in a row, the reader applies (pxf.default) to an absent field and
-// checks (pxf.required), so an unset annotated field is written the way
-// WriteCell writes one: a field without presence as its zero value (*write), a
-// message-typed field as null, and an optional or oneof scalar not at all,
-// which reads back as its default. A required list or map has no presence, so
-// it is a write too, of EmptyCollection. A oneof member is not written when a
-// sibling is set: the sibling keeps its default off. An unset required field
-// with presence cannot be written. An unannotated field is not written.
-Status CellUnset(const Message& msg,
-                 const FieldDescriptor* fd,
-                 const std::string& path,
-                 bool* write,
-                 bool* null) {
+// UnsetField decides how Marshal writes fd, which msg does not set (#129,
+// protowire-go#259). A reader applies (pxf.default) to an absent field and
+// checks (pxf.required), so leaving out an annotated field would not read back
+// as the message. So a field without presence is written as its zero value
+// (*write), which the default does not replace and which counts as supplied; a
+// required list or map has no presence, so it is a write too, of
+// EmptyCollection. A message-typed field is written null, which keeps the
+// default off and leaves it unset. An `optional` or oneof scalar is not
+// written, and reads back as its default: the owner chose this
+// (protowire-go#267), and the draft names it as an exception to the round trip.
+// A oneof member is not written when a sibling is set, since the sibling keeps
+// the default off. An unset required field with presence cannot be written: a
+// reader rejects it absent and null alike. An unannotated field is not written.
+Status UnsetField(const Message& msg, const FieldDescriptor* fd, bool* write, bool* null) {
   *write = false;
   *null = false;
   const CellOptions o = CellOptionsOf(fd);
@@ -269,7 +269,10 @@ Status CellUnset(const Message& msg,
     *write = true;
     return Status::OK();
   }
-  if (o.required) return Status::Error(path + " is unset, and the field is (pxf.required)");
+  if (o.required) {
+    return Status::Error("pxf: " + std::string(fd->full_name()) +
+                         " is unset, and the field is (pxf.required)");
+  }
   if (const pb::OneofDescriptor* od = fd->real_containing_oneof();
       od != nullptr && msg.GetReflection()->GetOneofFieldDescriptor(msg, od) != nullptr) {
     return Status::OK();

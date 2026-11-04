@@ -68,6 +68,16 @@ message Bag {
 message WithDefault {
   optional int32 level = 1 [(pxf.default) = "7"];
 }
+
+message PlainDefault {
+  int32 level = 1 [(pxf.default) = "7"];
+  string s = 2;
+}
+
+message PlainRequired {
+  int32 n = 1 [(pxf.required) = true];
+  string s = 2;
+}
 )";
 
 // Resolver that knows about ErrorDetail by full name (any URL prefix is fine).
@@ -464,6 +474,29 @@ TEST_F(PxfAny, BagInCanonicalFormIsABody) {
       18);
   const std::string text = MarshalPayload(msg.get(), desc_, resolver_.get(), "any.test.Bag", value);
   EXPECT_NE(text.find("@type = \"any.test.Bag\""), std::string::npos) << text;
+}
+
+// An unset annotated field without presence is written so that it reads back
+// (#129), so the Any is a body. Only an `optional` one stays raw: unset
+// required has no text a reader accepts, and an unset defaulted one reads back
+// as its default. Mirrors protowire-go's any_body_readback_test.go.
+TEST_F(PxfAny, UnsetAnnotatedFieldIsABody) {
+  struct Case {
+    const char* name;
+    const char* type_url;
+    std::string value;
+  };
+  const Case cases[] = {
+      {"default unset", "any.test.PlainDefault", std::string("\x12\x01s", 3)},
+      {"required unset", "any.test.PlainRequired", std::string("\x12\x01s", 3)},
+  };
+  for (const Case& c : cases) {
+    auto msg = NewEvent();
+    const std::string text = MarshalPayload(msg.get(), desc_, resolver_.get(), c.type_url, c.value);
+    EXPECT_NE(text.find(std::string("@type = \"") + c.type_url + "\""), std::string::npos)
+        << c.name << ":\n"
+        << text;
+  }
 }
 
 // A chain of Anys longer than MaxNestingDepth still reads back: the encoder
