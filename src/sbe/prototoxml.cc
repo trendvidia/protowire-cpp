@@ -165,7 +165,7 @@ TypeInfo FieldToSBEType(const gpb::FieldDescriptor* fd) {
 }
 
 void WriteEnum(std::string* b, const gpb::EnumDescriptor* ed) {
-  const std::string name(ed->name());
+  const std::string name = std::string(ed->name());
   *b += "        <enum name=\"" + name + "\" encodingType=\"uint8\">\n";
   for (int i = 0; i < ed->value_count(); ++i) {
     const gpb::EnumValueDescriptor* v = ed->value(i);
