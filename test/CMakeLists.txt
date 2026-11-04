@@ -42,7 +42,8 @@ if(TARGET protowire_pxf)
             pxf_proto_directive_test pxf_map_keys_test pxf_keyed_test pxf_hardening_test pxf_go_parity_test pxf_dataset_writer_test pxf_rewriter_test pxf_wkt_shape_test
             pxf_nan_test
             pxf_duration_block_test
-            pxf_marshal_depth_test)
+            pxf_marshal_depth_test
+            pxf_marshal_unset_annotated_test)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${f}.cc)
       list(APPEND _pxf_test_srcs ${f}.cc)
     endif()

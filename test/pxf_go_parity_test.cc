@@ -127,12 +127,14 @@ TEST_F(GoParity, FloatsAreShortest) {
   EXPECT_EQ(RoundTrip("diff.v1.Numbers", "d = nan\n"), "d = nan\n");
 }
 
+// Root's required_text is unset in each case, and is written as its zero value
+// so that it reads back (#129).
 TEST_F(GoParity, MarshalLayout) {
   EXPECT_EQ(RoundTrip("diff.v1.Root", "leaf { after = \"x\" }\nstrs = [\"a\", \"b\"]\n"),
-            "leaf {\n  after = \"x\"\n}\nstrs = [\n  \"a\",\n  \"b\"\n]\n");
+            "leaf {\n  after = \"x\"\n}\nstrs = [\n  \"a\",\n  \"b\"\n]\nrequired_text = \"\"\n");
   EXPECT_EQ(RoundTrip("diff.v1.Root", "by_num = { 10: {} 9: {} }\n"),
-            "by_num = {\n  10: {\n  }\n  9: {\n  }\n}\n");
-  EXPECT_EQ(RoundTrip("diff.v1.Root", "color = 5\n"), "color = 5\n");
+            "by_num = {\n  10: {\n  }\n  9: {\n  }\n}\nrequired_text = \"\"\n");
+  EXPECT_EQ(RoundTrip("diff.v1.Root", "color = 5\n"), "color = 5\nrequired_text = \"\"\n");
 }
 
 TEST_F(GoParity, EmitDefaultsEndsOnARecursiveMessage) {

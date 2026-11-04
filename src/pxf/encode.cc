@@ -58,10 +58,6 @@ class Encoder {
 
   void SetNullMaskFd(const FieldDescriptor* fd) { null_mask_fd_ = fd; }
 
-  // SetCellBodies is for a @dataset value cell: an unset annotated field
-  // follows CellUnset.
-  void SetCellBodies() { cell_bodies_ = true; }
-
   Status EncodeMessage(const Message& msg, int level);
   Status EncodeListField(const Message& msg, const FieldDescriptor* fd, int level);
   Status EncodeMapField(const Message& msg, const FieldDescriptor* fd, int level);
@@ -129,7 +125,9 @@ class Encoder {
   int max_depth_;
   bool depth_refused_ = false;
   const NullSet* null_set_ = nullptr;
-  bool cell_bodies_ = false;
+  // required_unset_ records that an unset (pxf.required) field with presence
+  // was refused, so that an Any whose body has one can stay raw instead.
+  bool required_unset_ = false;
   std::string path_prefix_;
   const FieldDescriptor* null_mask_fd_ = nullptr;
   // Key field to omit from the NEXT EncodeMessage call: the entry name of
@@ -399,16 +397,21 @@ Status Encoder::TryEncodeAny(const FieldDescriptor* fd,
   const size_t body_start = out_.size();
   std::string saved = Enter(fd->name());
   const bool refused_before = depth_refused_;
+  const bool unset_before = required_unset_;
   depth_refused_ = false;
+  required_unset_ = false;
   Status st = EncodeMessage(*inner, level + 1);
   path_prefix_ = std::move(saved);
-  if (!st.ok() && depth_refused_) {
-    // The value is too deep to unpack here; its bytes are not.
+  if (!st.ok() && (depth_refused_ || required_unset_)) {
+    // The value is too deep to unpack here, or a body would be rejected for
+    // an unset required field; its bytes are not.
     depth_refused_ = refused_before;
+    required_unset_ = unset_before;
     out_.resize(start);
     return Status::OK();
   }
   depth_refused_ = refused_before;
+  required_unset_ = unset_before;
   if (!st.ok()) return st;
   // A body that would not read back as the same value is taken back, and
   // the Any stays as its own fields, which always read back.
@@ -602,29 +605,36 @@ Status Encoder::EncodeMessage(const Message& msg, int level) {
     }
     const pb::Reflection* refl = msg.GetReflection();
     const bool has = fd->is_repeated() ? refl->FieldSize(msg, fd) > 0 : refl->HasField(msg, fd);
-    if (cell_bodies_ && !has) {
+    if (!has) {
+      // An unset annotated field is written so that it reads back (#129).
       bool write = false;
       bool null = false;
-      if (Status st = CellUnset(msg, fd, path_prefix_ + std::string(fd->name()), &write, &null);
-          !st.ok()) {
+      if (Status st = UnsetField(msg, fd, &write, &null); !st.ok() && !opts_.emit_defaults) {
+        required_unset_ = true;
         return st;
       }
       if (null) {
         WriteFieldPrefix(level, fd->name());
         out_ += "null\n";
-      } else if (write) {  // the zero value, written out
-        if (fd->is_repeated()) {
-          if (Status st = CheckDepth(level + 1); !st.ok()) return st;
-        }
-        WriteFieldPrefix(level, fd->name());
-        if (fd->is_repeated()) {
-          out_ += EmptyCollection(fd);
-        } else {
-          EncodeScalarValue(msg, fd, /*idx=*/-1);
-        }
-        out_ += '\n';
+        continue;
       }
-      continue;
+      if (write && fd->is_repeated()) {
+        if (Status st = CheckDepth(level + 1); !st.ok()) return st;
+        WriteFieldPrefix(level, fd->name());
+        out_ += EmptyCollection(fd);
+        out_ += '\n';
+        continue;
+      }
+      if (write) {  // the zero value, written out
+        WriteFieldPrefix(level, fd->name());
+        EncodeScalarValue(msg, fd, /*idx=*/-1);
+        out_ += '\n';
+        continue;
+      }
+      // With emit_defaults every other unset field is written as before: an
+      // unset required field with presence then reads back set to zero, which
+      // a reader accepts.
+      if (!opts_.emit_defaults) continue;
     }
     if (Status st = EncodeField(msg, fd, level); !st.ok()) return st;
   }
@@ -689,7 +699,6 @@ Status WriteValueCell(const Message& msg,
   std::string tmp;
   Encoder inner(opts, tmp);
   inner.SetNullSet(null_set);
-  inner.SetCellBodies();
   Status st;
   if (fd->is_map()) {
     st = inner.EncodeMapField(msg, fd, 0);

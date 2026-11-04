@@ -63,12 +63,11 @@ bool AnyBodyReadsBack(std::string_view body,
 // EmptyCollection is the literal for a list or map field with nothing in it.
 const char* EmptyCollection(const google::protobuf::FieldDescriptor* fd);
 
-// CellUnset decides how a value cell writes fd, which msg does not set; see
-// its definition in dataset_writer.cc. path names fd in an error.
-Status CellUnset(const google::protobuf::Message& msg,
-                 const google::protobuf::FieldDescriptor* fd,
-                 const std::string& path,
-                 bool* write,
-                 bool* null);
+// UnsetField decides how Marshal writes fd, which msg does not set; see its
+// definition in dataset_writer.cc.
+Status UnsetField(const google::protobuf::Message& msg,
+                  const google::protobuf::FieldDescriptor* fd,
+                  bool* write,
+                  bool* null);
 
 }  // namespace protowire::pxf

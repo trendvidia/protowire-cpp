@@ -968,7 +968,8 @@ TEST_F(DatasetWriter, ValueCellBodies) {
   MessagePtr h = New(held);
   h->GetReflection()->MutableMessage(h.get(), held->FindFieldByName("body"));
   EXPECT_EQ(RowError(*h, {"body"}),
-            "pxf: @dataset column \"body\": name is unset, and the field is (pxf.required)");
+            "pxf: @dataset column \"body\": pxf: dsw.v1.CellRequired.name is unset, and the field "
+            "is (pxf.required)");
 }
 
 // An empty (pxf.required) repeated or map field is written `[]` or `{}`, which
