@@ -4,6 +4,8 @@
 
 #include "protowire/pxf.h"
 
+#include "protowire/limits.h"
+
 #include <gtest/gtest.h>
 #include "fixture_dir.h"
 #include "protoc_compat.h"
@@ -197,6 +199,70 @@ TEST_F(PxfBigNum, BigFloatWiderThanBigFloatIsRefused) {
   }
   auto msg = NewWallet();
   EXPECT_TRUE(protowire::pxf::Unmarshal("rate = 0p2147483648\n", msg.get(), opts).ok());
+}
+
+// protowire-go's TestMarshalBigFloatExponentBoundEdges. The bound is on the
+// value after rounding to prec (protowire-go#261): 2^54-1 at exponent 16330
+// is at the bound on the wire, and at prec 3 it rounds to 2^54, binary
+// exponent 16385, whose literal no reader takes. What Marshal writes, the
+// decoder takes.
+TEST_F(PxfBigNum, BigFloatMarshalExponentBoundEdges) {
+  constexpr int32_t kBound = protowire::kMaxBigFloatExponent;
+  struct Case {
+    const char* name;
+    std::string mantissa;
+    int32_t exponent;
+    uint32_t prec;
+    const char* want_err;  // "" for a literal
+  };
+  const Case cases[] = {
+      {"prec 0", "\x01", INT32_MIN, 0, ""},
+      {"empty mantissa", "", INT32_MIN, 64, ""},
+      {"zero bytes", std::string(2, '\0'), INT32_MAX, 64, ""},
+      {"leading zeros, at the bound", std::string("\0\0\x03", 3), kBound - 2, 64, ""},
+      {"leading zeros, past the bound",
+       std::string("\0\0\x03", 3),
+       kBound - 1,
+       64,
+       "binary exponent 16385 exceeds MaxBigFloatExponent=16384"},
+      {"rounds past the bound",
+       "\x3f\xff\xff\xff\xff\xff\xff",
+       16330,
+       3,
+       "binary exponent 16385 after rounding to prec 3 exceeds MaxBigFloatExponent=16384"},
+      // The same mantissa rounding down stays at the bound: 0b101 followed by
+      // 51 zeros at prec 3 is exact.
+      {"rounds within the bound", std::string("\x28\0\0\0\0\0\0", 7), 16330, 3, ""},
+      // Not in Go's table: a zero is bounded by its digits as Go's
+      // formatBigFloat bounds it, rather than written as 0p<prec>.
+      {"zero past the digit bound",
+       "",
+       0,
+       4000000,
+       "pxf.BigFloat prec 4000000 bits renders to 1204121 digits; MaxNumericLiteralDigits=4096"},
+  };
+  const auto* rate_fd = desc_->FindFieldByName("rate");
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.name);
+    auto msg = NewWallet();
+    pbuf::Message* rate = msg->GetReflection()->MutableMessage(msg.get(), rate_fd);
+    const pbuf::Descriptor* d = rate->GetDescriptor();
+    const pbuf::Reflection* r = rate->GetReflection();
+    r->SetString(rate, d->FindFieldByName("mantissa"), c.mantissa);
+    r->SetInt32(rate, d->FindFieldByName("exponent"), c.exponent);
+    r->SetUInt32(rate, d->FindFieldByName("prec"), c.prec);
+    auto out = protowire::pxf::Marshal(*msg);
+    if (*c.want_err != '\0') {
+      ASSERT_FALSE(out.ok()) << *out;
+      EXPECT_NE(out.status().message().find(c.want_err), std::string::npos)
+          << out.status().ToString();
+      continue;
+    }
+    ASSERT_TRUE(out.ok()) << out.status().ToString();
+    auto back = NewWallet();
+    EXPECT_TRUE(protowire::pxf::Unmarshal(*out, back.get()).ok())
+        << "the decoder takes what the encoder wrote: " << *out;
+  }
 }
 
 TEST_F(PxfBigNum, BigFloatRoundTrips) {

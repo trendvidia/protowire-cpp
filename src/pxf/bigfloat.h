@@ -43,6 +43,28 @@ Status ParseBigFloatLiteral(std::string_view literal,
                             int max_exponent,
                             BigFloatFields* out);
 
+// BigFloatLimit is the first limit a value with a non-zero prec fails, in
+// the order protowire-go asks them, and the number it fails with. Each
+// writer words the refusal in its own way, as protowire-go does.
+struct BigFloatLimit {
+  enum Kind {
+    kNone,
+    // The binary exponent as the fields store it is past MaxBigFloatExponent.
+    kExponent,
+    // The mantissa rounded to prec carried the binary exponent past it
+    // (protowire#410, protowire-go#261).
+    kRoundedExponent,
+    // prec renders to more digits than MaxNumericLiteralDigits.
+    kDigits,
+  };
+  Kind kind = kNone;
+  int64_t value = 0;  // the binary exponent, or the digit count
+};
+
+// CheckBigFloatLimits asks the limits of a value whose prec is not zero.
+// The exponent comes first, since it bounds the cost of everything after.
+BigFloatLimit CheckBigFloatLimits(const BigFloatFields& f, int max_digits, int max_exponent);
+
 // FormatBigFloatLiteral writes the value as N = (decimal digits of 2^prec)
 // + 1 significant digits, round half even, in C's %g form, then `p<prec>`.
 // A value past the bounds has no literal, and is refused before any work.
