@@ -265,6 +265,27 @@ TEST_F(PxfBigNum, BigFloatMarshalExponentBoundEdges) {
   }
 }
 
+// protowire-go's TestBigFloatLiteral_NearTieReadsExactly (protowire-go#260).
+// A literal is rounded from its exact value to prec bits, once, ties to even.
+// This one is 2.5 - 1.7e-68 times 2^-16383, just below the tie, so at 2 bits
+// it is 2 times 2^-16383: mantissa 0b10 at exponent -16383. Rounding twice,
+// as big.Float.Parse did, read it as 3.
+TEST_F(PxfBigNum, BigFloatNearTieReadsExactly) {
+  auto msg = NewWallet();
+  auto st = protowire::pxf::Unmarshal(
+      "rate = "
+      "4.2026289288901168828283472716521907532475991810580890501360340372609e-4932p2\n",
+      msg.get());
+  ASSERT_TRUE(st.ok()) << st.ToString();
+  const pbuf::Message& rate =
+      msg->GetReflection()->GetMessage(*msg, desc_->FindFieldByName("rate"));
+  const pbuf::Descriptor* d = rate.GetDescriptor();
+  const pbuf::Reflection* r = rate.GetReflection();
+  EXPECT_EQ(r->GetString(rate, d->FindFieldByName("mantissa")), "\x02");
+  EXPECT_EQ(r->GetInt32(rate, d->FindFieldByName("exponent")), -16383);
+  EXPECT_EQ(r->GetUInt32(rate, d->FindFieldByName("prec")), 2u);
+}
+
 TEST_F(PxfBigNum, BigFloatRoundTrips) {
   // An unsuffixed literal reads at 256 bits, and the suffix written back
   // says so.
