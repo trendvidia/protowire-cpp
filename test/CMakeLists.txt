@@ -40,7 +40,7 @@ if(TARGET protowire_pxf)
             pxf_annotations_test pxf_format_test pxf_tolerant_test pxf_check_test pxf_directive_test
             pxf_schema_test pxf_schema_rules_test pxf_secret_test pxf_element_defaults_test pxf_result_directives_test pxf_dataset_reader_test
             pxf_proto_directive_test pxf_map_keys_test pxf_keyed_test pxf_hardening_test pxf_go_parity_test pxf_dataset_writer_test pxf_rewriter_test pxf_wkt_shape_test
-            pxf_nan_test
+            pxf_nan_test pxf_format_directives_test
             pxf_duration_block_test
             pxf_marshal_depth_test
             pxf_marshal_unset_annotated_test)
