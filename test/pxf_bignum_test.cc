@@ -10,6 +10,7 @@
 #include "fixture_dir.h"
 #include "protoc_compat.h"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -466,10 +467,10 @@ TEST_F(PxfBigNum, BigFloatFarPastTheBoundIsRefusedAsGoRefusesIt) {
       {"1e-646456994p64", false, "is below big.Float's range"},
       {"1e-999999999", false, "is below big.Float's range"},
       {"1e-999999999999", false, "invalid big float: 1e-999999999999"},
-      // protowire-go builds 5^999999999 at 2^31 bits for these and takes
-      // minutes; this port answers from an estimate, in the same words.
-      // Within a few powers of two of big.Float's range the estimate cannot
-      // answer, and both ports build the power of five.
+      // These are answered from an estimate, in protowire-go's words. Within
+      // a few powers of two of big.Float's range the estimate cannot answer,
+      // and the power of five is built, at no more than 16384 bits
+      // (protowire-go#274).
       {"1e-999999999p2147483647", true, "is below big.Float's range"},
       {"1e646457000p4294967295", true, "is above big.Float's range"},
   };
@@ -482,6 +483,66 @@ TEST_F(PxfBigNum, BigFloatFarPastTheBoundIsRefusedAsGoRefusesIt) {
     ASSERT_FALSE(st.ok());
     EXPECT_NE(st.message().find(c.want), std::string::npos) << st.ToString();
   }
+}
+
+// big.Float.Parse is followed at no more than 16384 bits, as protowire-go
+// follows it (protowire-go#274, #151): its cost grows with the square of
+// the precision, and a raised digit cap admits a suffix of 2^31 bits. These
+// literals took protowire-go minutes each, and get the answers they got
+// then. The texts are protowire-go's, from its TestBigFloatWidePrecisionIsQuick.
+TEST_F(PxfBigNum, BigFloatWidePrecisionIsQuick) {
+  protowire::pxf::UnmarshalOptions wide;
+  wide.max_numeric_literal_digits = 1300000000;  // admits p4294967295
+  const std::pair<const char*, const char*> cases[] = {
+      {"1e-300p2147483647", "big float literal 1e-300 is below the wire's exponent range"},
+      {"1e646456993p2147483647", "big float literal 1e646456993 is above big.Float's range"},
+      {"1e646456993p4294967295", "big float literal 1e646456993 is above big.Float's range"},
+      {"1e-646456993p2147483647",
+       "big float literal 1e-646456993 is below the wire's exponent range"},
+      {"1e-646457000p2147483647", "big float literal 1e-646457000 is below big.Float's range"},
+      {"1.5p4294967295",
+       "big float literal 1.5: precision p4294967295 exceeds the widest mantissa big.Float can "
+       "hold, 2147483647 bits"},
+      {"1e5000p2147483647",
+       "big float literal 1e5000 has binary exponent 16610, and MaxBigFloatExponent=16384 bounds "
+       "its magnitude"},
+  };
+  for (const auto& [lit, want] : cases) {
+    SCOPED_TRACE(lit);
+    auto msg = NewWallet();
+    const auto start = std::chrono::steady_clock::now();
+    auto st = protowire::pxf::Unmarshal(std::string("rate = ") + lit + "\n", msg.get(), wide);
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(5));
+    EXPECT_EQ(st.message(), want);
+  }
+}
+
+// A literal a wide precision accepts is rounded exactly at that precision,
+// not at the one Parse is followed at: 0.1 at 50 million bits is 0.1's
+// binary expansion, 0011 repeating, rounded once.
+TEST_F(PxfBigNum, BigFloatWidePrecisionValue) {
+  constexpr uint32_t kPrec = 50000000;
+  protowire::pxf::UnmarshalOptions wide;
+  wide.max_numeric_literal_digits = 20000000;
+  auto msg = NewWallet();
+  const auto start = std::chrono::steady_clock::now();
+  auto st =
+      protowire::pxf::Unmarshal("rate = 0.1p" + std::to_string(kPrec) + "\n", msg.get(), wide);
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(5));
+  ASSERT_TRUE(st.ok()) << st.ToString();
+  const pbuf::Message& rate =
+      msg->GetReflection()->GetMessage(*msg, desc_->FindFieldByName("rate"));
+  const pbuf::Descriptor* d = rate.GetDescriptor();
+  const pbuf::Reflection* r = rate.GetReflection();
+  EXPECT_EQ(r->GetUInt32(rate, d->FindFieldByName("prec")), kPrec);
+  // 0.1 = 0.000110011… in binary: mantissa 1100 1100 … (prec bits) × 2^(-3 - prec).
+  // The bits after the 50000000th are 1100…, more than half, so it rounds up.
+  EXPECT_EQ(r->GetInt32(rate, d->FindFieldByName("exponent")), -3 - static_cast<int32_t>(kPrec));
+  const std::string m = r->GetString(rate, d->FindFieldByName("mantissa"));
+  ASSERT_EQ(m.size(), kPrec / 8);
+  EXPECT_EQ(static_cast<uint8_t>(m.front()), 0xcc);
+  EXPECT_EQ(static_cast<uint8_t>(m[m.size() / 2]), 0xcc);
+  EXPECT_EQ(static_cast<uint8_t>(m.back()), 0xcd);
 }
 
 // A precision suffix quoted in an error is clipped as protowire-go clips

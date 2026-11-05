@@ -16,6 +16,14 @@ namespace {
 
 constexpr uint32_t kDefaultPrec = 256;
 
+// kCheckPrec is the most precision big.Float.Parse is followed at, as
+// protowire-go's bigFloatCheckPrec (protowire-go#274). Parse only places a
+// literal against the range checks; the value comes from the exact
+// rounding. Parse's cost grows with the square of its precision, so a
+// suffix of hundreds of millions of bits took minutes. 16384 is above the
+// 13603 bits the default MaxNumericLiteralDigits allows.
+constexpr uint32_t kCheckPrec = uint32_t{1} << 14;
+
 // Nat is an arbitrary-precision natural number, little-endian in 32-bit
 // limbs, with no leading zero limb. Operands here are bounded by the
 // literal limits before they are built, so schoolbook algorithms suffice.
@@ -668,8 +676,13 @@ Status ParseBigFloatLiteral(std::string_view literal,
   // literal at prec, in this order, and then of the exact value rounded
   // once. Parse's value is followed exactly, its exponent included, so the
   // refusals and their numbers are Go's.
+  // Above kCheckPrec, Parse runs at kCheckPrec, as in protowire-go#274.
+  // Rounding to fewer bits can only raise the binary exponent, by one at
+  // most, so a positive exponent from a capped Parse is allowed one more by
+  // the first bound check; the check after the exact rounding decides.
+  const bool capped = prec > kCheckPrec;
   bool parsed = false;
-  const GoFloat go = GoParse(scan, prec, &parsed);
+  const GoFloat go = GoParse(scan, capped ? kCheckPrec : prec, &parsed);
   if (!parsed) {
     return Status::Error("invalid big float: " + std::string(literal));
   }
@@ -715,7 +728,9 @@ Status ParseBigFloatLiteral(std::string_view literal,
                          " is below the wire's exponent range");
   };
   if (below_wire(go.exp)) return below_wire_error();
-  if (ExceedsBound(go.exp, max_exponent)) return past_bound(go.exp);
+  if (ExceedsBound(capped && go.exp > 0 ? go.exp - 1 : go.exp, max_exponent)) {
+    return past_bound(go.exp);
+  }
   Nat num;
   for (char c : lit.digits) {
     num.MulSmall(10);

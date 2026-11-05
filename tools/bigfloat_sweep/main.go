@@ -13,9 +13,10 @@
 //	GOWORK=off GOFLAGS=-mod=mod go mod edit -replace github.com/trendvidia/protowire-go=../../../protowire-go
 //	GOWORK=off GOFLAGS=-mod=mod go run . ../../proto > ../../testdata/bigfloat-literals/go_sweep.tsv
 //
-// The rows at a 2^31-bit precision take protowire-go minutes each, so they
-// run in parallel; the whole run takes a few minutes. On stderr it counts the
-// literals whose big.Float.Parse exponent is not the exact value's.
+// The rows run in parallel. Before protowire-go#274 the rows at a 2^31-bit
+// precision took minutes each; with it, the whole run takes about a second.
+// On stderr it counts the literals whose big.Float.Parse exponent is not the
+// exact value's.
 package main
 
 import (
