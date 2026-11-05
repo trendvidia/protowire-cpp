@@ -47,7 +47,7 @@ Status ParseBigFloatLiteral(std::string_view literal,
 // the order protowire-go asks them, and the number it fails with. Each
 // writer words the refusal in its own way, as protowire-go does.
 struct BigFloatLimit {
-  enum Kind {
+  enum Kind : uint8_t {
     kNone,
     // The binary exponent as the fields store it is past MaxBigFloatExponent.
     kExponent,
