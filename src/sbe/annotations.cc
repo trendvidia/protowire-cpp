@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <span>
+#include <string>
 #include <vector>
 
 #include <google/protobuf/descriptor.h>
@@ -108,6 +109,45 @@ std::optional<uint32_t> GetFieldUint32Option(const pb::FieldDescriptor* fd, int 
 }
 std::optional<std::string> GetFieldStringOption(const pb::FieldDescriptor* fd, int field_number) {
   return GetStringOption(fd->options(), field_number);
+}
+
+namespace {
+
+// CarriesRetired reports whether opts, the options of a descriptor in pool,
+// has field number as an unknown field the pool does not declare.
+bool CarriesRetired(const google::protobuf::DescriptorPool* pool,
+                    const google::protobuf::Message& opts,
+                    int number) {
+  // The pool's own options type, which is not the generated one when the file
+  // was compiled with descriptor.proto in its pool.
+  const google::protobuf::Descriptor* type = pool->FindMessageTypeByName(opts.GetTypeName());
+  if (type == nullptr) type = opts.GetDescriptor();
+  if (pool->FindExtensionByNumber(type, number) != nullptr) return false;
+  const google::protobuf::UnknownFieldSet& unknown = opts.GetReflection()->GetUnknownFields(opts);
+  for (int i = 0; i < unknown.field_count(); ++i) {
+    if (unknown.field(i).number() == number) return true;
+  }
+  return false;
+}
+
+std::string StaleText(const std::string& what, const char* option, int retired, int registered) {
+  return "sbe: " + what + " carries (sbe." + option + ") at retired option number " +
+         std::to_string(retired) + " (registered as " + std::to_string(registered) +
+         " since protowire v1.12.0): the descriptor predates the registered extension block and "
+         "must be recompiled against the current sbe/annotations.proto";
+}
+
+}  // namespace
+
+std::string StaleFileError(const google::protobuf::FileDescriptor* fd) {
+  if (!CarriesRetired(fd->pool(), fd->options(), kRetiredSchemaID)) return "";
+  return StaleText("file " + std::string(fd->name()), "schema_id", kRetiredSchemaID, kExtSchemaID);
+}
+
+std::string StaleMessageError(const google::protobuf::Descriptor* md) {
+  if (!CarriesRetired(md->file()->pool(), md->options(), kRetiredTemplateID)) return "";
+  return StaleText(
+      "message " + std::string(md->full_name()), "template_id", kRetiredTemplateID, kExtTemplateID);
 }
 
 }  // namespace protowire::sbe

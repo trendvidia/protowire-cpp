@@ -108,7 +108,17 @@ class Codec {
                         size_t pos) const;
 
   std::unordered_map<std::string, std::unique_ptr<MessageTemplate>> by_name_;
-  std::unordered_map<uint16_t, MessageTemplate*> by_id_;
+  // A registered message, found by its schema id and template id together:
+  // a template id is unique only within a schema (draft -01 § SBE
+  // Annotations), so two schemas in one codec may each use one.
+  struct ByID {
+    std::string name;
+    MessageTemplate* tmpl = nullptr;
+  };
+  static uint32_t IDKey(uint16_t schema_id, uint16_t template_id) {
+    return (static_cast<uint32_t>(schema_id) << 16U) | static_cast<uint32_t>(template_id);
+  }
+  std::unordered_map<uint32_t, ByID> by_id_;
   int max_message_size_ = kMaxMessageSize;
   int max_repeated_ = kMaxRepeatedCount;
   check::Validator* validator_ = nullptr;

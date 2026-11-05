@@ -12,8 +12,6 @@
 #include <vector>
 
 #include <google/protobuf/descriptor.h>
-#include <google/protobuf/descriptor.pb.h>
-#include <google/protobuf/unknown_field_set.h>
 
 #include "protowire/sbe/annotations.h"
 #include "protowire/sbe/xml.h"
@@ -26,36 +24,6 @@ namespace {
 namespace gpb = google::protobuf;
 using xml_names::SnakeToCamel;
 using xml_names::StripEnumPrefix;
-
-// (sbe.schema_id)'s number before protowire v1.12.0. Nothing declares it any
-// more, so it survives only in an options message's unknown fields.
-constexpr int kRetiredSchemaID = 50100;
-
-// StaleFileError is the diagnosis for a file whose (sbe.schema_id) sits at the
-// retired number, as protowire-go's staleFileError; empty when it does not.
-std::string StaleFileError(const gpb::FileDescriptor* fd) {
-  // An extension the pool declares at that number is a known option, as Go's
-  // compiler stores it, even where libprotobuf keeps it as unknown bytes.
-  // The pool's own FileOptions, which is not the generated one when the file
-  // was compiled with descriptor.proto in its pool.
-  const gpb::Descriptor* file_options =
-      fd->pool()->FindMessageTypeByName("google.protobuf.FileOptions");
-  if (file_options == nullptr) file_options = gpb::FileOptions::descriptor();
-  if (fd->pool()->FindExtensionByNumber(file_options, kRetiredSchemaID) != nullptr) return "";
-  const gpb::Message& opts = fd->options();
-  const gpb::UnknownFieldSet& unknown = opts.GetReflection()->GetUnknownFields(opts);
-  for (int i = 0; i < unknown.field_count(); ++i) {
-    if (unknown.field(i).number() == kRetiredSchemaID) {
-      return "sbe: file " + std::string(fd->name()) +
-             " carries (sbe.schema_id) at retired option number " +
-             std::to_string(kRetiredSchemaID) + " (registered as " + std::to_string(kExtSchemaID) +
-             " since protowire v1.12.0): the descriptor predates the registered extension block "
-             "and "
-             "must be recompiled against the current sbe/annotations.proto";
-    }
-  }
-  return "";
-}
 
 // IsList is protoreflect's IsList: repeated and not a map.
 bool IsList(const gpb::FieldDescriptor* f) {

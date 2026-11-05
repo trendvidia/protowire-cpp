@@ -5,6 +5,7 @@
 #include <string>
 #include <utility>
 
+#include "header_bounds.h"
 #include "protowire/sbe/annotations.h"
 
 namespace protowire::sbe {
@@ -26,9 +27,21 @@ StatusOr<Codec> Codec::New(std::vector<const pb::FileDescriptor*> files, CodecOp
   for (const pb::FileDescriptor* fd : files) {
     auto schema = GetFileUint32Option(fd, kExtSchemaID);
     if (!schema.has_value()) {
-      return Status::Error(std::string(fd->name()) + " missing (sbe.schema_id) file option");
+      if (std::string stale = StaleFileError(fd); !stale.empty()) return Status::Error(stale);
+      return Status::Error("sbe: file " + std::string(fd->name()) +
+                           " missing (sbe.schema_id) option");
     }
     auto version = GetFileUint32Option(fd, kExtVersion).value_or(0);
+    if (*schema > static_cast<uint32_t>(kMaxUint16)) {
+      return Status::Error("sbe: file " + std::string(fd->name()) +
+                           ": (sbe.schema_id) = " + std::to_string(*schema) + " is past " +
+                           std::to_string(kMaxUint16) + ", the largest schemaId SBE can state");
+    }
+    if (version > static_cast<uint32_t>(kMaxUint16)) {
+      return Status::Error("sbe: file " + std::string(fd->name()) +
+                           ": (sbe.version) = " + std::to_string(version) + " is past " +
+                           std::to_string(kMaxUint16) + ", the largest version SBE can state");
+    }
     for (int i = 0; i < fd->message_type_count(); ++i) {
       Status st = c.RegisterMessage(
           fd->message_type(i), static_cast<uint16_t>(*schema), static_cast<uint16_t>(version));
@@ -39,12 +52,29 @@ StatusOr<Codec> Codec::New(std::vector<const pb::FileDescriptor*> files, CodecOp
 }
 
 Status Codec::RegisterMessage(const pb::Descriptor* md, uint16_t schema_id, uint16_t version) {
-  if (GetMessageUint32Option(md, kExtTemplateID).has_value()) {
+  if (!GetMessageUint32Option(md, kExtTemplateID).has_value()) {
+    // Only a message with a template_id is registered; one that carries it at
+    // the retired number is a stale descriptor, not a plain message.
+    if (std::string stale = StaleMessageError(md); !stale.empty()) return Status::Error(stale);
+  } else {
     auto tmpl = BuildTemplate(md, schema_id, version);
     if (!tmpl.ok()) return tmpl.status();
     auto owned = std::make_unique<MessageTemplate>(std::move(tmpl).consume());
-    by_id_[owned->template_id] = owned.get();
-    by_name_[std::string(md->full_name())] = std::move(owned);
+    // draft -01 § SBE Annotations: "sbe.template_id MUST be unique among
+    // messages within a schema". A second message with the same id would
+    // replace the first in by_id_, and NewView would then read one as the
+    // other. The same message seen again, as when a file is passed twice,
+    // is not a duplicate.
+    std::string name(md->full_name());
+    const uint32_t key = IDKey(schema_id, owned->template_id);
+    if (auto prev = by_id_.find(key); prev != by_id_.end() && prev->second.name != name) {
+      return Status::Error("sbe: messages " + prev->second.name + " and " + name +
+                           " share (sbe.template_id) = " + std::to_string(owned->template_id) +
+                           " in schema " + std::to_string(schema_id) +
+                           "; it must be unique within a schema");
+    }
+    by_id_[key] = ByID{name, owned.get()};
+    by_name_[name] = std::move(owned);
   }
   for (int i = 0; i < md->nested_type_count(); ++i) {
     Status st = RegisterMessage(md->nested_type(i), schema_id, version);
@@ -107,27 +137,28 @@ StatusOr<View> Codec::NewView(std::span<const uint8_t> data) const {
   }
   uint16_t block_length = LoadU16(data.data());
   uint16_t template_id = LoadU16(data.data() + 2);
-  auto it = by_id_.find(template_id);
-  if (it == by_id_.end()) {
-    return Status::Error("sbe: unknown template id " + std::to_string(template_id));
+  uint16_t schema_id = LoadU16(data.data() + 4);
+  // The header's schema id and template id together name the template: a
+  // template id is unique only within a schema.
+  auto found = by_id_.find(IDKey(schema_id, template_id));
+  if (found == by_id_.end()) {
+    return Status::Error("sbe: unknown template ID " + std::to_string(template_id) + " in schema " +
+                         std::to_string(schema_id));
   }
+  const MessageTemplate* tmpl = found->second.tmpl;
   // Schema evolution may push the wire block past the template's (newer
   // schemas append fields); a smaller one would underrun field reads.
-  if (block_length < it->second->block_length) {
+  if (block_length < tmpl->block_length) {
     return Status::Error("sbe: wire blockLength " + std::to_string(block_length) +
-                         " < schema blockLength " + std::to_string(it->second->block_length) +
+                         " < schema blockLength " + std::to_string(tmpl->block_length) +
                          " for template " + std::to_string(template_id));
   }
   size_t end = kHeaderSize + block_length;
   if (data.size() < end) {
     return Status::Error("sbe: data too short for root block");
   }
-  if (Status st = ValidateGroups(data, *it->second, end); !st.ok()) return st;
-  return View(data,
-              data.subspan(kHeaderSize, block_length),
-              it->second,
-              &it->second->fields,
-              &it->second->groups);
+  if (Status st = ValidateGroups(data, *tmpl, end); !st.ok()) return st;
+  return View(data, data.subspan(kHeaderSize, block_length), tmpl, &tmpl->fields, &tmpl->groups);
 }
 
 }  // namespace protowire::sbe
