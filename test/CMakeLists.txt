@@ -64,7 +64,8 @@ endif()
 if(TARGET protowire_sbe)
   set(_sbe_test_srcs "")
   foreach(f sbe_codec_test sbe_convert_test sbe_navigation_test sbe_stream_test
-            sbe_template_id_test sbe_header_bounds_test sbe_encoding_range_test)
+            sbe_template_id_test sbe_header_bounds_test sbe_encoding_range_test
+            sbe_oneof_test)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${f}.cc)
       list(APPEND _sbe_test_srcs ${f}.cc)
     endif()
