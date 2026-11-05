@@ -98,6 +98,7 @@ number says nothing about any other port. See the Releases section of
 - **A bool default is exactly `true` or `false`** (protowire-go#90). Any other spelling silently became `false`; it now fails the decode. **A schema with `(pxf.default) = "True"` now fails `UnmarshalFull`.**
 - **`ViolationKindName` and `Violation::ToString` use protowire-go's text:** `keyed field option`, `default field option`, `required field option`, and `invalid (pxf.key) = "..."`.
 - **`AppendDatasetRow` writes an empty `(pxf.required)` repeated field or map as `[]` or `{}`** (protowire-go#219). The reader counts both as supplied. This port returned `unsupported kind`, and inside a block cell it left the field out, so the reader refused the row.
+- **A PXF `BigFloat` literal whose exponent less its `prec` is below `INT32_MIN` is refused** (#125, protowire-go#231), with Go's `big float literal <s> is below the wire's exponent range`. The wire carries that number as an `int32`, and it used to wrap, so `0.125p2147483647` was stored as a different value. Both exponent checks now run before the value is widened to `prec` bits, so such a literal is refused at once instead of after building a 256 MiB mantissa. Only a `max_numeric_literal_digits` raised past 646 million admits a `prec` that wide.
 
 ### Changed
 
