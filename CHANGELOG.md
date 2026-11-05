@@ -11,6 +11,10 @@ number says nothing about any other port. See the Releases section of
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-11-05
+
+A major release, because `pb::Marshal` now returns `StatusOr<std::vector<uint8_t>>` and every caller must change (#93). `pb::Marshal` and `pxf::Marshal` refuse what a decoder at the default limits refuses, instead of writing it. A PXF `BigFloat` literal is refused in protowire-go's words and order of checks, and a big-number message no longer counts as a nesting level. Several changes narrow what decodes, encodes or binds; each says so. This release also carries the change prepared as 1.2.1, which was never tagged.
+
 ### Added
 
 - **`check_decode --format pxf-pb` and `pb-text`** (#110), the harness modes the spec's write gate (protowire#509) and text gate (protowire#503) read. `pxf-pb` writes a PXF document's PB bytes, and `pb-text` writes the PXF for a PB message. The `pxf` mode now honours `--limit MaxBigFloatExponent`.
@@ -22,6 +26,28 @@ number says nothing about any other port. See the Releases section of
 - **`pb::UnmarshalOptions::max_big_float_exponent`** (#93). `pb::Unmarshal` now refuses a `pxf.BigFloat` whose binary exponent is past `kMaxBigFloatExponent`, on both signs, before it stores the value (protowire#281). **This rejects messages that were accepted before.** `check_decode` passes `--limit MaxBigFloatExponent=N` to the pb decoder as well.
 - **`pb::UnmarshalOptions::validator` and `report`** (#83), the seam `pxf` and `sbe` already have, on the decoded struct and on each frame of a `Decoder`. A validator overrides the new `check::Validator::ValidateStruct`, or derives from `check::StructValidator<T>`. An existing validator compiles unchanged, and returns an engine error for a struct. The seam is now in `protowire/check_seam.h`, which needs no protobuf; `protowire/check.h` includes it.
 - **`IsEOF`, `IsUnexpectedEOF`, and `pb::IsFramingCorrupt` and `sbe::IsFramingCorrupt`,** which test a `Decode` result. `Decode` reports the end of a stream as a non-OK `Status`, as Go reports `io.EOF`.
+- **`ParseTolerant`,** for editor tooling on a broken buffer. It returns a best-effort `Document` and every syntax error in source order, with a `BadVal` where a value is missing.
+- **`EntrySpan` and `ValueSpan`.** Every AST node has an `end` position.
+- **`TypeEntry` and `BadVal` in the AST.** An Any block's `@type = "..."` is now a `TypeEntry`, not an `Assignment` keyed `@type`. **A caller visiting `EntryPtr` or `ValuePtr` with no generic case must handle both.**
+- **`KeyedDiagnostics`,** the keyed-field errors as positioned diagnostics over a parsed document.
+- **The validator seam,** `protowire/check.h`: `check::Validator`, `check::Report`, `UnmarshalOptions::validator`, `Result::Report`, and `CodecOptions::validator` for SBE. A `Status` has only text, so `UnmarshalOptions::report` receives the report on failure.
+- **`UnmarshalDescriptor` and `UnmarshalFullDescriptor`,** which allocate the message. They return a `shared_ptr` that keeps its factory alive.
+- **`ApplyDefault`, `AppendValue` and `Result::PresentFields`.**
+- **`pxf::Rewriter`, format-preserving edits to a PXF document** (#81). A port of protowire-go's `Rewriter`: `Set`, `Remove`, `ReplaceValue`, `SetSpan`, `AppendEntry`, `Bytes` and the keyed editors `KeyedByField`, `SetKeyed`, `RemoveKeyed`, `InsertKeyedElement`, `RemoveKeyedElement`, `RenameKeyedElement` and `MoveKeyedElement`. Everything outside an edited span round-trips byte for byte. `scripts/go_differential.sh` runs the same edits through both ports and compares every error and every output byte.
+- **`UnmarshalOptions::on_secret_field`,** a hook that receives each `pxf.Secret` value in place of the message. As in protowire-go's `OnSecretField`.
+- **`UnmarshalOptions::skip_post_decode`,** for a caller that runs its own required and default pass.
+- **`AppendDatasetHeader` and `AppendDatasetRow` write `@dataset` tables** (#78). A cell holds what `Marshal` writes for the field, on one line, and an empty cell reads back as the unset field or the row is refused. On error `dst` is unchanged. Text and errors match protowire-go, and a column error now quotes the name as `strconv.Quote` does.
+- **`MarshalOptions::null_fields`,** a `Result` whose nulls `Marshal` writes, for a message with no `_null` mask. As in protowire-go.
+- **`scripts/go_differential.sh` runs protowire-go and this port over the spec's fixtures and `testdata/differential`,** and fails on any difference in verdict, error text, presence, bytes or output.
+- **`pxf.Secret` sugar.** `pw = "x"` binds to `value`, in a singular field, a list element, a map value and a `@dataset` cell. `Marshal` writes that form when `hint` and `fingerprint` are empty, and the block form otherwise. **Output text changes for such a Secret.** `IsSecret` is new in `wellknown.h`.
+- **`proto/pxf/secret.proto`,** the canonical `pxf.Secret` schema, which this port's copy of `proto/` lacked. The `testdata/dataset` fixtures import it.
+- **`testdata/{any,bigfloat,blocks,duplicates,nulls,strings,dataset}`** and `test/pxf_corpus_test.cc`, which runs them through both decoders, `Parse`, `BindRow` and `DatasetReader`. `testdata/blocks` needed no code change: a `,` or `;` between the entries of a block was already rejected (protowire#312).
+- **`@dataset` value cells** (protowire#341, v1.13). A cell holds any value, and `c = <value>` in a body means the same, so a list or block cell is accepted. `{}` is a present empty message.
+- **`@dataset` dotted column paths** (protowire#342, v1.13), such as `(id, desc.energy)`. Cells sharing a prefix bind in one block, and a prefix with no non-empty cell leaves its sub-message absent. A header naming a path twice, a field beside a path inside it, or an empty segment is rejected when parsed, so `(a, a)` is too. A path through a repeated, map or scalar field, or into a type written as a literal, fails when a row binds.
+- **`BindRow(msg, columns, row, opts)` and `DatasetReader::Create(src, opts)`,** for limits, `skip_validate` and the `type_resolver` a cell holding an Any block needs.
+- **`FormatValue`,** which renders one AST value.
+- **`kMaxBigFloatExponent` and `UnmarshalOptions::max_big_float_exponent`,** and `SetBigFloatFromLiteral`, which takes the limits. `check_decode` accepts `--limit MaxBigFloatExponent=N`.
+- **`Token::prec`, `IntVal::prec` and `FloatVal::prec`** hold a number's precision suffix, and `FormatDocument` keeps it.
 
 ### Changed
 
@@ -36,11 +62,16 @@ number says nothing about any other port. See the Releases section of
 - **`sbe` tells two schemas' template ids apart** (#134, protowire-go#253 and #257; draft -01 § SBE Annotations, "sbe.template_id MUST be unique among messages within a schema", and § Header and Block Length). This narrows what binds and what decodes. `Codec::New` refuses two different messages with one `(sbe.template_id)` in one schema, with `sbe: messages A and B share (sbe.template_id) = 7 in schema 1; it must be unique within a schema`; the second used to replace the first, and `NewView` then read one message's bytes as the other's. A file passed twice still binds, and so do two schemas that each use a template id. `NewView` now finds a template by the header's schema id and template id together, and refuses an unknown pair with `sbe: unknown template ID 9 in schema 2`, even if another schema has that template id; it used to say `unknown template id 9`. `Unmarshal` and `UnmarshalDescriptor` refuse a header whose schema id is not the target message's, with `sbe: schema ID mismatch: got 1, want 2 for template 7`; the version is not checked. A caller that builds headers by hand must now set the schema id.
 - **`pxf::Marshal` refuses a message nested past `kMaxNestingDepth`** (#107, protowire#502), as protowire-go does (protowire-go#236), with `pxf: nesting depth exceeds MaxNestingDepth=100`. Depth is counted as a decoder counts it: the root is depth 0, and each `{` or `[` is one level, so a list of lists stops at 50. It used to write a document that a reader at the same limit refused. **This narrows what encodes.** `AppendDatasetRow` refuses too. An Any whose body would be too deep stays as `type_url` and `value`, so an Any's contents never cause a refusal; only an Any that itself sits past the limit does. An Any's value is also no longer cut off at libprotobuf's 100-level parse limit when the writer's limit is raised. `pb::Marshal` refuses too; see its entry above.
 - **A schema that redefines a well-known type with the wrong shape is refused at bind time** (draft -01 §wkt-shapes, protowire#487, protowire-go#218). This narrows what binds. A message named, say, `pxf.Secret` or `google.protobuf.Timestamp` without the fields the codec reads now gives a violation of the new kind `ViolationKind::kWellKnownShape`. Copies of the canonical schemas are unaffected, and field numbers are not checked. The check also reaches a schema's own file at a `google/protobuf/` path, which the closure walk used to skip.
+- **`ReadBigFloatAsString` returns `StatusOr<std::string>`,** so it can refuse a value.
+- **`Violation::name` holds the `(pxf.default)` literal for `(pxf.required)` with `(pxf.default)` on one field** (protowire-go#211). It was empty.
+
+### Removed
+
+- **`src/pxf/decode.cc`,** an AST decoder with no caller. `DecodeDocumentInto` was declared in no header, and it had none of the spec rules added to `decode_fast.cc`.
 
 ### Fixed
 
 - **A PXF `BigFloat` literal with a precision suffix of hundreds of millions of bits no longer takes minutes** (#151, decided by the owner: option 3, protowire-go#274). This is possible only with `max_numeric_literal_digits` raised past the suffix's digits; `p2147483647` implies about 646 million. The port follows `big.Float.Parse` only to place a literal against the range checks, and `Parse`'s cost grows with the square of its precision. It is now followed at no more than 16384 bits, as protowire-go does, so `1e-300p2147483647` is refused in milliseconds with the same error. At the default limits a suffix is at most `p13603`, so nothing is read differently. All 9,393 rows of `go_sweep.tsv`, nine of them above 16384 bits, are unchanged, and protowire-go with #274 writes the same table.
-
 - **`pxf::FormatDocument` keeps every directive** (#130, protowire#558), as protowire-go does (protowire-go#262). It wrote only `@type`, comments and entries. So a `@dataset` document formatted to nothing and lost every row, and `@entry`, `@proto` and named directives were dropped from any document. It now writes them in document order, each after its comments. `@type` comes first, since it binds no anonymous `@proto`. A dataset is written as its header, then one row per line, with an absent cell left empty and `null` written. A named directive's body and a `@proto` body are written as they were read. A document whose only directive is `@type` formats as before.
 - **`pxf::Marshal` refuses a `BigFloat` whose value rounded to its `prec` is past `kMaxBigFloatExponent`** (#128, protowire#560), as protowire-go does (protowire-go#261), with `pxf.BigFloat binary exponent 16385 after rounding to prec 3 exceeds MaxBigFloatExponent=16384`. Rounding can carry: a 54-bit all-ones mantissa at exponent 16330 is at the bound as stored and past it at prec 3. It used to be written as `1.2e+4932p3`, which no reader accepts. **This narrows what encodes.** A `@default` carrier's `big_float_value` is refused the same way. Its three limit refusals now use protowire-go's words. Both paths also refuse a zero whose `prec` renders past `MaxNumericLiteralDigits`, as Go does; it used to be written as `0p<prec>`.
 - **`check_decode` prints a PXF rejection with its position** (#145), `reject: 3:3: unknown field ...`, as protowire-go's does, for `--format pxf` and `pxf-pb`.
@@ -105,45 +136,6 @@ number says nothing about any other port. See the Releases section of
 - **`ViolationKindName` and `Violation::ToString` use protowire-go's text:** `keyed field option`, `default field option`, `required field option`, and `invalid (pxf.key) = "..."`.
 - **`AppendDatasetRow` writes an empty `(pxf.required)` repeated field or map as `[]` or `{}`** (protowire-go#219). The reader counts both as supplied. This port returned `unsupported kind`, and inside a block cell it left the field out, so the reader refused the row.
 - **A PXF `BigFloat` literal whose exponent less its `prec` is below `INT32_MIN` is refused** (#125, protowire-go#231), with Go's `big float literal <s> is below the wire's exponent range`. The wire carries that number as an `int32`, and it used to wrap, so `0.125p2147483647` was stored as a different value. Both exponent checks now run before the value is widened to `prec` bits, so such a literal is refused at once instead of after building a 256 MiB mantissa. Only a `max_numeric_literal_digits` raised past 646 million admits a `prec` that wide.
-
-### Changed
-
-- **`ReadBigFloatAsString` returns `StatusOr<std::string>`,** so it can refuse a value.
-
-### Removed
-
-- **`src/pxf/decode.cc`,** an AST decoder with no caller. `DecodeDocumentInto` was declared in no header, and it had none of the spec rules added to `decode_fast.cc`.
-
-### Added
-
-- **`ParseTolerant`,** for editor tooling on a broken buffer. It returns a best-effort `Document` and every syntax error in source order, with a `BadVal` where a value is missing.
-- **`EntrySpan` and `ValueSpan`.** Every AST node has an `end` position.
-- **`TypeEntry` and `BadVal` in the AST.** An Any block's `@type = "..."` is now a `TypeEntry`, not an `Assignment` keyed `@type`. **A caller visiting `EntryPtr` or `ValuePtr` with no generic case must handle both.**
-- **`KeyedDiagnostics`,** the keyed-field errors as positioned diagnostics over a parsed document.
-- **The validator seam,** `protowire/check.h`: `check::Validator`, `check::Report`, `UnmarshalOptions::validator`, `Result::Report`, and `CodecOptions::validator` for SBE. A `Status` has only text, so `UnmarshalOptions::report` receives the report on failure.
-- **`UnmarshalDescriptor` and `UnmarshalFullDescriptor`,** which allocate the message. They return a `shared_ptr` that keeps its factory alive.
-- **`ApplyDefault`, `AppendValue` and `Result::PresentFields`.**
-- **`pxf::Rewriter`, format-preserving edits to a PXF document** (#81). A port of protowire-go's `Rewriter`: `Set`, `Remove`, `ReplaceValue`, `SetSpan`, `AppendEntry`, `Bytes` and the keyed editors `KeyedByField`, `SetKeyed`, `RemoveKeyed`, `InsertKeyedElement`, `RemoveKeyedElement`, `RenameKeyedElement` and `MoveKeyedElement`. Everything outside an edited span round-trips byte for byte. `scripts/go_differential.sh` runs the same edits through both ports and compares every error and every output byte.
-- **`UnmarshalOptions::on_secret_field`,** a hook that receives each `pxf.Secret` value in place of the message. As in protowire-go's `OnSecretField`.
-- **`UnmarshalOptions::skip_post_decode`,** for a caller that runs its own required and default pass.
-- **`AppendDatasetHeader` and `AppendDatasetRow` write `@dataset` tables** (#78). A cell holds what `Marshal` writes for the field, on one line, and an empty cell reads back as the unset field or the row is refused. On error `dst` is unchanged. Text and errors match protowire-go, and a column error now quotes the name as `strconv.Quote` does.
-- **`MarshalOptions::null_fields`,** a `Result` whose nulls `Marshal` writes, for a message with no `_null` mask. As in protowire-go.
-- **`scripts/go_differential.sh` runs protowire-go and this port over the spec's fixtures and `testdata/differential`,** and fails on any difference in verdict, error text, presence, bytes or output.
-- **`pxf.Secret` sugar.** `pw = "x"` binds to `value`, in a singular field, a list element, a map value and a `@dataset` cell. `Marshal` writes that form when `hint` and `fingerprint` are empty, and the block form otherwise. **Output text changes for such a Secret.** `IsSecret` is new in `wellknown.h`.
-- **`proto/pxf/secret.proto`,** the canonical `pxf.Secret` schema, which this port's copy of `proto/` lacked. The `testdata/dataset` fixtures import it.
-- **`testdata/{any,bigfloat,blocks,duplicates,nulls,strings,dataset}`** and `test/pxf_corpus_test.cc`, which runs them through both decoders, `Parse`, `BindRow` and `DatasetReader`. `testdata/blocks` needed no code change: a `,` or `;` between the entries of a block was already rejected (protowire#312).
-- **`@dataset` value cells** (protowire#341, v1.13). A cell holds any value, and `c = <value>` in a body means the same, so a list or block cell is accepted. `{}` is a present empty message.
-- **`@dataset` dotted column paths** (protowire#342, v1.13), such as `(id, desc.energy)`. Cells sharing a prefix bind in one block, and a prefix with no non-empty cell leaves its sub-message absent. A header naming a path twice, a field beside a path inside it, or an empty segment is rejected when parsed, so `(a, a)` is too. A path through a repeated, map or scalar field, or into a type written as a literal, fails when a row binds.
-- **`BindRow(msg, columns, row, opts)` and `DatasetReader::Create(src, opts)`,** for limits, `skip_validate` and the `type_resolver` a cell holding an Any block needs.
-- **`FormatValue`,** which renders one AST value.
-- **`kMaxBigFloatExponent` and `UnmarshalOptions::max_big_float_exponent`,** and `SetBigFloatFromLiteral`, which takes the limits. `check_decode` accepts `--limit MaxBigFloatExponent=N`.
-- **`Token::prec`, `IntVal::prec` and `FloatVal::prec`** hold a number's precision suffix, and `FormatDocument` keeps it.
-
-## [1.2.1] — 2026-11-01
-
-### Changed
-
-- **`Violation::name` holds the `(pxf.default)` literal for `(pxf.required)` with `(pxf.default)` on one field** (protowire-go#211). It was empty.
 
 ## [1.2.0] — 2026-10-31
 
