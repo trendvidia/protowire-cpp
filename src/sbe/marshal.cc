@@ -5,7 +5,10 @@
 #include "protowire/sbe.h"
 
 #include <cstring>
+#include <string>
 #include <vector>
+
+#include "header_bounds.h"
 
 namespace protowire::sbe {
 
@@ -156,6 +159,13 @@ StatusOr<std::vector<uint8_t>> Codec::Marshal(const pb::Message& msg) const {
   for (const GroupTemplate& gt : tmpl->groups) {
     const pb::Reflection* r = msg.GetReflection();
     int n = r->FieldSize(msg, gt.fd);
+    // numInGroup is a uint16: a larger count would be written as its low 16
+    // bits, and a reader would take the entries past them for trailing bytes.
+    if (n > kMaxUint16) {
+      return Status::Error("sbe: field " + std::string(gt.fd->full_name()) + " has " +
+                           std::to_string(n) + " entries, past " + std::to_string(kMaxUint16) +
+                           ", the largest numInGroup SBE can state");
+    }
     size_t header_off = buf.size();
     buf.resize(header_off + 4, 0);
     WriteU16(buf.data() + header_off + 0, gt.block_length);

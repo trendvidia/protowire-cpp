@@ -5,6 +5,7 @@
 #include <string>
 #include <utility>
 
+#include "header_bounds.h"
 #include "protowire/sbe/annotations.h"
 
 namespace protowire::sbe {
@@ -31,6 +32,16 @@ StatusOr<Codec> Codec::New(std::vector<const pb::FileDescriptor*> files, CodecOp
                            " missing (sbe.schema_id) option");
     }
     auto version = GetFileUint32Option(fd, kExtVersion).value_or(0);
+    if (*schema > static_cast<uint32_t>(kMaxUint16)) {
+      return Status::Error("sbe: file " + std::string(fd->name()) +
+                           ": (sbe.schema_id) = " + std::to_string(*schema) + " is past " +
+                           std::to_string(kMaxUint16) + ", the largest schemaId SBE can state");
+    }
+    if (version > static_cast<uint32_t>(kMaxUint16)) {
+      return Status::Error("sbe: file " + std::string(fd->name()) +
+                           ": (sbe.version) = " + std::to_string(version) + " is past " +
+                           std::to_string(kMaxUint16) + ", the largest version SBE can state");
+    }
     for (int i = 0; i < fd->message_type_count(); ++i) {
       Status st = c.RegisterMessage(
           fd->message_type(i), static_cast<uint16_t>(*schema), static_cast<uint16_t>(version));
