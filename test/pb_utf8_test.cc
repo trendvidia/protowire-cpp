@@ -16,7 +16,11 @@
 #include "protowire/detail/wire.h"
 #include "protowire/pb.h"
 
+#include "pb_marshal.h"
+
 namespace {
+
+using protowire::testing::MustMarshal;
 
 namespace pb = protowire::pb;
 namespace wire = protowire::wire;
@@ -125,7 +129,7 @@ TEST(PbUtf8, StringFieldAcceptsValid) {
   want.Labels = {{"ключ", "значение"}};
   want.Data = {0xff, 0xfe, 0x80, 0xc0};
   Msg got;
-  ASSERT_TRUE(pb::Unmarshal(pb::Marshal(want), got).ok());
+  ASSERT_TRUE(pb::Unmarshal(MustMarshal(want), got).ok());
   EXPECT_EQ(got.Name, want.Name);
   ASSERT_NE(got.Ptr, nullptr);
   EXPECT_EQ(*got.Ptr, *want.Ptr);

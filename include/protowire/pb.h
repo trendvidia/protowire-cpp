@@ -16,8 +16,9 @@
 //       PROTOWIRE_FIELD(3, port))
 //   };
 //
-//   std::vector<uint8_t> data = protowire::pb::Marshal(endpoint);
-//   protowire::pb::Unmarshal(data, endpoint);
+//   protowire::StatusOr<std::vector<uint8_t>> data = protowire::pb::Marshal(endpoint);
+//   if (!data.ok()) { /* data.status().message() says why */ }
+//   protowire::pb::Unmarshal(*data, endpoint);
 //
 // The output is standard protobuf binary, wire-compatible with any .proto
 // definition using the same field numbers. Proto3 semantics: zero-value
@@ -87,6 +88,17 @@ struct UnmarshalOptions {
   check::Validator* validator = nullptr;
   // Receives the validator's report, since a Status has only text. May be null.
   check::Report* report = nullptr;
+};
+
+// MarshalOptions configures Marshal and an Encoder. The zero value is
+// Marshal's default.
+struct MarshalOptions {
+  // The deepest value Marshal writes, counted as Unmarshal counts it: the root
+  // is depth 0, and every submessage, big-number message or map entry is one
+  // descent. 0 selects kMaxNestingDepth. Raise it only with
+  // UnmarshalOptions::max_nesting_depth on every reader (HARDENING.md §
+  // Recursion, protowire#502).
+  int max_nesting_depth = 0;
 };
 
 // ---- Field descriptor ---------------------------------------------------
@@ -175,8 +187,12 @@ struct IsBigNumber<BigFloat> : std::true_type {};
 
 // ---- Forward declarations ----------------------------------------------
 
+// Marshal refuses what a decoder at the default limits would refuse, rather
+// than write it: a value nested past max_nesting_depth, a Decimal scale past
+// MaxNumericLiteralDigits, and a BigFloat whose prec or binary exponent is past
+// its bound. protowire-go's Marshal refuses the same values.
 template <class T>
-std::vector<uint8_t> Marshal(const T& v);
+StatusOr<std::vector<uint8_t>> Marshal(const T& v, MarshalOptions opts = {});
 
 template <class T>
 Status Unmarshal(std::span<const uint8_t> data, T& v, UnmarshalOptions opts = {});
@@ -204,18 +220,21 @@ inline Limits ResolveLimits(const UnmarshalOptions& o) {
   return lim;
 }
 
-inline Status DepthError(const Limits& lim) {
-  return Status::Error("nesting depth exceeds MaxNestingDepth=" + std::to_string(lim.max_depth));
+inline Status DepthError(int max_depth) {
+  return Status::Error("nesting depth exceeds MaxNestingDepth=" + std::to_string(max_depth));
 }
 
+inline Status DepthError(const Limits& lim) {
+  return DepthError(lim.max_depth);
+}
+
+// MarshalStruct writes v at the given depth, counted as UnmarshalStruct
+// counts it, so nothing it writes is refused for depth when read back.
 template <class T>
-void MarshalStruct(const T& v, std::vector<uint8_t>& out);
+Status MarshalStruct(const T& v, std::vector<uint8_t>& out, int depth, int max_depth);
 
 template <class T>
 Status UnmarshalStruct(std::span<const uint8_t> data, T& v, int depth, const Limits& lim);
-
-template <class T>
-void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v);
 
 template <class T>
 Status UnmarshalField(std::span<const uint8_t> data,
@@ -230,8 +249,10 @@ Status UnmarshalField(std::span<const uint8_t> data,
 // ---- Big-number helpers (defined in big.cc) ------------------------------
 
 void MarshalBigIntMsg(const BigInt& v, std::vector<uint8_t>& out);
-void MarshalDecimalMsg(const Decimal& v, std::vector<uint8_t>& out);
-void MarshalBigFloatMsg(const BigFloat& v, std::vector<uint8_t>& out);
+// Refuses a scale past MaxNumericLiteralDigits once reduced.
+Status MarshalDecimalMsg(const Decimal& v, std::vector<uint8_t>& out);
+// Refuses a prec or a binary exponent past its bound, as the decoder does.
+Status MarshalBigFloatMsg(const BigFloat& v, std::vector<uint8_t>& out);
 Status UnmarshalBigIntMsg(std::span<const uint8_t> data, BigInt& out);
 // max_digits bounds |Decimal.scale| (HARDENING.md MaxNumericLiteralDigits);
 // 0 selects the default.
@@ -315,10 +336,8 @@ inline void AppendPackedElement(std::vector<uint8_t>& payload, T v, bool zigzag)
 }
 
 template <class T>
-inline void MarshalScalar(std::vector<uint8_t>& out,
-                          uint32_t num,
-                          const T& v,
-                          bool zigzag = false) {
+inline Status MarshalScalar(
+    std::vector<uint8_t>& out, uint32_t num, const T& v, bool zigzag, int depth, int max_depth) {
   if constexpr (std::is_same_v<T, bool>) {
     wire::AppendTag(out, num, wire::kVarint);
     wire::AppendVarint(out, v ? 1 : 0);
@@ -345,62 +364,57 @@ inline void MarshalScalar(std::vector<uint8_t>& out,
   } else if constexpr (std::is_same_v<T, std::vector<uint8_t>>) {
     wire::AppendTag(out, num, wire::kBytes);
     wire::AppendBytes(out, v);
-  } else if constexpr (std::is_same_v<T, BigInt>) {
+  } else if constexpr (IsBigNumber<T>::value) {
+    // A big-number message is a descent, as UnmarshalScalar counts it.
+    if (depth + 1 > max_depth) return DepthError(max_depth);
     std::vector<uint8_t> sub;
-    MarshalBigIntMsg(v, sub);
-    wire::AppendTag(out, num, wire::kBytes);
-    wire::AppendBytes(out, sub);
-  } else if constexpr (std::is_same_v<T, Decimal>) {
-    std::vector<uint8_t> sub;
-    MarshalDecimalMsg(v, sub);
-    wire::AppendTag(out, num, wire::kBytes);
-    wire::AppendBytes(out, sub);
-  } else if constexpr (std::is_same_v<T, BigFloat>) {
-    std::vector<uint8_t> sub;
-    MarshalBigFloatMsg(v, sub);
+    if constexpr (std::is_same_v<T, BigInt>) {
+      MarshalBigIntMsg(v, sub);
+    } else if constexpr (std::is_same_v<T, Decimal>) {
+      if (Status st = MarshalDecimalMsg(v, sub); !st.ok()) return st;
+    } else {
+      if (Status st = MarshalBigFloatMsg(v, sub); !st.ok()) return st;
+    }
     wire::AppendTag(out, num, wire::kBytes);
     wire::AppendBytes(out, sub);
   } else if constexpr (HasFields<T>::value) {
     std::vector<uint8_t> sub;
-    MarshalStruct(v, sub);
+    if (Status st = MarshalStruct(v, sub, depth + 1, max_depth); !st.ok()) return st;
     wire::AppendTag(out, num, wire::kBytes);
     wire::AppendBytes(out, sub);
   } else {
     static_assert(sizeof(T) == 0, "protowire::pb: unsupported field type");
   }
+  return Status::OK();
 }
 
 // MarshalMapValue writes field 2 of a map entry unconditionally. A value
 // held through std::optional or a smart pointer that is unset is written
 // as its zero value, so every entry carries both fields on the wire.
 template <class T>
-inline void MarshalMapValue(std::vector<uint8_t>& out,
-                            uint32_t num,
-                            const T& v,
-                            bool zigzag = false) {
+inline Status MarshalMapValue(
+    std::vector<uint8_t>& out, uint32_t num, const T& v, bool zigzag, int depth, int max_depth) {
   if constexpr (IsOptional<T>::value) {
     using E = typename IsOptional<T>::element;
-    MarshalScalar(out, num, v.has_value() ? *v : E{}, zigzag);
+    return MarshalScalar(out, num, v.has_value() ? *v : E{}, zigzag, depth, max_depth);
   } else if constexpr (IsSmartPtr<T>::value) {
     using E = typename IsSmartPtr<T>::element;
-    if (v) {
-      MarshalScalar(out, num, *v, zigzag);
-    } else {
-      MarshalScalar(out, num, E{}, zigzag);
-    }
+    if (v) return MarshalScalar(out, num, *v, zigzag, depth, max_depth);
+    return MarshalScalar(out, num, E{}, zigzag, depth, max_depth);
   } else {
-    MarshalScalar(out, num, v, zigzag);
+    return MarshalScalar(out, num, v, zigzag, depth, max_depth);
   }
 }
 
 template <class T>
-inline void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v, bool zigzag = false) {
+inline Status MarshalField(
+    std::vector<uint8_t>& out, uint32_t num, const T& v, bool zigzag, int depth, int max_depth) {
   if constexpr (IsOptional<T>::value) {
-    if (v.has_value()) MarshalScalar(out, num, *v, zigzag);
-    return;
+    if (v.has_value()) return MarshalScalar(out, num, *v, zigzag, depth, max_depth);
+    return Status::OK();
   } else if constexpr (IsSmartPtr<T>::value) {
-    if (v) MarshalScalar(out, num, *v, zigzag);
-    return;
+    if (v) return MarshalScalar(out, num, *v, zigzag, depth, max_depth);
+    return Status::OK();
   } else if constexpr (IsMap<T>::value) {
     // proto3 maps: each entry is a length-prefixed MapEntry message with
     // key at field 1 and value at field 2. Both are written whether or
@@ -408,18 +422,24 @@ inline void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v, bo
     // protobuf write, fixed across the family by protowire#295 (#24): a
     // zero key or value is a present field of the entry, not an absent
     // one, so proto3 zero-skip does not apply inside it.
-    if (v.empty()) return;
+    if (v.empty()) return Status::OK();
+    // A map entry is a descent whatever its value's type (protowire#449).
+    if (depth + 1 > max_depth) return DepthError(max_depth);
     for (const auto& [k, val] : v) {
       std::vector<uint8_t> entry;
-      MarshalScalar(entry, 1, k, zigzag);
-      MarshalMapValue(entry, 2, val, zigzag);
+      if (Status st = MarshalScalar(entry, 1, k, zigzag, depth + 1, max_depth); !st.ok()) {
+        return Status::Error("map key: " + st.message());
+      }
+      if (Status st = MarshalMapValue(entry, 2, val, zigzag, depth + 1, max_depth); !st.ok()) {
+        return Status::Error("map value: " + st.message());
+      }
       wire::AppendTag(out, num, wire::kBytes);
       wire::AppendBytes(out, entry);
     }
-    return;
+    return Status::OK();
   } else if constexpr (IsVector<T>::value && !std::is_same_v<T, std::vector<uint8_t>>) {
     using E = typename IsVector<T>::element;
-    if (v.empty()) return;
+    if (v.empty()) return Status::OK();
     if constexpr (IsPackable<E>) {
       // Repeated numeric scalars: packed, the proto3 default and what
       // every other encoder in the family writes — one LEN record
@@ -431,18 +451,30 @@ inline void MarshalField(std::vector<uint8_t>& out, uint32_t num, const T& v, bo
       wire::AppendTag(out, num, wire::kBytes);
       wire::AppendBytes(out, payload);
     } else {
-      for (const auto& el : v) MarshalScalar(out, num, el, zigzag);
+      for (const auto& el : v) {
+        if (Status st = MarshalScalar(out, num, el, zigzag, depth, max_depth); !st.ok()) return st;
+      }
     }
+    return Status::OK();
   } else {
-    if (IsZeroValue(v)) return;
-    MarshalScalar(out, num, v, zigzag);
+    if (IsZeroValue(v)) return Status::OK();
+    return MarshalScalar(out, num, v, zigzag, depth, max_depth);
   }
 }
 
 template <class T>
-inline void MarshalStruct(const T& v, std::vector<uint8_t>& out) {
-  std::apply([&](auto&&... f) { ((MarshalField(out, f.number, v.*(f.ptr), f.zigzag)), ...); },
-             T::_protowire_fields());
+inline Status MarshalStruct(const T& v, std::vector<uint8_t>& out, int depth, int max_depth) {
+  if (depth > max_depth) return DepthError(max_depth);
+  Status st;
+  // Stops at the first field that fails, naming it as Unmarshal does.
+  const auto one = [&](const auto& f) {
+    Status fst = MarshalField(out, f.number, v.*(f.ptr), f.zigzag, depth, max_depth);
+    if (fst.ok()) return true;
+    st = Status::Error(std::string("field ") + f.name + ": " + fst.message());
+    return false;
+  };
+  std::apply([&](const auto&... f) { (one(f) && ...); }, T::_protowire_fields());
+  return st;
 }
 
 // ---- Unmarshal dispatch -------------------------------------------------
@@ -686,10 +718,11 @@ inline Status UnmarshalStruct(std::span<const uint8_t> data, T& v, int depth, co
 // ---- Public API ---------------------------------------------------------
 
 template <class T>
-std::vector<uint8_t> Marshal(const T& v) {
+StatusOr<std::vector<uint8_t>> Marshal(const T& v, MarshalOptions opts) {
   static_assert(HasFields<T>::value, "Marshal: type must declare PROTOWIRE_FIELDS(...)");
+  const int max_depth = opts.max_nesting_depth > 0 ? opts.max_nesting_depth : kMaxNestingDepth;
   std::vector<uint8_t> out;
-  detail::MarshalStruct(v, out);
+  if (Status st = detail::MarshalStruct(v, out, /*depth=*/0, max_depth); !st.ok()) return st;
   return out;
 }
 
@@ -727,21 +760,24 @@ inline constexpr const char* kErrFramingCorrupt = "pb: stream framing corrupt";
 bool IsFramingCorrupt(const Status& st);
 
 // Encoder writes length-prefixed pb-encoded messages using the
-// protobuf-delimited framing convention (varint length + body). w must outlive
-// the encoder.
+// protobuf-delimited framing convention (varint length + body), each under
+// opts. w must outlive the encoder. A message Marshal refuses writes nothing.
 class Encoder {
  public:
-  explicit Encoder(std::ostream* w) : w_(w) {}
+  explicit Encoder(std::ostream* w, MarshalOptions opts = {}) : w_(w), opts_(opts) {}
 
   template <class T>
   Status Encode(const T& v) {
-    return WriteFrame(Marshal(v));
+    StatusOr<std::vector<uint8_t>> body = Marshal(v, opts_);
+    if (!body.ok()) return body.status();
+    return WriteFrame(*body);
   }
 
  private:
   Status WriteFrame(std::span<const uint8_t> body);
 
   std::ostream* w_;
+  MarshalOptions opts_;
 };
 
 // Decoder reads length-prefixed pb-encoded messages, each under opts. r must

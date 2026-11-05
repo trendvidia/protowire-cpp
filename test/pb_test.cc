@@ -17,13 +17,17 @@
 #include "protowire/limits.h"
 #include "protowire/pb_big.h"
 
+#include "pb_marshal.h"
+
 namespace {
 
+using protowire::Status;
 using protowire::pb::BigFloat;
 using protowire::pb::BigInt;
 using protowire::pb::Decimal;
 using protowire::pb::Marshal;
 using protowire::pb::Unmarshal;
+using protowire::testing::MustMarshal;
 
 struct Inner {
   std::string name;
@@ -67,7 +71,7 @@ TEST(Pb, RoundTrip) {
   orig.small_f = 2.5f;
   orig.untagged = "should be ignored";
 
-  auto bytes = Marshal(orig);
+  auto bytes = MustMarshal(orig);
 
   Outer got;
   ASSERT_TRUE(Unmarshal(bytes, got).ok());
@@ -80,7 +84,7 @@ TEST(Pb, RoundTrip) {
 
 TEST(Pb, ZeroValuesProduceEmptyWire) {
   Outer orig;
-  auto bytes = Marshal(orig);
+  auto bytes = MustMarshal(orig);
   EXPECT_TRUE(bytes.empty());
 
   Outer got;
@@ -94,7 +98,7 @@ TEST(Pb, UnknownFieldsSkipped) {
     PROTOWIRE_FIELDS(Big, PROTOWIRE_FIELD(1, a), PROTOWIRE_FIELD(2, b), PROTOWIRE_FIELD(3, c))
   };
   Big big{"aa", "bb", "cc"};
-  auto data = Marshal(big);
+  auto data = MustMarshal(big);
 
   struct Small {
     std::string a;
@@ -133,7 +137,7 @@ TEST(Pb, BigNumRoundTrip) {
   orig.coefficient.prec = 128;
   orig.coefficient.negative = false;
 
-  auto bytes = Marshal(orig);
+  auto bytes = MustMarshal(orig);
 
   BigNumStruct got;
   ASSERT_TRUE(Unmarshal(bytes, got).ok());
@@ -150,7 +154,7 @@ TEST(Pb, BigNumRoundTrip) {
 
 TEST(Pb, BigNumZeroProducesEmpty) {
   BigNumStruct orig;
-  auto bytes = Marshal(orig);
+  auto bytes = MustMarshal(orig);
   EXPECT_TRUE(bytes.empty());
 }
 
@@ -159,7 +163,7 @@ TEST(Pb, BigNumNegative) {
   orig.balance.abs = {0xE8, 0xD4, 0xA5, 0x10, 0x00};  // arbitrary
   orig.balance.negative = true;
 
-  auto bytes = Marshal(orig);
+  auto bytes = MustMarshal(orig);
   BigNumStruct got;
   ASSERT_TRUE(Unmarshal(bytes, got).ok());
   EXPECT_TRUE(got.balance.negative);
@@ -211,7 +215,7 @@ struct WithZigZag {
 
 TEST(Pb, ZigZagMacro) {
   WithZigZag orig{-1, -1};
-  auto bytes = Marshal(orig);
+  auto bytes = MustMarshal(orig);
   // Field 1 (a=-1, plain varint): tag 0x08 + 10 bytes (sign-extended).
   // Field 2 (b=-1, zigzag): tag 0x10 + 1 byte (zigzag(-1) = 1 = 0x01).
   // Total: 1 + 10 + 1 + 1 = 13 bytes.
@@ -243,7 +247,7 @@ TEST(Pb, MapEntryAlwaysCarriesKeyAndValue) {
   m.counts[""] = 0;
   m.names[0] = "";
   m.opt["k"] = std::nullopt;
-  auto bytes = Marshal(m);
+  auto bytes = MustMarshal(m);
   const std::vector<uint8_t> want = {
       // counts: entry { key "" (0a 00), value 0 (10 00) }
       0x0a,
@@ -315,7 +319,7 @@ TEST(Pb, MarshalWritesCanonicalNaN) {
       0x22, 0x04, 0,    0,    0xc0, 0x7f,                                      // fs, packed
       0x2a, 0x0b, 0x08, 0x01, 0x11, 0,    0, 0,    0,    0,    0, 0xf8, 0x7f,  // dm
   };
-  EXPECT_EQ(Marshal(h), want);
+  EXPECT_EQ(MustMarshal(h), want);
 }
 
 // protowire-go#239: Go wrote a false map key or value, and a false list
@@ -342,7 +346,7 @@ TEST(Pb, FalseBoolIsWrittenAsZero) {
       0x12, 0x01, 0x00,                          // bl, packed
       0x1a, 0x05, 0x0a, 0x01, 0x61, 0x10, 0x00,  // sm {"a": false}
   };
-  const std::vector<uint8_t> got = Marshal(h);
+  const std::vector<uint8_t> got = MustMarshal(h);
   EXPECT_EQ(got, want);
   FalseBoolHolder back;
   ASSERT_TRUE(Unmarshal(got, back).ok());
@@ -367,7 +371,8 @@ struct Node {
                    PROTOWIRE_FIELD(5, decimal))
 };
 
-// n nested submessages under the root: n descents.
+// n nested submessages under the root: n descents. Marshal's own bound is
+// raised, so the decoder is what sees a message past it.
 std::vector<uint8_t> NestedNode(int n) {
   Node root;
   Node* cur = &root;
@@ -376,7 +381,7 @@ std::vector<uint8_t> NestedNode(int n) {
     cur = cur->child.get();
   }
   cur->label = "leaf";
-  return Marshal(root);
+  return MustMarshal(root, {.max_nesting_depth = n});
 }
 
 TEST(PbHardening, DepthBoundBothSides) {
@@ -397,7 +402,7 @@ TEST(PbHardening, DepthBoundBothSides) {
 TEST(PbHardening, MessageSizeBound) {
   Node n;
   n.label = std::string(2000, 'x');
-  auto bytes = Marshal(n);
+  auto bytes = MustMarshal(n);
   protowire::pb::UnmarshalOptions opts;
   opts.max_message_size = 1024;
   Node got;
@@ -415,7 +420,7 @@ TEST(PbHardening, MessageSizeBound) {
 TEST(PbHardening, RepeatedCountBoundPackedAndUnpacked) {
   Node n;
   for (int i = 0; i < 16; ++i) n.values.push_back(i);
-  auto packed = Marshal(n);  // tag 3 LEN, then 16 varints (#32)
+  auto packed = MustMarshal(n);  // tag 3 LEN, then 16 varints (#32)
   EXPECT_EQ(packed.size(), 18u);
   // The same field one record per element, which a decoder must accept too.
   std::vector<uint8_t> unpacked;
@@ -439,7 +444,7 @@ TEST(PbHardening, RepeatedCountBoundPackedAndUnpacked) {
 
   Node m;
   for (int i = 0; i < 16; ++i) m.counts["k" + std::to_string(i)] = i;
-  auto bytes = Marshal(m);
+  auto bytes = MustMarshal(m);
   protowire::pb::UnmarshalOptions opts;
   opts.max_repeated_count = 8;
   Node got;
@@ -474,13 +479,18 @@ TEST(PbHardening, PackedRepeatedDecodes) {
 
 TEST(PbHardening, DecimalScaleBound) {
   // Decimal { scale = 2^31-1 } and { scale = -2^31 }: refused; 4096 accepted.
+  // Node.decimal, field 5, by hand: Marshal refuses a scale past the bound.
   auto with_scale = [](int32_t scale) {
-    protowire::pb::Decimal d;
-    d.unscaled = {1};
-    d.scale = scale;
-    Node n;
-    n.decimal = d;
-    return Marshal(n);
+    namespace wire = protowire::wire;
+    std::vector<uint8_t> sub;
+    wire::AppendTag(sub, 1, wire::kBytes);
+    wire::AppendBytes(sub, std::vector<uint8_t>{1});
+    wire::AppendTag(sub, 2, wire::kVarint);
+    wire::AppendVarint(sub, static_cast<uint64_t>(int64_t{scale}));
+    std::vector<uint8_t> out;
+    wire::AppendTag(out, 5, wire::kBytes);
+    wire::AppendBytes(out, sub);
+    return out;
   };
   Node got;
   auto st = Unmarshal(with_scale(2147483647), got);
@@ -597,10 +607,11 @@ TEST(PbHardening, BigFloatExponentBoundEdges) {
   BigFloatHolder h;
   ASSERT_TRUE(Unmarshal(BigFloatWire({0xFF}, kBound - 8, 1), h).ok());
   EXPECT_EQ(BinaryExponent(h.F), kBound + 1);
-  // Pinned divergence, open on #93: Go's Marshal refuses this value, and
-  // pb::Marshal, which returns no Status, writes it. This fails the day that
-  // decision lands.
-  EXPECT_FALSE(Marshal(h).empty());
+  // and Marshal refuses it, as Go's does.
+  auto out = Marshal(h);
+  ASSERT_FALSE(out.ok());
+  EXPECT_EQ(out.status().message(),
+            "field F: pxf.BigFloat binary exponent 16385 exceeds MaxBigFloatExponent=16384");
 }
 
 // prec is a uint32, so a wider varint keeps its low 32 bits, as a protobuf
@@ -666,13 +677,14 @@ TEST(PbHardening, BigFloatPrecBound) {
     opts.max_numeric_literal_digits = 5000;
     EXPECT_TRUE(Unmarshal(BigFloatWire({25}, -3, 13604), h, opts).ok());
   }
-  // Pinned divergence, open on #93: Go's Marshal refuses a prec past the
-  // default bound, and pb::Marshal, which returns no Status, writes it. Only a
-  // hand-built value or a raised decode option reaches this. It fails the day
-  // that decision lands.
+  // Marshal refuses a prec past the default bound, as Go's does. Only a
+  // hand-built value or a raised decode option reaches this.
   BigFloatHolder h;
   h.F = {{25}, -3, 13604, false};
-  EXPECT_FALSE(Marshal(h).empty());
+  auto out = Marshal(h);
+  ASSERT_FALSE(out.ok());
+  EXPECT_EQ(out.status().message(),
+            "field F: pxf.BigFloat prec 13604 implies 4097 digits; MaxNumericLiteralDigits=4096");
 }
 
 // Each row's bytes are what protowire-go's Marshal wrote for the row's fields,
@@ -701,13 +713,13 @@ TEST(Pb, BigFloatWireIsGos) {
   for (const Row& row : rows) {
     BigFloatHolder h;
     h.F = row.in;
-    EXPECT_EQ(Marshal(h), row.want);
+    EXPECT_EQ(MustMarshal(h), row.want);
   }
   // +0 at prec 0 is no field at all, but an element is always written.
   BigFloatHolder empty;
-  EXPECT_TRUE(Marshal(empty).empty());
+  EXPECT_TRUE(MustMarshal(empty).empty());
   empty.R.resize(1);
-  EXPECT_EQ(Marshal(empty), (std::vector<uint8_t>{0x12, 0x00}));
+  EXPECT_EQ(MustMarshal(empty), (std::vector<uint8_t>{0x12, 0x00}));
 }
 
 TEST(Pb, DecimalScaleIsAPlainVarint) {
@@ -742,7 +754,7 @@ TEST(Pb, DecimalScaleIsAPlainVarint) {
 TEST(Pb, DecimalIsWrittenReduced) {
   BigNumStruct v;
   ASSERT_TRUE(protowire::pb::ParseDecimal("1.00", v.price));
-  EXPECT_EQ(Marshal(v), (std::vector<uint8_t>{0x12, 0x03, 0x0a, 0x01, 0x01}));
+  EXPECT_EQ(MustMarshal(v), (std::vector<uint8_t>{0x12, 0x03, 0x0a, 0x01, 0x01}));
   // The struct keeps what it was given, and so does its text.
   EXPECT_EQ(v.price.scale, 2);
   EXPECT_EQ(*protowire::pb::FormatDecimal(v.price), "1.00");
@@ -750,38 +762,270 @@ TEST(Pb, DecimalIsWrittenReduced) {
   v.price = {};
   v.price.unscaled = {5};
   v.price.scale = -2;  // 500
-  EXPECT_EQ(Marshal(v), (std::vector<uint8_t>{0x12, 0x04, 0x0a, 0x02, 0x01, 0xf4}));
+  EXPECT_EQ(MustMarshal(v), (std::vector<uint8_t>{0x12, 0x04, 0x0a, 0x02, 0x01, 0xf4}));
 
   v.price = {};
   v.price.scale = 2;  // a zero is the field's zero value at any scale
-  EXPECT_TRUE(Marshal(v).empty());
+  EXPECT_TRUE(MustMarshal(v).empty());
 }
 
-TEST(Pb, DecimalPastTheScaleBoundKeepsItsForm) {
-  // Go's Marshal refuses these and pb::Marshal cannot (#93), and the negative
-  // one would otherwise ask for 2 GiB of zeros.
-  BigNumStruct v;
-  v.price.unscaled = {5};
-  v.price.scale = std::numeric_limits<int32_t>::min();
-  EXPECT_EQ(Marshal(v),
-            (std::vector<uint8_t>{0x12,
-                                  0x0e,
-                                  0x0a,
-                                  0x01,
-                                  0x05,
-                                  0x10,
-                                  0x80,
-                                  0x80,
-                                  0x80,
-                                  0x80,
-                                  0xf8,
-                                  0xff,
-                                  0xff,
-                                  0xff,
-                                  0xff,
-                                  0x01}));
-  v.price.scale = 4097;
-  EXPECT_EQ(Marshal(v), (std::vector<uint8_t>{0x12, 0x06, 0x0a, 0x01, 0x05, 0x10, 0x81, 0x20}));
+// Marshal refuses what a decoder at the default limits refuses, as Go's does
+// (protowire-go's TestMarshalRefusesWhatUnmarshalRejects). The texts are Go's.
+TEST(Pb, MarshalRefusesWhatUnmarshalRejects) {
+  {  // A scale past the bound, once reduced.
+    BigNumStruct v;
+    v.price.unscaled = {5};
+    v.price.scale = 4097;
+    auto out = Marshal(v);
+    ASSERT_FALSE(out.ok());
+    EXPECT_EQ(out.status().message(),
+              "field price: pxf.Decimal scale 4097 exceeds MaxNumericLiteralDigits=4096");
+    // 50 at scale 4098 is 5 at scale 4097, so it is refused at 4097.
+    v.price.unscaled = {50};
+    v.price.scale = 4098;
+    out = Marshal(v);
+    ASSERT_FALSE(out.ok());
+    EXPECT_NE(out.status().message().find("scale 4097 exceeds"), std::string::npos)
+        << out.status().message();
+  }
+  {  // At the bound it is written, and reads back.
+    BigNumStruct v;
+    v.price.unscaled = {5};
+    v.price.scale = 4096;
+    BigNumStruct got;
+    ASSERT_TRUE(Unmarshal(MustMarshal(v), got).ok());
+    EXPECT_EQ(got.price.unscaled, std::vector<uint8_t>{5});
+    EXPECT_EQ(got.price.scale, 4096);
+  }
+  {  // Pinned divergence. A negative scale past the bound is a value of more
+    // than 4096 digits. Go holds a big.Rat, so it has no such scale and writes
+    // the integer. This port refuses it, as FormatDecimal does, rather than
+    // build 10^2147483648 from scale -2^31.
+    BigNumStruct v;
+    v.price.unscaled = {5};
+    v.price.scale = std::numeric_limits<int32_t>::min();
+    auto out = Marshal(v);
+    ASSERT_FALSE(out.ok());
+    EXPECT_EQ(out.status().message(),
+              "field price: pxf.Decimal scale -2147483648 exceeds MaxNumericLiteralDigits=4096");
+    v.price.scale = -4097;
+    EXPECT_FALSE(Marshal(v).ok());
+    v.price.scale = -4096;  // 5e4096 is written with scale 0
+    BigNumStruct got;
+    ASSERT_TRUE(Unmarshal(MustMarshal(v), got).ok());
+    EXPECT_EQ(got.price.scale, 0);
+  }
+  {  // A prec too wide to widen to, on both signs and through a list.
+    for (uint32_t prec : {uint32_t{1} << 31, uint32_t{13604}}) {
+      for (bool negative : {false, true}) {
+        BigFloatHolder h;
+        h.F = {{3}, 0, prec, negative};
+        auto out = Marshal(h);
+        ASSERT_FALSE(out.ok()) << prec;
+        EXPECT_NE(out.status().message().find("MaxNumericLiteralDigits=4096"), std::string::npos)
+            << out.status().message();
+        BigFloatHolder list;
+        list.R = {h.F};
+        out = Marshal(list);
+        ASSERT_FALSE(out.ok()) << prec;
+        EXPECT_NE(out.status().message().find("field R: pxf.BigFloat prec"), std::string::npos)
+            << out.status().message();
+      }
+    }
+    // A zero carries its prec, so it is bounded too.
+    BigFloatHolder zero;
+    zero.F = {{}, 0, 13604, false};
+    EXPECT_FALSE(Marshal(zero).ok());
+    // At the bound the value is written and reads back.
+    BigFloatHolder at;
+    at.F = {{3}, 0, 13603, true};
+    BigFloatHolder back;
+    ASSERT_TRUE(Unmarshal(MustMarshal(at), back).ok());
+    EXPECT_EQ(back.F.prec, 13603u);
+    EXPECT_TRUE(back.F.negative);
+    EXPECT_EQ(BinaryExponent(back.F), 2);
+  }
+  {  // An exponent that leaves int32 once widened: 0.75 × 2^(INT32_MIN+3) at
+    // 53 bits has wire exponent INT32_MIN+3-53.
+    BigFloatHolder h;
+    h.F = {{3}, std::numeric_limits<int32_t>::min() + 1, 53, false};
+    auto out = Marshal(h);
+    ASSERT_FALSE(out.ok());
+    EXPECT_EQ(out.status().message(),
+              "field F: pxf.BigFloat exponent -2147483698 does not fit int32");
+  }
+  {  // Past MaxBigFloatExponent on either side, and at it. 3 × 2^e has binary
+    // exponent e + 2.
+    constexpr int32_t kBound = protowire::kMaxBigFloatExponent;
+    for (int32_t e : {-kBound - 3, kBound - 1}) {
+      BigFloatHolder h;
+      h.F = {{3}, e, 53, false};
+      auto out = Marshal(h);
+      ASSERT_FALSE(out.ok()) << e;
+      EXPECT_EQ(out.status().message(),
+                "field F: pxf.BigFloat binary exponent " + std::to_string(int64_t{e} + 2) +
+                    " exceeds MaxBigFloatExponent=16384");
+    }
+    for (int32_t e : {-kBound - 2, kBound - 2}) {
+      BigFloatHolder h;
+      h.F = {{3}, e, 53, false};
+      BigFloatHolder back;
+      ASSERT_TRUE(Unmarshal(MustMarshal(h), back).ok()) << e;
+      EXPECT_EQ(BinaryExponent(back.F), int64_t{e} + 2);
+    }
+  }
+}
+
+// A node that nests every way a message can: a submessage, a list of them, and
+// a map entry whose value is one (protowire-go's marshal_depth_test.go).
+struct DepthNode {
+  std::shared_ptr<DepthNode> next;
+  std::vector<DepthNode> kids;
+  std::map<std::string, std::shared_ptr<DepthNode>> by_key;
+  std::map<std::string, int32_t> scalar;
+  int32_t v = 0;
+  protowire::pb::BigFloat f;
+  PROTOWIRE_FIELDS(DepthNode,
+                   PROTOWIRE_FIELD(1, next),
+                   PROTOWIRE_FIELD(2, kids),
+                   PROTOWIRE_FIELD(3, by_key),
+                   PROTOWIRE_FIELD(4, scalar),
+                   PROTOWIRE_FIELD(5, v),
+                   PROTOWIRE_FIELD(6, f))
+};
+
+DepthNode DeepNode(int n) {
+  DepthNode m;
+  m.v = 1;
+  for (int i = 0; i < n; ++i) {
+    DepthNode outer;
+    outer.next = std::make_shared<DepthNode>(std::move(m));
+    m = std::move(outer);
+  }
+  return m;
+}
+
+// Marshal refuses exactly what Unmarshal at the same limit refuses, for each
+// way of nesting and each kind of leaf (HARDENING.md § Recursion, #107).
+TEST(PbHardening, MarshalDepthAgreesWithUnmarshal) {
+  using Wrap = DepthNode (*)(DepthNode);
+  const std::vector<std::pair<const char*, Wrap>> wraps = {
+      {"singular",
+       [](DepthNode c) {
+         DepthNode m;
+         m.next = std::make_shared<DepthNode>(std::move(c));
+         return m;
+       }},
+      {"list",
+       [](DepthNode c) {
+         DepthNode m;
+         m.kids.push_back(std::move(c));
+         return m;
+       }},
+      {"map",
+       [](DepthNode c) {
+         DepthNode m;
+         m.by_key["k"] = std::make_shared<DepthNode>(std::move(c));
+         return m;
+       }},
+  };
+  using Leaf = DepthNode (*)();
+  const std::vector<std::pair<const char*, Leaf>> leaves = {
+      {"scalar",
+       [] {
+         DepthNode m;
+         m.v = 1;
+         return m;
+       }},
+      {"scalar map",
+       [] {
+         DepthNode m;
+         m.scalar["a"] = 1;
+         return m;
+       }},
+      {"big number",
+       [] {
+         DepthNode m;
+         m.f = {{1}, 0, 8, false};
+         return m;
+       }},
+  };
+  for (const auto& [wn, wrap] : wraps) {
+    for (const auto& [ln, leaf] : leaves) {
+      int written = 0, refused = 0;
+      for (int n = 1; n <= protowire::kMaxNestingDepth + 2; ++n) {
+        DepthNode m = leaf();
+        for (int i = 0; i < n; ++i) m = wrap(std::move(m));
+        auto out = Marshal(m);
+        // What the decoder says of the same value written past the limit.
+        DepthNode got;
+        auto read = Unmarshal(MustMarshal(m, {.max_nesting_depth = 1000}), got);
+        if (!out.ok()) {
+          EXPECT_NE(out.status().message().find("nesting depth exceeds MaxNestingDepth=100"),
+                    std::string::npos)
+              << wn << "/" << ln << " " << n << ": " << out.status().message();
+          EXPECT_FALSE(read.ok()) << wn << "/" << ln << " " << n;
+          ++refused;
+          continue;
+        }
+        ++written;
+        EXPECT_TRUE(read.ok()) << wn << "/" << ln << " " << n << ": " << read.message();
+        DepthNode back;
+        EXPECT_TRUE(Unmarshal(*out, back).ok()) << wn << "/" << ln << " " << n;
+      }
+      EXPECT_GT(written, 0) << wn << "/" << ln;
+      EXPECT_GT(refused, 0) << wn << "/" << ln;
+    }
+  }
+}
+
+TEST(PbHardening, MarshalDepthBound) {
+  auto out = Marshal(DeepNode(protowire::kMaxNestingDepth));
+  ASSERT_TRUE(out.ok()) << out.status().message();
+  DepthNode got;
+  EXPECT_TRUE(Unmarshal(*out, got).ok());
+  out = Marshal(DeepNode(protowire::kMaxNestingDepth + 1));
+  ASSERT_FALSE(out.ok());
+  EXPECT_NE(out.status().message().find("nesting depth exceeds MaxNestingDepth=100"),
+            std::string::npos)
+      << out.status().message();
+}
+
+TEST(PbHardening, MarshalOptionsMaxNestingDepth) {
+  DepthNode m = DeepNode(150);
+  auto out = Marshal(m, {.max_nesting_depth = 150});
+  ASSERT_TRUE(out.ok()) << out.status().message();
+  DepthNode got;
+  EXPECT_TRUE(Unmarshal(*out, got, {.max_nesting_depth = 150}).ok());
+  out = Marshal(m, {.max_nesting_depth = 149});
+  ASSERT_FALSE(out.ok());
+  EXPECT_NE(out.status().message().find("MaxNestingDepth=149"), std::string::npos);
+  out = Marshal(DeepNode(3), {.max_nesting_depth = 2});
+  ASSERT_FALSE(out.ok());
+  EXPECT_NE(out.status().message().find("MaxNestingDepth=2"), std::string::npos);
+}
+
+TEST(PbHardening, EncoderDepth) {
+  std::ostringstream buf;
+  protowire::pb::Encoder enc(&buf);
+  Status st = enc.Encode(DeepNode(101));
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("MaxNestingDepth=100"), std::string::npos) << st.message();
+  EXPECT_TRUE(buf.str().empty()) << "a refused message writes no frame";
+  protowire::pb::Encoder raised(&buf, {.max_nesting_depth = 101});
+  EXPECT_TRUE(raised.Encode(DeepNode(101)).ok());
+  EXPECT_FALSE(buf.str().empty());
+}
+
+// A shared_ptr cycle would overflow the stack; the bound stops it.
+TEST(PbHardening, MarshalPointerCycle) {
+  auto m = std::make_shared<DepthNode>();
+  m->next = m;
+  auto out = Marshal(*m);
+  m->next.reset();  // break the cycle so the node is freed
+  ASSERT_FALSE(out.ok());
+  EXPECT_NE(out.status().message().find("nesting depth exceeds MaxNestingDepth=100"),
+            std::string::npos);
 }
 
 TEST(Pb, BigNumbersDecodeToValues) {
@@ -863,7 +1107,7 @@ TEST(PbValidator, Violation) {
   opts.validator = &v;
   opts.report = &report;
   ValMsg got;
-  auto st = Unmarshal(Marshal(in), got, opts);
+  auto st = Unmarshal(MustMarshal(in), got, opts);
   ASSERT_FALSE(st.ok());
   EXPECT_EQ(st.message(), "check: port: port out of range (test.range)");
   ASSERT_EQ(report.violations.size(), 1u);
@@ -881,7 +1125,7 @@ TEST(PbValidator, CleanPass) {
   protowire::pb::UnmarshalOptions opts;
   opts.validator = &v;
   ValMsg got;
-  EXPECT_TRUE(Unmarshal(Marshal(in), got, opts).ok());
+  EXPECT_TRUE(Unmarshal(MustMarshal(in), got, opts).ok());
   EXPECT_EQ(got.Name, "x");
   EXPECT_EQ(v.calls, 1);
 }
@@ -893,7 +1137,7 @@ TEST(PbValidator, EngineError) {
   protowire::pb::UnmarshalOptions opts;
   opts.validator = &v;
   ValMsg got;
-  auto st = Unmarshal(Marshal(in), got, opts);
+  auto st = Unmarshal(MustMarshal(in), got, opts);
   ASSERT_FALSE(st.ok());
   EXPECT_EQ(st.message(), "engine failure");
 }
@@ -902,7 +1146,7 @@ TEST(PbValidator, ZeroValue) {
   ValMsg in;
   in.Name = "x";
   ValMsg got;
-  EXPECT_TRUE(Unmarshal(Marshal(in), got, protowire::pb::UnmarshalOptions{}).ok());
+  EXPECT_TRUE(Unmarshal(MustMarshal(in), got, protowire::pb::UnmarshalOptions{}).ok());
 }
 
 TEST(PbValidator, NotCalledWhenDecodeFails) {
@@ -926,7 +1170,7 @@ TEST(PbValidator, EngineForMessagesRefusesAStruct) {
   protowire::pb::UnmarshalOptions opts;
   opts.validator = &v;
   ValMsg got;
-  auto st = Unmarshal(Marshal(ValMsg{}), got, opts);
+  auto st = Unmarshal(MustMarshal(ValMsg{}), got, opts);
   ASSERT_FALSE(st.ok());
   EXPECT_NE(st.message().find("not a protobuf message"), std::string::npos) << st.ToString();
 }
@@ -986,7 +1230,7 @@ TEST(Pb, MarshalPacksRepeatedNumerics) {
   };
   Holder h;
   h.i32 = {1, 2, 3};
-  auto bytes = Marshal(h);
+  auto bytes = MustMarshal(h);
   EXPECT_EQ(bytes, (std::vector<uint8_t>{0x0a, 0x03, 0x01, 0x02, 0x03}));
 
   h.i32 = {0, -1};
@@ -996,7 +1240,7 @@ TEST(Pb, MarshalPacksRepeatedNumerics) {
   h.f = {1.0f};
   h.d = {2.0};
   h.strs = {"a", "b"};
-  bytes = Marshal(h);
+  bytes = MustMarshal(h);
   const std::vector<uint8_t> want = {
       // i32 [0, -1]: 0 then the 10-byte sign-extended varint
       0x0a,
@@ -1066,5 +1310,5 @@ TEST(Pb, MarshalPacksRepeatedNumerics) {
   EXPECT_EQ(got.strs, h.strs);
 
   Holder empty;
-  EXPECT_TRUE(Marshal(empty).empty());
+  EXPECT_TRUE(MustMarshal(empty).empty());
 }
