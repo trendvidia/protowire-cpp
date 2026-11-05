@@ -342,21 +342,24 @@ void MarshalBigIntMsg(const BigInt& v, std::vector<uint8_t>& out) {
 // Writes the form protowire-go writes, which is one per value: Go holds a
 // big.Rat, which has no scale to keep, so 1.00 goes out as 1 and 5e2 as 500. The
 // text path does not come through here, and keeps the scale a literal gave it.
-void MarshalDecimalMsg(const Decimal& v, std::vector<uint8_t>& out) {
+Status MarshalDecimalMsg(const Decimal& v, std::vector<uint8_t>& out) {
   std::vector<uint8_t> unscaled = v.unscaled;
   TrimLeadingZeros(unscaled);
-  if (unscaled.empty()) return;  // a zero at any scale, with no sign
+  if (unscaled.empty()) return Status::OK();  // a zero at any scale, with no sign
 
   int64_t scale = v.scale;
-  // Past the bound there is no decoder to agree with, Go's Marshal refuses, and
-  // pb::Marshal cannot (#93): such a value keeps the form it was given, which
-  // is the same number. The bound also stops scale -2^31 asking for 2 GiB.
+  // A scale below -MaxNumericLiteralDigits is not reduced: the bound stops
+  // scale -2^31 asking for 2 GiB, and such a value is refused below.
   if (scale >= -int64_t{kMaxNumericLiteralDigits} && scale != 0) {
     Reduce(unscaled, scale);
   }
+  // A conformant decoder refuses a scale past the bound, so writing one would
+  // produce bytes this port's own Unmarshal refuses, and protowire-go's Marshal
+  // refuses it too (protowire-go#95).
   if (scale > kMaxNumericLiteralDigits || scale < -int64_t{kMaxNumericLiteralDigits}) {
-    unscaled = v.unscaled;
-    scale = v.scale;
+    return Status::Error(
+        "pxf.Decimal scale " + std::to_string(scale) +
+        " exceeds MaxNumericLiteralDigits=" + std::to_string(kMaxNumericLiteralDigits));
   }
 
   wire::AppendTag(out, 1, wire::kBytes);
@@ -371,19 +374,30 @@ void MarshalDecimalMsg(const Decimal& v, std::vector<uint8_t>& out) {
     wire::AppendTag(out, 3, wire::kVarint);
     wire::AppendVarint(out, 1);
   }
+  return Status::OK();
 }
 
 // Writes the form protowire-go writes, which is one per value: the mantissa as
 // a prec-bit integer with its top bit set, and a zero with no exponent. A value
 // is rounded to prec first, since that is what prec means.
-void MarshalBigFloatMsg(const BigFloat& v, std::vector<uint8_t>& out) {
+Status MarshalBigFloatMsg(const BigFloat& v, std::vector<uint8_t>& out) {
   if (v.prec == 0) {
     // ±0, and its sign is all there is to write (protowire#410).
     if (v.negative) {
       wire::AppendTag(out, 4, wire::kVarint);
       wire::AppendVarint(out, 1);
     }
-    return;
+    return Status::OK();
+  }
+  // The wire mantissa is the value widened to prec bits, so a decoder refuses
+  // a prec past the digits a precision suffix may have (protowire#499). Checked
+  // first, as protowire-go does, and for a zero too: it carries its prec. The
+  // bound also keeps the widening below from allocating what prec asks for.
+  if (const int64_t n = ::protowire::detail::BigFloatPrecDigits(v.prec);
+      n > kMaxNumericLiteralDigits) {
+    return Status::Error(
+        "pxf.BigFloat prec " + std::to_string(v.prec) + " implies " + std::to_string(n) +
+        " digits; MaxNumericLiteralDigits=" + std::to_string(kMaxNumericLiteralDigits));
   }
   const int64_t prec = v.prec;
   std::vector<uint8_t> mantissa = v.mantissa;
@@ -396,25 +410,27 @@ void MarshalBigFloatMsg(const BigFloat& v, std::vector<uint8_t>& out) {
       exponent += bits - prec;
     }
     const int64_t bits = BitLen(mantissa);
+    // The value is mantissa × 2^widened with a prec-bit mantissa, and its binary
+    // exponent is widened + prec, which a round up can carry one past the bound.
     const int64_t widened = exponent + bits - prec;
-    // Two values have no canonical form, and pb::Marshal cannot refuse them
-    // (#93), so they keep the form they were given, which is the same number.
-    // The exponent can leave int32. And from 2^31 bits Go's Marshal has no
-    // behaviour to match, since it crashes, while widening here would allocate
-    // up to 512 MiB for five bytes of prec.
-    if (prec > std::numeric_limits<int32_t>::max() ||
-        widened < std::numeric_limits<int32_t>::min() ||
+    if (widened < std::numeric_limits<int32_t>::min() ||
         widened > std::numeric_limits<int32_t>::max()) {
-      mantissa = v.mantissa;
-      exponent = v.exponent;
-    } else {
-      if (bits > prec) {
-        ShiftRightRounded(mantissa, bits - prec);  // the round up carried past the top bit
-      } else {
-        ShiftLeft(mantissa, prec - bits);
-      }
-      exponent = widened;
+      return Status::Error("pxf.BigFloat exponent " + std::to_string(widened) +
+                           " does not fit int32");
     }
+    // A conformant decoder refuses a value past MaxBigFloatExponent, so writing
+    // one would produce bytes this port's own Unmarshal refuses (protowire#281).
+    if (const int64_t binary = widened + prec;
+        binary > kMaxBigFloatExponent || binary < -int64_t{kMaxBigFloatExponent}) {
+      return Status::Error("pxf.BigFloat binary exponent " + std::to_string(binary) +
+                           " exceeds MaxBigFloatExponent=" + std::to_string(kMaxBigFloatExponent));
+    }
+    if (bits > prec) {
+      ShiftRightRounded(mantissa, bits - prec);  // the round up carried past the top bit
+    } else {
+      ShiftLeft(mantissa, prec - bits);
+    }
+    exponent = widened;
   }
   if (!mantissa.empty()) {
     wire::AppendTag(out, 1, wire::kBytes);
@@ -431,6 +447,7 @@ void MarshalBigFloatMsg(const BigFloat& v, std::vector<uint8_t>& out) {
     wire::AppendTag(out, 4, wire::kVarint);
     wire::AppendVarint(out, 1);
   }
+  return Status::OK();
 }
 
 namespace {

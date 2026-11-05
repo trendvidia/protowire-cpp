@@ -67,7 +67,6 @@ void DecodeBig(const std::string& kind,
     return;
   }
   std::string line = "ok";
-  const std::string base = kind.substr(0, kind.find(':'));
   if (kind.find(':') != std::string::npos) {
     auto text = pb::FormatDecimal(h.D);
     line += " " + (text.ok() ? *text : std::string(text.status().message()));
@@ -76,7 +75,10 @@ void DecodeBig(const std::string& kind,
     line += " " + FloatValue(h.F) + " " + (i.ok() ? *i : std::string(i.status().message()));
     for (const pb::BigFloat& r : h.R) line += " " + FloatValue(r);
   }
-  if (remarshal && base != "past") line += " " + Hex(pb::Marshal(h));
+  if (remarshal) {
+    auto out = pb::Marshal(h);
+    line += " " + (out.ok() ? Hex(*out) : out.status().message());
+  }
   std::cout << line << "\n";
 }
 

@@ -20,12 +20,14 @@
 #include <string>
 #include <vector>
 
+#include "pb_marshal.h"
+
 namespace {
 
 using protowire::pb::BigFloat;
 using protowire::pb::BigInt;
 using protowire::pb::Decimal;
-using protowire::pb::Marshal;
+using protowire::testing::MustMarshal;
 
 // Twins of the spec's structs: same field numbers and types. A Go pointer
 // that may be nil is a value here, whose zero is what nil writes: omitted as a
@@ -144,7 +146,7 @@ BigInt Int(const char* s) {
 
 template <class T>
 std::vector<uint8_t> Bytes(const T& v) {
-  return Marshal(v);
+  return MustMarshal(v);
 }
 
 // Each row's value, built from the words in the table's third column.

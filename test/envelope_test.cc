@@ -4,7 +4,11 @@
 
 #include <gtest/gtest.h>
 
+#include "pb_marshal.h"
+
 namespace {
+
+using protowire::testing::MustMarshal;
 
 using protowire::envelope::AppError;
 using protowire::envelope::Envelope;
@@ -45,7 +49,7 @@ TEST(Envelope, TransportErr) {
 
 TEST(Envelope, RoundTripStatusAndData) {
   Envelope orig = Envelope::OK(201, {0xAA, 0xBB, 0xCC});
-  auto bytes = protowire::pb::Marshal(orig);
+  auto bytes = MustMarshal(orig);
 
   Envelope got;
   ASSERT_TRUE(protowire::pb::Unmarshal(bytes, got).ok());
@@ -58,7 +62,7 @@ TEST(Envelope, AppErrorStandaloneRoundTrip) {
   AppError ae{"PERMISSION_DENIED", "no access", {"role"}, {}, {}};
   ae.WithField("role", "FORBIDDEN", "role mismatch", {"admin"});
 
-  auto bytes = protowire::pb::Marshal(ae);
+  auto bytes = MustMarshal(ae);
   AppError got;
   ASSERT_TRUE(protowire::pb::Unmarshal(bytes, got).ok());
   EXPECT_EQ(got.code, "PERMISSION_DENIED");
@@ -73,7 +77,7 @@ TEST(Envelope, AppErrorMetadataRoundTrip) {
   AppError ae{"VALIDATION", "fields invalid", {}, {}, {}};
   ae.WithMeta("region", "us-east").WithMeta("retry_after", "30");
 
-  auto bytes = protowire::pb::Marshal(ae);
+  auto bytes = MustMarshal(ae);
   AppError got;
   ASSERT_TRUE(protowire::pb::Unmarshal(bytes, got).ok());
   EXPECT_EQ(got.code, "VALIDATION");
@@ -91,7 +95,7 @@ TEST(Envelope, FullEnvelopeRoundTripWithAppErrorAndMetadata) {
   orig.error->WithMeta("request_id", "req-123");
   orig.error->WithMeta("retry_after", "30");
 
-  auto bytes = protowire::pb::Marshal(orig);
+  auto bytes = MustMarshal(orig);
 
   Envelope got;
   ASSERT_TRUE(protowire::pb::Unmarshal(bytes, got).ok());
@@ -115,7 +119,7 @@ TEST(Envelope, FullEnvelopeRoundTripWithAppErrorAndMetadata) {
 
 TEST(Envelope, ZeroEnvelopeRoundTrip) {
   Envelope orig;
-  auto bytes = protowire::pb::Marshal(orig);
+  auto bytes = MustMarshal(orig);
   EXPECT_EQ(bytes.size(), 0u);
 
   Envelope got;
@@ -129,7 +133,7 @@ TEST(Envelope, ZeroEnvelopeRoundTrip) {
 
 TEST(Envelope, TransportErrRoundTrip) {
   Envelope orig = Envelope::TransportErr("connection refused");
-  auto bytes = protowire::pb::Marshal(orig);
+  auto bytes = MustMarshal(orig);
 
   Envelope got;
   ASSERT_TRUE(protowire::pb::Unmarshal(bytes, got).ok());
@@ -151,7 +155,7 @@ TEST(Envelope, ZeroMapEntryCarriesKeyAndValue) {
   Envelope e;
   e.error = std::make_unique<AppError>();
   e.error->metadata[""] = "";
-  auto bytes = protowire::pb::Marshal(e);
+  auto bytes = MustMarshal(e);
   std::string hex;
   for (uint8_t b : bytes) {
     static constexpr char kHex[] = "0123456789abcdef";

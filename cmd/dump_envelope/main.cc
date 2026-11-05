@@ -75,7 +75,8 @@ int DumpEnvelope() {
       .WithMeta("request_id", "req-123");
 
   auto bytes = protowire::pb::Marshal(e);
-  PrintHex(bytes.data(), bytes.size());
+  if (!bytes.ok()) Fatal(2, bytes.status().message());
+  PrintHex(bytes->data(), bytes->size());
   return 0;
 }
 
@@ -95,7 +96,8 @@ int DumpVector(const char* name) {
     return 3;
   }
   auto bytes = protowire::pb::Marshal(e);
-  PrintHex(bytes.data(), bytes.size());
+  if (!bytes.ok()) Fatal(2, bytes.status().message());
+  PrintHex(bytes->data(), bytes->size());
   return 0;
 }
 
