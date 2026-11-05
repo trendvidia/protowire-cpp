@@ -235,6 +235,29 @@ std::string BigFloatLiteral(std::string_view b, std::string* problem) {
     *problem = "@default's big_float_value declares no precision";
     return "";
   }
+  // Asked here to word each refusal as protowire-go's carrier does.
+  switch (const BigFloatLimit limit =
+              CheckBigFloatLimits(v, kMaxNumericLiteralDigits, kMaxBigFloatExponent);
+          limit.kind) {
+    case BigFloatLimit::kExponent:
+      *problem = "@default's big_float_value has binary exponent " + std::to_string(limit.value) +
+                 ", and MaxBigFloatExponent=" + std::to_string(kMaxBigFloatExponent) +
+                 " bounds its magnitude";
+      return "";
+    case BigFloatLimit::kRoundedExponent:
+      *problem = "@default's big_float_value has binary exponent " + std::to_string(limit.value) +
+                 " after rounding to prec " + std::to_string(v.prec) +
+                 ", and MaxBigFloatExponent=" + std::to_string(kMaxBigFloatExponent) +
+                 " bounds its magnitude";
+      return "";
+    case BigFloatLimit::kDigits:
+      *problem = "@default's big_float_value has prec " + std::to_string(v.prec) +
+                 ", which renders to " + std::to_string(limit.value) +
+                 " digits; MaxNumericLiteralDigits=" + std::to_string(kMaxNumericLiteralDigits);
+      return "";
+    case BigFloatLimit::kNone:
+      break;
+  }
   auto s = FormatBigFloatLiteral(v, kMaxNumericLiteralDigits, kMaxBigFloatExponent);
   if (!s.ok()) {
     *problem = "@default's big_float_value: " + s.status().message();
