@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "encoding_range.h"
 #include "header_bounds.h"
 #include "protowire/detail/go_quote.h"
 #include "protowire/sbe/annotations.h"
@@ -56,6 +57,29 @@ StatusOr<int> EndOfField(int offset, uint16_t size) {
 StatusOr<std::pair<std::string, uint16_t>> FieldEncodingSize(const pb::FieldDescriptor* fd) {
   if (auto enc = GetFieldStringOption(fd, kExtEncoding); enc.has_value()) {
     const std::string& e = *enc;
+    // The draft defines (sbe.encoding) as narrowing a numeric type, and says
+    // nothing of crossing between integers and floating point
+    // (protowire#549), so neither binds.
+    const std::string kind(fd->type_name());
+    switch (fd->cpp_type()) {
+      case pb::FieldDescriptor::CPPTYPE_STRING:
+        return Status::Error("(sbe.encoding) = " + detail::GoQuote(e) + " on a " + kind +
+                             " field; it narrows a numeric field, and a " + kind +
+                             " field takes (sbe.length)");
+      case pb::FieldDescriptor::CPPTYPE_FLOAT:
+      case pb::FieldDescriptor::CPPTYPE_DOUBLE:
+        if (IsIntEncoding(e)) {
+          return Status::Error("(sbe.encoding) = " + detail::GoQuote(e) +
+                               " is an integer primitive and the field is " + kind);
+        }
+        break;
+      default:
+        if (e == kEncFloat || e == kEncDouble) {
+          return Status::Error("(sbe.encoding) = " + detail::GoQuote(e) +
+                               " is a floating-point primitive and the field is " + kind);
+        }
+        break;
+    }
     if (e == kEncInt8 || e == kEncUint8) return std::make_pair(e, uint16_t{1});
     if (e == kEncInt16 || e == kEncUint16) return std::make_pair(e, uint16_t{2});
     if (e == kEncInt32 || e == kEncUint32 || e == kEncFloat) return std::make_pair(e, uint16_t{4});
