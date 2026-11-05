@@ -1017,6 +1017,52 @@ TEST(PbHardening, EncoderDepth) {
   EXPECT_FALSE(buf.str().empty());
 }
 
+// A big-number message is a value, not a descent, as in protowire-go (#148,
+// decided by the owner). The bytes are what Go's Marshal writes for a struct
+// with Next at field 1 and a big.Int at field 2, nested 100 deep, the BigInt
+// 5 at the bottom; Go reads them back, and refuses to write 101.
+struct BigLeafNode {
+  std::unique_ptr<BigLeafNode> next;
+  BigInt i;
+  PROTOWIRE_FIELDS(BigLeafNode, PROTOWIRE_FIELD(1, next), PROTOWIRE_FIELD(2, i))
+};
+
+BigLeafNode BigLeafChain(int n) {
+  BigLeafNode m;
+  m.i.abs = {5};
+  for (int k = 0; k < n; ++k) {
+    BigLeafNode outer;
+    outer.next = std::make_unique<BigLeafNode>(std::move(m));
+    m = std::move(outer);
+  }
+  return m;
+}
+
+TEST(PbHardening, BigNumberIsNotADescent) {
+  const std::string go_hex =
+      "0af0010aed010aea010ae7010ae4010ae1010ade010adb010ad8010ad5010ad2010acf010acc010a"
+      "c9010ac6010ac3010ac0010abd010aba010ab7010ab4010ab1010aae010aab010aa8010aa5010aa2"
+      "010a9f010a9c010a99010a96010a93010a90010a8d010a8a010a87010a84010a81010a7f0a7d0a7b"
+      "0a790a770a750a730a710a6f0a6d0a6b0a690a670a650a630a610a5f0a5d0a5b0a590a570a550a53"
+      "0a510a4f0a4d0a4b0a490a470a450a430a410a3f0a3d0a3b0a390a370a350a330a310a2f0a2d0a2b"
+      "0a290a270a250a230a210a1f0a1d0a1b0a190a170a150a130a110a0f0a0d0a0b0a090a070a051203"
+      "0a0105";
+  std::vector<uint8_t> go;
+  for (size_t k = 0; k + 1 < go_hex.size(); k += 2) {
+    go.push_back(static_cast<uint8_t>(std::stoi(go_hex.substr(k, 2), nullptr, 16)));
+  }
+  ASSERT_EQ(go.size(), 243u);
+  BigLeafNode got;
+  auto st = Unmarshal(go, got);
+  ASSERT_TRUE(st.ok()) << st.message();
+  EXPECT_EQ(MustMarshal(BigLeafChain(100)), go);
+  auto out = Marshal(BigLeafChain(101));
+  ASSERT_FALSE(out.ok());
+  EXPECT_NE(out.status().message().find("nesting depth exceeds MaxNestingDepth=100"),
+            std::string::npos)
+      << out.status().message();
+}
+
 // A shared_ptr cycle would overflow the stack; the bound stops it.
 TEST(PbHardening, MarshalPointerCycle) {
   auto m = std::make_shared<DepthNode>();

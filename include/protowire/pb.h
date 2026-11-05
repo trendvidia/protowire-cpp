@@ -68,10 +68,9 @@ namespace protowire::pb {
 // call enforces, each configurable per call; 0 selects the default in
 // protowire/limits.h. max_message_size caps the input to this call and is
 // checked before anything is read; max_nesting_depth caps submessage /
-// map-entry nesting (the root is depth 0, every submessage, big-number
-// message or map entry one descent); max_repeated_count caps the element
-// count of any repeated or map field, checked before each element is
-// appended.
+// map-entry nesting (the root is depth 0, every submessage or map entry one
+// descent; a big-number message is not, as in protowire-go, #148); max_repeated_count caps the
+// element count of any repeated or map field, checked before each element is appended.
 struct UnmarshalOptions {
   int max_message_size = 0;
   int max_nesting_depth = 0;
@@ -94,8 +93,8 @@ struct UnmarshalOptions {
 // Marshal's default.
 struct MarshalOptions {
   // The deepest value Marshal writes, counted as Unmarshal counts it: the root
-  // is depth 0, and every submessage, big-number message or map entry is one
-  // descent. 0 selects kMaxNestingDepth. Raise it only with
+  // is depth 0, and every submessage or map entry is one descent. A big-number
+  // message is not, as in protowire-go (#148). 0 selects kMaxNestingDepth. Raise it only with
   // UnmarshalOptions::max_nesting_depth on every reader (HARDENING.md §
   // Recursion, protowire#502).
   int max_nesting_depth = 0;
@@ -365,8 +364,8 @@ inline Status MarshalScalar(
     wire::AppendTag(out, num, wire::kBytes);
     wire::AppendBytes(out, v);
   } else if constexpr (IsBigNumber<T>::value) {
-    // A big-number message is a descent, as UnmarshalScalar counts it.
-    if (depth + 1 > max_depth) return DepthError(max_depth);
+    // A big-number message is a value, not a descent, as UnmarshalScalar and
+    // protowire-go count it (#148).
     std::vector<uint8_t> sub;
     if constexpr (std::is_same_v<T, BigInt>) {
       MarshalBigIntMsg(v, sub);
@@ -540,25 +539,24 @@ inline Status UnmarshalScalar(std::span<const uint8_t> data,
     consumed = n;
     v.assign(bytes.begin(), bytes.end());
   } else if constexpr (std::is_same_v<T, BigInt>) {
+    // A big-number message is a value, not a descent, as in protowire-go
+    // (#148), so depth is not checked for it.
     std::span<const uint8_t> bytes;
     int n = wire::ConsumeBytes(data, bytes);
     if (n < 0) return Status::Error("corrupt embedded message");
     consumed = n;
-    if (depth + 1 > lim.max_depth) return DepthError(lim);
     return UnmarshalBigIntMsg(bytes, v);
   } else if constexpr (std::is_same_v<T, Decimal>) {
     std::span<const uint8_t> bytes;
     int n = wire::ConsumeBytes(data, bytes);
     if (n < 0) return Status::Error("corrupt embedded message");
     consumed = n;
-    if (depth + 1 > lim.max_depth) return DepthError(lim);
     return UnmarshalDecimalMsg(bytes, v, lim.max_digits);
   } else if constexpr (std::is_same_v<T, BigFloat>) {
     std::span<const uint8_t> bytes;
     int n = wire::ConsumeBytes(data, bytes);
     if (n < 0) return Status::Error("corrupt embedded message");
     consumed = n;
-    if (depth + 1 > lim.max_depth) return DepthError(lim);
     return UnmarshalBigFloatMsg(bytes, v, lim.max_big_float_exp, lim.max_digits);
   } else if constexpr (HasFields<T>::value) {
     std::span<const uint8_t> bytes;
