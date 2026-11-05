@@ -275,11 +275,8 @@ uint64_t RoundToBits(Nat* m, uint64_t bits, bool sticky) {
   return shift;
 }
 
-// Clip is protowire-go's clipLiteral: the first 24 bytes and an ellipsis.
 std::string Clip(std::string_view s) {
-  constexpr size_t kMax = 24;
-  if (s.size() <= kMax) return std::string(s);
-  return std::string(s.substr(0, kMax)) + "…";
+  return ClipLiteral(s);
 }
 
 bool IsDigit(char c) {
@@ -610,6 +607,12 @@ bool SplitLiteral(std::string_view s, Literal* out) {
 }
 
 }  // namespace
+
+std::string ClipLiteral(std::string_view s) {
+  constexpr size_t kMax = 24;
+  if (s.size() <= kMax) return std::string(s);
+  return std::string(s.substr(0, kMax)) + "…";
+}
 
 int CountLiteralDigits(std::string_view literal) {
   int n = 0;

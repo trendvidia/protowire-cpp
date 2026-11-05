@@ -44,6 +44,7 @@ message Wallet {
   pxf.BigInt    balance = 1;
   pxf.Decimal   price   = 2;
   pxf.BigFloat  rate    = 3;
+  map<int32, string> labels = 4;
 }
 )";
 
@@ -480,6 +481,26 @@ TEST_F(PxfBigNum, BigFloatFarPastTheBoundIsRefusedAsGoRefusesIt) {
                                         c.wide ? wide : protowire::pxf::UnmarshalOptions{});
     ASSERT_FALSE(st.ok());
     EXPECT_NE(st.message().find(c.want), std::string::npos) << st.ToString();
+  }
+}
+
+// A precision suffix quoted in an error is clipped as protowire-go clips
+// it: 24 bytes and an ellipsis.
+TEST_F(PxfBigNum, PrecisionSuffixIsClippedInErrors) {
+  const std::pair<const char*, const char*> cases[] = {
+      {"price = 1p1234567890123456789012345678901\n",
+       "precision suffix p123456789012345678901234… is allowed only on a pxf.BigFloat, not "
+       "on field \"price\""},
+      {"price = 1p12345\n",
+       "precision suffix p12345 is allowed only on a pxf.BigFloat, not on field \"price\""},
+      {"labels = { 1p1234567890123456789012345678901: \"x\" }\n",
+       "map field \"labels\": a key cannot carry a precision suffix "
+       "(p123456789012345678901234…)"},
+  };
+  for (const auto& [doc, want] : cases) {
+    auto msg = NewWallet();
+    auto st = protowire::pxf::Unmarshal(doc, msg.get());
+    EXPECT_EQ(st.message(), want) << doc;
   }
 }
 
