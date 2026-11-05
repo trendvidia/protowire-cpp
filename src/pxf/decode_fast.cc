@@ -694,7 +694,7 @@ class DirectDecoder {
   Status CheckNoPrecision(const FieldDescriptor* fd) {
     if (current_.prec.empty()) return Status::OK();
     return PosError(current_.pos,
-                    "precision suffix p" + std::string(current_.prec) +
+                    "precision suffix p" + ClipLiteral(current_.prec) +
                         " is allowed only on a pxf.BigFloat, not on field \"" +
                         std::string(fd->name()) + "\"");
   }
@@ -1466,7 +1466,7 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd, B
       return PosError(pos,
                       "map field \"" + std::string(fd->name()) +
                           "\": a key cannot carry a precision suffix (p" +
-                          std::string(current_.prec) + ")");
+                          ClipLiteral(current_.prec) + ")");
     }
     Advance();
     switch (current_.kind) {

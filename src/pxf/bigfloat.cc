@@ -276,9 +276,7 @@ uint64_t RoundToBits(Nat* m, uint64_t bits, bool sticky) {
 }
 
 std::string Clip(std::string_view s) {
-  constexpr size_t kMax = 40;
-  if (s.size() <= kMax) return std::string(s);
-  return std::string(s.substr(0, kMax)) + "...";
+  return ClipLiteral(s);
 }
 
 bool IsDigit(char c) {
@@ -307,7 +305,10 @@ bool ExceedsBound(int64_t e, int limit) {
 // g = A - B > 0, that is g 2^(prec+1) <= A. Since g >= 1, it cannot hold
 // once prec + 1 reaches A's bit length, so the shift below is never wider
 // than A, whose size the literal bounds.
-int64_t RoundedBinaryExponent(const Nat& num, const Nat& den, uint32_t prec) {
+//
+// ExactExponentAndCarry returns the exact value's exponent and whether
+// rounding carries it; RoundedBinaryExponent adds the two.
+std::pair<int64_t, bool> ExactExponentAndCarry(const Nat& num, const Nat& den, uint64_t prec) {
   // num/den lies in (2^(e-1), 2^(e+1)) for e the difference of bit lengths.
   int64_t e = static_cast<int64_t>(num.BitLen()) - static_cast<int64_t>(den.BitLen());
   const auto scaled = [&](int64_t at) {
@@ -317,10 +318,221 @@ int64_t RoundedBinaryExponent(const Nat& num, const Nat& den, uint32_t prec) {
   };
   auto [a, b] = scaled(e);
   if (Nat::Cmp(b, a) >= 0) std::tie(a, b) = scaled(++e);
-  const uint64_t shift = uint64_t{prec} + 1;
-  if (shift >= a.BitLen()) return e;
-  const bool carries = Nat::Cmp(Nat::Sub(a, b).Shl(shift), a) <= 0;
+  const uint64_t shift = prec + 1;
+  if (shift >= a.BitLen()) return {e, false};
+  return {e, Nat::Cmp(Nat::Sub(a, b).Shl(shift), a) <= 0};
+}
+
+int64_t RoundedBinaryExponent(const Nat& num, const Nat& den, uint32_t prec) {
+  const auto [e, carries] = ExactExponentAndCarry(num, den, prec);
   return carries ? e + 1 : e;
+}
+
+// GoFloat is a value as math/big's Float holds it, for following
+// big.Float.Parse step by step: zero, infinity, or m × 2^(exp - m's bit
+// length), so exp is the binary exponent, value in [2^(exp-1), 2^exp).
+// Its exponent range is big.Float's, an int32.
+struct GoFloat {
+  enum Form : uint8_t { kZero, kFinite, kInf };
+  Form form = kFinite;
+  Nat m;
+  int64_t exp = 0;
+};
+
+constexpr int64_t kGoMinExp = std::numeric_limits<int32_t>::min();
+constexpr int64_t kGoMaxExp = std::numeric_limits<int32_t>::max();
+
+// SetExpAndRound is math/big's setExpAndRound and round: the range is asked
+// of the exponent before rounding, and a rounding that carries past MaxExp
+// is infinity.
+//
+//	if exp < MinExp { z.form = zero; return }
+//	if exp > MaxExp { z.form = inf; return }
+//	...
+//	if z.exp >= MaxExp { z.form = inf; return }  // the mantissa carried
+//	z.exp++
+void SetExpAndRound(GoFloat* z, int64_t exp, uint64_t prec) {
+  if (exp < kGoMinExp || exp > kGoMaxExp) {
+    z->form = exp < kGoMinExp ? GoFloat::kZero : GoFloat::kInf;
+    return;
+  }
+  z->form = GoFloat::kFinite;
+  z->exp = exp;
+  RoundToBits(&z->m, prec, false);
+  if (z->m.BitLen() > prec) {  // the round up carried past the top bit
+    if (exp >= kGoMaxExp) {
+      z->form = GoFloat::kInf;
+      return;
+    }
+    z->m = z->m.Shr(1);
+    ++z->exp;
+  }
+}
+
+// GoMul is (*big.Float).Mul rounded to prec: the exact product, rounded
+// once. Infinity times a finite value is infinity; no zero reaches it.
+GoFloat GoMul(const GoFloat& x, const GoFloat& y, uint64_t prec) {
+  GoFloat z;
+  if (x.form != GoFloat::kFinite || y.form != GoFloat::kFinite) {
+    z.form = x.form == GoFloat::kInf || y.form == GoFloat::kInf ? GoFloat::kInf : GoFloat::kZero;
+    return z;
+  }
+  z.m = Nat::Mul(x.m, y.m);
+  // umul: e := x.exp + y.exp; z.setExpAndRound(e-fnorm(z.mant), 0)
+  const int64_t fnorm = static_cast<int64_t>(x.m.BitLen() + y.m.BitLen() - z.m.BitLen());
+  SetExpAndRound(&z, x.exp + y.exp - fnorm, prec);
+  return z;
+}
+
+// GoPow5 is math/big's (*Float).pow5 at precision prec: 5^n exact up to
+// 5^27, then by squaring, the square kept 64 bits wider than the product.
+//
+//	z.SetUint64(pow5tab[m])
+//	n -= m
+//	f := new(Float).SetPrec(z.Prec() + 64).SetUint64(5)
+//	for n > 0 {
+//		if n&1 != 0 { z.Mul(z, f) }
+//		f.Mul(f, f)
+//		n >>= 1
+//	}
+//
+// The square after the last product is never read, so it is not made.
+// Every precision here is above 64, so SetUint64 is exact.
+GoFloat GoPow5(uint64_t n, uint64_t prec) {
+  constexpr uint64_t kTab = 27;  // 5^27 is the largest power of 5 in a uint64
+  const auto exact = [](uint64_t k) {
+    GoFloat f;
+    f.m = Nat(1);
+    for (uint64_t i = 0; i < k; ++i) f.m.MulSmall(5);
+    f.exp = static_cast<int64_t>(f.m.BitLen());
+    return f;
+  };
+  if (n <= kTab) return exact(n);
+  GoFloat z = exact(kTab);
+  GoFloat f = exact(1);
+  for (n -= kTab; n > 0;) {
+    if ((n & 1U) != 0) z = GoMul(z, f, prec);
+    n >>= 1U;
+    if (n > 0) f = GoMul(f, f, prec + 64);
+  }
+  return z;
+}
+
+// GoScan is a literal as big.Float.Parse scans it: the integer of all its
+// mantissa digits, trailing zeros included, the count of those after the
+// point, and the exponent, which strconv.ParseInt reads as an int64.
+struct GoScan {
+  Nat mant;
+  int64_t frac = 0;
+  int64_t exp = 0;
+};
+
+// ScanLikeGo takes apart a literal SplitLiteral accepted. It returns false
+// for an exponent past int64, which big.Float.Parse refuses.
+bool ScanLikeGo(std::string_view s, GoScan* out) {
+  size_t i = 0;
+  if (i < s.size() && (s[i] == '-' || s[i] == '+')) ++i;
+  bool point = false;
+  for (; i < s.size() && (IsDigit(s[i]) || s[i] == '.'); ++i) {
+    if (s[i] == '.') {
+      point = true;
+      continue;
+    }
+    if (point) ++out->frac;
+    if (!out->mant.IsZero() || s[i] != '0') {
+      out->mant.MulSmall(10);
+      out->mant.AddSmall(static_cast<uint32_t>(s[i] - '0'));
+    }
+  }
+  if (i == s.size()) return true;
+  ++i;  // 'e' or 'E'
+  bool neg = false;
+  if (s[i] == '+' || s[i] == '-') neg = s[i++] == '-';
+  const uint64_t limit = neg ? uint64_t{1} << 63U : (uint64_t{1} << 63U) - 1;
+  uint64_t mag = 0;
+  for (; i < s.size(); ++i) {
+    const auto d = static_cast<uint64_t>(s[i] - '0');
+    if (mag > (limit - d) / 10) return false;
+    mag = mag * 10 + d;
+  }
+  out->exp = neg ? (mag == uint64_t{1} << 63U ? std::numeric_limits<int64_t>::min()
+                                              : -static_cast<int64_t>(mag))
+                 : static_cast<int64_t>(mag);
+  return true;
+}
+
+// GoParse is what big.Float.Parse makes of a literal at prec, ties to even,
+// as far as the checks after it ask: zero, infinity, or a finite value and
+// its binary exponent. ok is false where Parse fails, on an exponent past
+// int64 or a binary exponent past int32 before the power of five is
+// applied. Parse scales by a power of five worked out at prec + 64 bits,
+// so its exponent is not always the exact value's: it can differ by one
+// where rounding carries. This follows it rather than the exact value.
+//
+// The work is bounded by prec and by the bit length of 5^|exp5|, and by
+// log2 |exp5| products: no power of ten is built.
+GoFloat GoParse(const GoScan& scan, uint64_t prec, bool* ok) {
+  *ok = true;
+  GoFloat z;
+  if (scan.mant.IsZero()) {
+    z.form = GoFloat::kZero;
+    return z;
+  }
+  // exp2 := int64(len(z.mant))*_W - fnorm(z.mant); exp2 += fcount; exp2 += exp
+  // if MinExp <= exp2 && exp2 <= MaxExp { ... } else { err = "exponent overflow" }
+  const int64_t bits = static_cast<int64_t>(scan.mant.BitLen()) - scan.frac;
+  if ((scan.exp > 0 && bits > std::numeric_limits<int64_t>::max() - scan.exp) ||
+      (scan.exp < 0 && bits < std::numeric_limits<int64_t>::min() - scan.exp)) {
+    *ok = false;
+    return z;
+  }
+  const int64_t exp2 = bits + scan.exp;
+  if (exp2 < kGoMinExp || exp2 > kGoMaxExp) {
+    *ok = false;
+    return z;
+  }
+  // exp5 is fcount + exp, which is exp2 less the mantissa's bit length.
+  const int64_t exp5 = exp2 - static_cast<int64_t>(scan.mant.BitLen());
+  z.m = scan.mant;
+  if (exp5 == 0) {
+    SetExpAndRound(&z, exp2, prec);
+    return z;
+  }
+  // A value certainly outside big.Float's range is zero or infinity however
+  // Parse's power of five rounds, so it is not built. The value's binary
+  // exponent is within one of exp2 + exp5 log2(5), and the double carries
+  // that product to well under one part in 2^20.
+  const double reach = static_cast<double>(exp2) + static_cast<double>(exp5) * 2.321928094887362;
+  if (exp5 < 0 && reach + 4 < static_cast<double>(kGoMinExp)) {
+    z.form = GoFloat::kZero;
+    return z;
+  }
+  if (exp5 > 0 && reach - 4 > static_cast<double>(kGoMaxExp)) {
+    z.form = GoFloat::kInf;
+    return z;
+  }
+  // p := new(Float).SetPrec(z.Prec() + 64)
+  // if exp5 < 0 { z.Quo(z, p.pow5(uint64(-exp5))) } else { z.Mul(z, p.pow5(uint64(exp5))) }
+  const GoFloat p = GoPow5(static_cast<uint64_t>(exp5 < 0 ? -exp5 : exp5), prec + 64);
+  z.exp = exp2;
+  if (exp5 > 0) return GoMul(z, p, prec);
+  if (p.form == GoFloat::kInf) {
+    z.form = GoFloat::kZero;
+    return z;
+  }
+  // Quo rounds the quotient once, from an integer quotient with a sticky
+  // remainder: the exact quotient rounded to prec. Only its exponent and
+  // range are asked of it, so the mantissa is not made.
+  const auto [e, carries] = ExactExponentAndCarry(z.m, p.m, prec);
+  const int64_t exp = e + (exp2 - static_cast<int64_t>(z.m.BitLen())) -
+                      (p.exp - static_cast<int64_t>(p.m.BitLen()));
+  z.m = Nat();
+  if (exp < kGoMinExp || exp > kGoMaxExp || (carries && exp >= kGoMaxExp)) {
+    z.form = exp < kGoMinExp ? GoFloat::kZero : GoFloat::kInf;
+    return z;
+  }
+  z.exp = carries ? exp + 1 : exp;
+  return z;
 }
 
 // ParsePrecision reads a suffix's digits. Longer than any uint32 is refused
@@ -396,6 +608,12 @@ bool SplitLiteral(std::string_view s, Literal* out) {
 
 }  // namespace
 
+std::string ClipLiteral(std::string_view s) {
+  constexpr size_t kMax = 24;
+  if (s.size() <= kMax) return std::string(s);
+  return std::string(s.substr(0, kMax)) + "…";
+}
+
 int CountLiteralDigits(std::string_view literal) {
   int n = 0;
   bool leading = true;
@@ -442,7 +660,17 @@ Status ParseBigFloatLiteral(std::string_view literal,
     return Status::Error("big float literal " + Clip(literal) + " is above big.Float's range");
   }
   Literal lit;
-  if (!SplitLiteral(literal, &lit)) {
+  GoScan scan;
+  if (!SplitLiteral(literal, &lit) || !ScanLikeGo(literal, &scan)) {
+    return Status::Error("invalid big float: " + std::string(literal));
+  }
+  // protowire-go asks its questions of what big.Float.Parse made of the
+  // literal at prec, in this order, and then of the exact value rounded
+  // once. Parse's value is followed exactly, its exponent included, so the
+  // refusals and their numbers are Go's.
+  bool parsed = false;
+  const GoFloat go = GoParse(scan, prec, &parsed);
+  if (!parsed) {
     return Status::Error("invalid big float: " + std::string(literal));
   }
   *out = BigFloatFields{};
@@ -451,6 +679,14 @@ Status ParseBigFloatLiteral(std::string_view literal,
     // A zero written without a suffix has no precision to keep.
     out->prec = suffixed ? prec : 0;
     return Status::OK();
+  }
+  // big.Float.Parse substitutes ±Inf above its range and ±0 below it, and
+  // protowire-go refuses either for a non-zero literal (protowire#278).
+  if (go.form == GoFloat::kInf) {
+    return Status::Error("big float literal " + Clip(literal) + " is above big.Float's range");
+  }
+  if (go.form == GoFloat::kZero) {
+    return Status::Error("big float literal " + Clip(literal) + " is below big.Float's range");
   }
   // The mantissa is the value widened to prec bits, and big.Float holds at
   // most 2^31-1 of them, so protowire-go refuses a wider non-zero value
@@ -462,16 +698,24 @@ Status ParseBigFloatLiteral(std::string_view literal,
                          " exceeds the widest mantissa big.Float can hold, " +
                          std::to_string(std::numeric_limits<int32_t>::max()) + " bits");
   }
-  // Refuse what is certainly past the bound before building 10^exp10, whose
-  // size is whatever the literal says. The value lies in
-  // [10^(point-1), 10^point), and log2(10) > 3, so these two tests only
-  // ever fire on values truly past it. The exact check follows the rounding.
-  const int64_t point = static_cast<int64_t>(lit.digits.size()) + lit.exp10;
-  const int64_t reach = (static_cast<int64_t>(max_exponent) + 8) / 3 + 1;
-  if (point - 1 > reach || point < -reach) {
+  // The wire carries the exponent less prec as an int32 (pxf/bignum.proto),
+  // so a small value at a wide prec has no encoding (protowire-go#231).
+  // Both limits are asked of Parse's exponent before 10^exp10 is built, so
+  // a value far past the bound costs what its power of five costs.
+  const auto below_wire = [&](int64_t e) {
+    return e - static_cast<int64_t>(prec) < std::numeric_limits<int32_t>::min();
+  };
+  const auto past_bound = [&](int64_t e) {
+    return Status::Error(
+        "big float literal " + Clip(literal) + " has binary exponent " + std::to_string(e) +
+        ", and MaxBigFloatExponent=" + std::to_string(max_exponent) + " bounds its magnitude");
+  };
+  const auto below_wire_error = [&] {
     return Status::Error("big float literal " + Clip(literal) +
-                         " is past MaxBigFloatExponent=" + std::to_string(max_exponent));
-  }
+                         " is below the wire's exponent range");
+  };
+  if (below_wire(go.exp)) return below_wire_error();
+  if (ExceedsBound(go.exp, max_exponent)) return past_bound(go.exp);
   Nat num;
   for (char c : lit.digits) {
     num.MulSmall(10);
@@ -483,21 +727,13 @@ Status ParseBigFloatLiteral(std::string_view literal,
   } else {
     den = Nat::Pow10(-lit.exp10);
   }
-  // Both limits are on the value rounded to prec, and both are asked before
-  // the value is widened to prec bits, which for a wide prec is the costly
-  // part. The wire carries the exponent less prec as an int32
-  // (pxf/bignum.proto), so a small value at a wide prec has no encoding
-  // (protowire-go#231). protowire-go asks this one first.
+  // The exact value rounded once can carry where Parse's did not, or not
+  // where it did, so protowire-go asks both limits again, this time the
+  // bound first. Both are asked before the value is widened to prec bits,
+  // which for a wide prec is the costly part.
   const int64_t bin = RoundedBinaryExponent(num, den, prec);
-  if (bin - static_cast<int64_t>(prec) < std::numeric_limits<int32_t>::min()) {
-    return Status::Error("big float literal " + Clip(literal) +
-                         " is below the wire's exponent range");
-  }
-  if (ExceedsBound(bin, max_exponent)) {
-    return Status::Error(
-        "big float literal " + Clip(literal) + " has binary exponent " + std::to_string(bin) +
-        ", and MaxBigFloatExponent=" + std::to_string(max_exponent) + " bounds its magnitude");
-  }
+  if (ExceedsBound(bin, max_exponent)) return past_bound(bin);
+  if (below_wire(bin)) return below_wire_error();
   // Scale so the integer quotient has at least prec + 2 bits; the remainder
   // then only ever acts as a sticky bit.
   const int64_t scale = static_cast<int64_t>(prec) + 2 - static_cast<int64_t>(num.BitLen()) +

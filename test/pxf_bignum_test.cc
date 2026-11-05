@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <random>
 #include <string>
@@ -43,6 +44,7 @@ message Wallet {
   pxf.BigInt    balance = 1;
   pxf.Decimal   price   = 2;
   pxf.BigFloat  rate    = 3;
+  map<int32, string> labels = 4;
 }
 )";
 
@@ -380,7 +382,11 @@ std::string DyadicLiteral(uint64_t m, int j, int nudge) {
 // largest p-bit value below 2^e and 2^e itself, and rounds up to 2^e,
 // binary exponent e + 1; a hair below the tie it stays at e, and a hair
 // above it carries. Each is read, its exponent compared, and the bound
-// probed at that exponent, which is where the early arithmetic answers.
+// probed next to that exponent, which is where the early arithmetic answers.
+// protowire-go asks the bound first of big.Float.Parse's exponent, which a
+// hair from the tie can be one past the exact value's (#144), so at the
+// exponent itself the verdict is Go's, and testdata/bigfloat-literals pins
+// it; one past, the literal is taken, and one short it is refused.
 TEST_F(PxfBigNum, BigFloatRoundedExponentIsFoundBeforeDividing) {
   const auto* rate_fd = desc_->FindFieldByName("rate");
   const auto binary_exponent = [&](const pbuf::Message& wallet) {
@@ -403,16 +409,15 @@ TEST_F(PxfBigNum, BigFloatRoundedExponentIsFoundBeforeDividing) {
     const int64_t bin = binary_exponent(*msg);
     ASSERT_EQ(bin, want);
     protowire::pxf::UnmarshalOptions at;
-    at.max_big_float_exponent = static_cast<int>(bin < 0 ? -bin : bin);
+    at.max_big_float_exponent = static_cast<int>(bin < 0 ? -bin : bin) + 1;
     auto ok = NewWallet();
     EXPECT_TRUE(protowire::pxf::Unmarshal(doc, ok.get(), at).ok());
     // A bound of 0 means the default, so the refusal is probed only above 1.
-    if (at.max_big_float_exponent <= 1) return;
-    --at.max_big_float_exponent;
+    at.max_big_float_exponent -= 2;
+    if (at.max_big_float_exponent < 1) return;
     auto past = NewWallet();
     auto refused = protowire::pxf::Unmarshal(doc, past.get(), at);
-    EXPECT_NE(refused.message().find("has binary exponent " + std::to_string(bin) + ","),
-              std::string::npos)
+    EXPECT_NE(refused.message().find("has binary exponent "), std::string::npos)
         << refused.ToString();
   };
 
@@ -438,6 +443,138 @@ TEST_F(PxfBigNum, BigFloatRoundedExponentIsFoundBeforeDividing) {
   check("-0.99999", 3, 1);  // past the tie at 0.9375: rounds to 1
   cases += 6;
   EXPECT_EQ(cases, 1606);
+}
+
+// A literal far past MaxBigFloatExponent is refused in protowire-go's words
+// and in its order (#144): big.Float's range first, then the wire's exponent
+// range, then the bound, with the exponent big.Float.Parse gives it. None of
+// these builds 10^exp10.
+TEST_F(PxfBigNum, BigFloatFarPastTheBoundIsRefusedAsGoRefusesIt) {
+  protowire::pxf::UnmarshalOptions wide;
+  wide.max_numeric_literal_digits = 2000000000;
+  const struct {
+    const char* lit;
+    bool wide;
+    const char* want;
+  } cases[] = {
+      {"1e-100000p64", false, "has binary exponent -332192, and MaxBigFloatExponent=16384 bounds"},
+      {"1e20000p64", false, "has binary exponent 66439, and MaxBigFloatExponent=16384 bounds"},
+      {"1e4940p64", false, "has binary exponent 16411, and MaxBigFloatExponent=16384 bounds"},
+      {"1e-100000p2147483647", true, "is below the wire's exponent range"},
+      {"1e646456993p64", false, "is above big.Float's range"},
+      {"1e-646456993p64", false, "is below the wire's exponent range"},
+      {"1e-646456994p64", false, "is below big.Float's range"},
+      {"1e-999999999", false, "is below big.Float's range"},
+      {"1e-999999999999", false, "invalid big float: 1e-999999999999"},
+      // protowire-go builds 5^999999999 at 2^31 bits for these and takes
+      // minutes; this port answers from an estimate, in the same words.
+      // Within a few powers of two of big.Float's range the estimate cannot
+      // answer, and both ports build the power of five.
+      {"1e-999999999p2147483647", true, "is below big.Float's range"},
+      {"1e646457000p4294967295", true, "is above big.Float's range"},
+  };
+  for (const auto& c : cases) {
+    SCOPED_TRACE(c.lit);
+    auto msg = NewWallet();
+    auto st = protowire::pxf::Unmarshal(std::string("rate = ") + c.lit + "\n",
+                                        msg.get(),
+                                        c.wide ? wide : protowire::pxf::UnmarshalOptions{});
+    ASSERT_FALSE(st.ok());
+    EXPECT_NE(st.message().find(c.want), std::string::npos) << st.ToString();
+  }
+}
+
+// A precision suffix quoted in an error is clipped as protowire-go clips
+// it: 24 bytes and an ellipsis.
+TEST_F(PxfBigNum, PrecisionSuffixIsClippedInErrors) {
+  const std::pair<const char*, const char*> cases[] = {
+      {"price = 1p1234567890123456789012345678901\n",
+       "precision suffix p123456789012345678901234… is allowed only on a pxf.BigFloat, not "
+       "on field \"price\""},
+      {"price = 1p12345\n",
+       "precision suffix p12345 is allowed only on a pxf.BigFloat, not on field \"price\""},
+      {"labels = { 1p1234567890123456789012345678901: \"x\" }\n",
+       "map field \"labels\": a key cannot carry a precision suffix "
+       "(p123456789012345678901234…)"},
+  };
+  for (const auto& [doc, want] : cases) {
+    auto msg = NewWallet();
+    auto st = protowire::pxf::Unmarshal(doc, msg.get());
+    EXPECT_EQ(st.message(), want) << doc;
+  }
+}
+
+// testdata/bigfloat-literals/go_sweep.tsv is protowire-go's verdict on
+// literals near powers of ten, near powers of two and at rounding carries,
+// at precisions from p1 to p13603 and under several bounds: the error text,
+// or the fields it stored. Each row is max_exp, max_digits, literal, result.
+// The literals were built by a Go program from their construction, not from
+// either port's arithmetic, by tools/bigfloat_sweep, whose header says how to
+// regenerate the table.
+TEST_F(PxfBigNum, BigFloatLiteralsMatchProtowireGo) {
+  std::ifstream in(std::string(TESTDATA_DIR) + "/bigfloat-literals/go_sweep.tsv");
+  ASSERT_TRUE(in) << "testdata/bigfloat-literals/go_sweep.tsv";
+  const auto* rate_fd = desc_->FindFieldByName("rate");
+  int rows = 0;
+  int refused = 0;
+  for (std::string line; std::getline(in, line);) {
+    if (line.empty() || line[0] == '#') continue;
+    const size_t a = line.find('\t');
+    const size_t b = line.find('\t', a + 1);
+    const size_t c = line.find('\t', b + 1);
+    ASSERT_NE(c, std::string::npos) << line;
+    const std::string lit = line.substr(b + 1, c - b - 1);
+    const std::string want = line.substr(c + 1);
+    SCOPED_TRACE(lit);
+    protowire::pxf::UnmarshalOptions opts;
+    opts.max_big_float_exponent = std::stoi(line.substr(0, a));
+    opts.max_numeric_literal_digits = std::stoi(line.substr(a + 1, b - a - 1));
+    auto msg = NewWallet();
+    auto st = protowire::pxf::Unmarshal("rate = " + lit + "\n", msg.get(), opts);
+    std::string got;
+    if (!st.ok()) {
+      // Go's error text leads with the position, as check_decode prints it.
+      got = "err ";
+      if (const auto pos = st.position()) {
+        got += std::to_string(pos->first) + ":" + std::to_string(pos->second) + ": ";
+      }
+      got += st.message();
+      ++refused;
+    } else {
+      const pbuf::Message& rate = msg->GetReflection()->GetMessage(*msg, rate_fd);
+      const pbuf::Descriptor* d = rate.GetDescriptor();
+      const pbuf::Reflection* r = rate.GetReflection();
+      static constexpr char kHex[] = "0123456789abcdef";
+      const std::string mantissa = r->GetString(rate, d->FindFieldByName("mantissa"));
+      std::string hex;
+      if (mantissa.size() > 32) {
+        // A wide mantissa is its length and FNV-1a 64 hash, to keep the
+        // table small.
+        uint64_t h = 0xcbf29ce484222325ULL;
+        for (unsigned char ch : mantissa) h = (h ^ ch) * 0x100000001b3ULL;
+        char buf[64];
+        std::snprintf(buf,
+                      sizeof(buf),
+                      "%zuB-fnv1a64-%016llx",
+                      mantissa.size(),
+                      static_cast<unsigned long long>(h));
+        hex = buf;
+      } else {
+        for (unsigned char ch : mantissa) {
+          hex.push_back(kHex[ch / 16]);
+          hex.push_back(kHex[ch % 16]);
+        }
+      }
+      got = "ok " + hex + " " + std::to_string(r->GetInt32(rate, d->FindFieldByName("exponent"))) +
+            " " + std::to_string(r->GetUInt32(rate, d->FindFieldByName("prec"))) + " " +
+            (r->GetBool(rate, d->FindFieldByName("negative")) ? "true" : "false");
+    }
+    EXPECT_EQ(got, want);
+    ++rows;
+  }
+  // A table that did not load cannot pass.
+  EXPECT_GT(rows, 3000);
+  EXPECT_GT(refused, 1000);
 }
 
 }  // namespace

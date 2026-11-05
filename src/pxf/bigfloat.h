@@ -43,6 +43,10 @@ Status ParseBigFloatLiteral(std::string_view literal,
                             int max_exponent,
                             BigFloatFields* out);
 
+// ClipLiteral is protowire-go's clipLiteral, for a literal or a precision
+// suffix quoted in an error: its first 24 bytes and an ellipsis.
+std::string ClipLiteral(std::string_view s);
+
 // BigFloatLimit is the first limit a value with a non-zero prec fails, in
 // the order protowire-go asks them, and the number it fails with. Each
 // writer words the refusal in its own way, as protowire-go does.
