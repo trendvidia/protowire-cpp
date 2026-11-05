@@ -279,6 +279,44 @@ TEST(PxfCarrier, UnusableDefaultIsAViolationNotDropped) {
   }
 }
 
+// protowire-go's TestBigFloatCarrier_BoundAfterRounding, plus the other two
+// limits, each in protowire-go's words. A @default carrier's BigFloat is
+// bounded after rounding to its prec, as Marshal's is (protowire-go#261):
+// 2^54-1 at exponent 16330 is at the bound as stored, and rounds to 2^54,
+// binary exponent 16385, at prec 3.
+TEST(PxfCarrier, BigFloatLimitsInProtowireGosWords) {
+  const std::string ones("\x3f\xff\xff\xff\xff\xff\xff", 7);
+  const std::vector<std::pair<std::string, std::string>> cases = {
+      {Bytes(1, ones) + Int(2, 16330) + Int(3, 3),
+       "@default's big_float_value has binary exponent 16385 after rounding to prec 3, and "
+       "MaxBigFloatExponent=16384 bounds its magnitude"},
+      {Bytes(1, "\x03") + Int(2, 16383) + Int(3, 64),
+       "@default's big_float_value has binary exponent 16385, and MaxBigFloatExponent=16384 "
+       "bounds its magnitude"},
+      {Bytes(1, "\x01") + Int(3, 4000000),
+       "@default's big_float_value has prec 4000000, which renders to 1204121 digits; "
+       "MaxNumericLiteralDigits=4096"},
+      // A zero mantissa is bounded by its digits too.
+      {Int(3, 4000000),
+       "@default's big_float_value has prec 4000000, which renders to 1204121 digits; "
+       "MaxNumericLiteralDigits=4096"},
+  };
+  for (const auto& [arg, want] : cases) {
+    SCOPED_TRACE(want);
+    Schema s({{"f", kString, Default(Bytes(18, arg))}});
+    auto vs = pxf::ValidateDescriptor(s.desc());
+    ASSERT_EQ(vs.size(), 1u);
+    EXPECT_NE(vs[0].ToString().find(want), std::string::npos) << vs[0].ToString();
+  }
+  // Rounding that does not carry stays within the bound.
+  Schema within(
+      {{"f",
+        kString,
+        Default(
+            Bytes(18, Bytes(1, std::string("\x28\0\0\0\0\0\0", 7)) + Int(2, 16330) + Int(3, 3)))}});
+  EXPECT_TRUE(pxf::ValidateDescriptor(within.desc()).empty());
+}
+
 // A garbled tail keeps what was read before it: dropping a @required because
 // a later byte is bad would be the silent non-enforcement this path ends.
 TEST(PxfCarrier, MalformedBytesAreSurvivable) {

@@ -525,32 +525,74 @@ Status ParseBigFloatLiteral(std::string_view literal,
   return Status::OK();
 }
 
+namespace {
+
+// RoundedMantissa is the value's mantissa rounded to prec, and the exponent
+// that goes with it. A round up that carries leaves prec + 1 bits, a power
+// of two, whose BitLen gives the binary exponent it carried to.
+std::pair<Nat, int64_t> RoundedMantissa(const BigFloatFields& f) {
+  Nat m = Nat::FromBytes(f.mantissa);
+  const int64_t exponent = f.exponent + static_cast<int64_t>(RoundToBits(&m, f.prec, false));
+  return {std::move(m), exponent};
+}
+
+}  // namespace
+
+BigFloatLimit CheckBigFloatLimits(const BigFloatFields& f, int max_digits, int max_exponent) {
+  const Nat stored = Nat::FromBytes(f.mantissa);
+  // A zero mantissa is zero at any exponent, so only the digits bound it.
+  if (!stored.IsZero()) {
+    // Rendering costs time that grows with the square of the exponent, so
+    // the exponent is bounded before anything is built (protowire#281).
+    if (const int64_t bin = BinaryExponent(stored, f.exponent); ExceedsBound(bin, max_exponent)) {
+      return {BigFloatLimit::kExponent, bin};
+    }
+    // The bound applies to the value after rounding to prec (protowire#410),
+    // and rounding can carry a mantissa to the next power of two: 2^54-1 at
+    // prec 3 is 2^54. Such a value reads off the wire at the bound and its
+    // literal is past it, which every reader refuses, so the producer fails
+    // (draft -01 § Mandatory Limits, protowire-go#261).
+    const auto [m, exponent] = RoundedMantissa(f);
+    if (const int64_t bin = BinaryExponent(m, exponent); ExceedsBound(bin, max_exponent)) {
+      return {BigFloatLimit::kRoundedExponent, bin};
+    }
+  }
+  if (const int64_t digits = ::protowire::detail::BigFloatPrecDigits(f.prec); digits > max_digits) {
+    return {BigFloatLimit::kDigits, digits};
+  }
+  return {};
+}
+
 StatusOr<std::string> FormatBigFloatLiteral(const BigFloatFields& f,
                                             int max_digits,
                                             int max_exponent) {
   // A precision of zero is zero whatever the other fields say, and the one
   // BigFloat written without a suffix (protowire#410).
   if (f.prec == 0) return std::string(f.negative ? "-0" : "0");
-  const std::string suffix = "p" + std::to_string(f.prec);
+  const std::string prec = std::to_string(f.prec);
+  switch (const BigFloatLimit limit = CheckBigFloatLimits(f, max_digits, max_exponent);
+          limit.kind) {
+    case BigFloatLimit::kExponent:
+      return Status::Error("pxf.BigFloat binary exponent " + std::to_string(limit.value) +
+                           " exceeds MaxBigFloatExponent=" + std::to_string(max_exponent));
+    case BigFloatLimit::kRoundedExponent:
+      return Status::Error("pxf.BigFloat binary exponent " + std::to_string(limit.value) +
+                           " after rounding to prec " + prec +
+                           " exceeds MaxBigFloatExponent=" + std::to_string(max_exponent));
+    case BigFloatLimit::kDigits:
+      return Status::Error("pxf.BigFloat prec " + prec + " bits renders to " +
+                           std::to_string(limit.value) +
+                           " digits; MaxNumericLiteralDigits=" + std::to_string(max_digits));
+    case BigFloatLimit::kNone:
+      break;
+  }
+  const std::string suffix = "p" + prec;
   const std::string sign = f.negative ? "-" : "";
-  Nat m = Nat::FromBytes(f.mantissa);
-  if (m.IsZero()) return sign + "0" + suffix;
-  // Rendering costs time that grows with the square of the exponent, so
-  // both bounds come before anything is built.
-  int64_t exponent = f.exponent;
-  const int64_t bin = BinaryExponent(m, exponent);
-  if (ExceedsBound(bin, max_exponent)) {
-    return Status::Error("pxf.BigFloat binary exponent " + std::to_string(bin) +
-                         " exceeds MaxBigFloatExponent=" + std::to_string(max_exponent));
-  }
-  const int64_t digits = ::protowire::detail::BigFloatPrecDigits(f.prec);
-  if (digits > max_digits) {
-    return Status::Error("pxf.BigFloat prec " + std::to_string(f.prec) + " bits renders to " +
-                         std::to_string(digits) +
-                         " digits; MaxNumericLiteralDigits=" + std::to_string(max_digits));
-  }
   // A mantissa wider than prec is the value rounded to prec.
-  exponent += static_cast<int64_t>(RoundToBits(&m, f.prec, false));
+  auto [m, exponent] = RoundedMantissa(f);
+  if (m.IsZero()) return sign + "0" + suffix;
+  const int64_t bin = BinaryExponent(m, exponent);
+  const int64_t digits = ::protowire::detail::BigFloatPrecDigits(f.prec);
 
   Nat num = exponent >= 0 ? m.Shl(static_cast<uint64_t>(exponent)) : m;
   Nat den = exponent >= 0 ? Nat(1) : Nat(1).Shl(static_cast<uint64_t>(-exponent));
