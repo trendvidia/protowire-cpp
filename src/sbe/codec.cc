@@ -26,7 +26,9 @@ StatusOr<Codec> Codec::New(std::vector<const pb::FileDescriptor*> files, CodecOp
   for (const pb::FileDescriptor* fd : files) {
     auto schema = GetFileUint32Option(fd, kExtSchemaID);
     if (!schema.has_value()) {
-      return Status::Error(std::string(fd->name()) + " missing (sbe.schema_id) file option");
+      if (std::string stale = StaleFileError(fd); !stale.empty()) return Status::Error(stale);
+      return Status::Error("sbe: file " + std::string(fd->name()) +
+                           " missing (sbe.schema_id) option");
     }
     auto version = GetFileUint32Option(fd, kExtVersion).value_or(0);
     for (int i = 0; i < fd->message_type_count(); ++i) {
@@ -39,7 +41,11 @@ StatusOr<Codec> Codec::New(std::vector<const pb::FileDescriptor*> files, CodecOp
 }
 
 Status Codec::RegisterMessage(const pb::Descriptor* md, uint16_t schema_id, uint16_t version) {
-  if (GetMessageUint32Option(md, kExtTemplateID).has_value()) {
+  if (!GetMessageUint32Option(md, kExtTemplateID).has_value()) {
+    // Only a message with a template_id is registered; one that carries it at
+    // the retired number is a stale descriptor, not a plain message.
+    if (std::string stale = StaleMessageError(md); !stale.empty()) return Status::Error(stale);
+  } else {
     auto tmpl = BuildTemplate(md, schema_id, version);
     if (!tmpl.ok()) return tmpl.status();
     auto owned = std::make_unique<MessageTemplate>(std::move(tmpl).consume());

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 TrendVidia, LLC.
 #include "protowire/sbe.h"
+#include "protowire/sbe/annotations.h"
 
 #include <gtest/gtest.h>
 #include "fixture_dir.h"
@@ -8,11 +9,13 @@
 
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <google/protobuf/compiler/importer.h>
+#include <google/protobuf/descriptor.pb.h>
 #include <google/protobuf/dynamic_message.h>
 
 namespace {
@@ -536,6 +539,92 @@ TEST(SbeSigned, NarrowSignedEncodingsKeepTheirSign) {
   ASSERT_TRUE(view.ok()) << view.status().ToString();
   EXPECT_EQ(view->Int("a16"), -1234);
   EXPECT_EQ(view->Int("b32"), -2147483648LL);
+}
+
+}  // namespace
+
+namespace {
+
+// Codec::New diagnoses a descriptor compiled against the pre-v1.12.0
+// annotations, in protowire-go's words (#122).
+const pb::FileDescriptor* BuildStale(pb::DescriptorPool* pool, bool stale_file, bool stale_msg) {
+  pb::FileDescriptorProto proto;
+  proto.set_name("stale.proto");
+  proto.set_package("stale.v1");
+  proto.set_syntax("proto3");
+  pb::DescriptorProto* m = proto.add_message_type();
+  m->set_name("M");
+  pb::FieldDescriptorProto* f = m->add_field();
+  f->set_name("a");
+  f->set_number(1);
+  f->set_type(pb::FieldDescriptorProto::TYPE_INT32);
+  f->set_label(pb::FieldDescriptorProto::LABEL_OPTIONAL);
+  pb::FileOptions* fo = proto.mutable_options();
+  if (stale_file) {
+    fo->GetReflection()->MutableUnknownFields(fo)->AddVarint(50100, 1);
+  } else {
+    fo->GetReflection()->MutableUnknownFields(fo)->AddVarint(protowire::sbe::kExtSchemaID, 1);
+  }
+  if (stale_msg) {
+    pb::MessageOptions* mo = m->mutable_options();
+    mo->GetReflection()->MutableUnknownFields(mo)->AddVarint(50200, 1);
+  }
+  return pool->BuildFile(proto);
+}
+
+TEST(SbeStale, CodecNewDiagnosesStaleDescriptors) {
+  {
+    pb::DescriptorPool pool;
+    const pb::FileDescriptor* fd = BuildStale(&pool, true, false);
+    ASSERT_NE(fd, nullptr);
+    auto codec = protowire::sbe::Codec::New({fd});
+    ASSERT_FALSE(codec.ok());
+    EXPECT_EQ(codec.status().message(),
+              "sbe: file stale.proto carries (sbe.schema_id) at retired option number 50100 "
+              "(registered as 1319 since protowire v1.12.0): the descriptor predates the "
+              "registered extension block and must be recompiled against the current "
+              "sbe/annotations.proto");
+  }
+  {
+    pb::DescriptorPool pool;
+    const pb::FileDescriptor* fd = BuildStale(&pool, false, true);
+    ASSERT_NE(fd, nullptr);
+    auto codec = protowire::sbe::Codec::New({fd});
+    ASSERT_FALSE(codec.ok());
+    EXPECT_EQ(codec.status().message(),
+              "sbe: message stale.v1.M carries (sbe.template_id) at retired option number 50200 "
+              "(registered as 1321 since protowire v1.12.0): the descriptor predates the "
+              "registered extension block and must be recompiled against the current "
+              "sbe/annotations.proto");
+  }
+  {  // Neither: a plain message is skipped, as before.
+    pb::DescriptorPool pool;
+    const pb::FileDescriptor* fd = BuildStale(&pool, false, false);
+    ASSERT_NE(fd, nullptr);
+    EXPECT_TRUE(protowire::sbe::Codec::New({fd}).ok());
+  }
+}
+
+TEST(SbeStale, CodecNewMissingSchemaIDText) {
+  pb::compiler::DiskSourceTree tree;
+  tree.MapPath("", protowire_test::FixtureDir());
+  tree.MapPath("", WKT_PROTO_DIR);
+  {
+    std::ofstream(protowire_test::FixtureDir() + "/declared50100.proto")
+        << "syntax = \"proto3\";\npackage d.v1;\nimport \"google/protobuf/descriptor.proto\";\n"
+           "extend google.protobuf.FileOptions { uint32 old_schema_id = 50100; }\n"
+           "option (old_schema_id) = 1;\nmessage M { int32 a = 1; }\n";
+  }
+  CollectErrors errors;
+  pb::compiler::Importer importer(&tree, &errors);
+  const pb::FileDescriptor* fd = importer.Import("declared50100.proto");
+  ASSERT_NE(fd, nullptr) << errors.last_;
+  // 50100 is declared here, so it is a known option, as Go's compiler stores
+  // it: the file is missing its schema id, not stale.
+  auto codec = protowire::sbe::Codec::New({fd});
+  ASSERT_FALSE(codec.ok());
+  EXPECT_EQ(codec.status().message(),
+            "sbe: file declared50100.proto missing (sbe.schema_id) option");
 }
 
 }  // namespace
