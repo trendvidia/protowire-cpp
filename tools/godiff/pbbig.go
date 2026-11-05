@@ -30,10 +30,9 @@ func floatValue(f *big.Float) string {
 	return fmt.Sprintf("%d %t %d", f.Prec(), f.Signbit(), f.MantExp(nil))
 }
 
-// decodeBig prints what one decode gave. kind says what can be compared: a
-// Decimal is compared by value, at the digits after the colon, and by its bytes.
-// "past" is a value Go's Marshal refuses and this port's cannot yet (#93), or
-// one it crashes on.
+// decodeBig prints what one decode gave, then what Marshal writes or why it
+// refuses. kind says what can be compared: a Decimal is compared by value, at
+// the digits after the colon, and by its bytes.
 func decodeBig(w *bufio.Writer, kind string, data []byte, limit int, remarshal bool) {
 	var h bigHolder
 	if err := (pb.UnmarshalOptions{MaxBigFloatExponent: limit}).Unmarshal(data, &h); err != nil {
@@ -41,7 +40,7 @@ func decodeBig(w *bufio.Writer, kind string, data []byte, limit int, remarshal b
 		return
 	}
 	line := "ok"
-	base, digits, isDec := strings.Cut(kind, ":")
+	_, digits, isDec := strings.Cut(kind, ":")
 	if isDec {
 		n, _ := strconv.Atoi(digits)
 		line += " " + h.D.FloatString(n)
@@ -51,7 +50,7 @@ func decodeBig(w *bufio.Writer, kind string, data []byte, limit int, remarshal b
 			line += " " + floatValue(&h.R[i])
 		}
 	}
-	if remarshal && base != "past" {
+	if remarshal {
 		out, err := pb.Marshal(&h)
 		if err != nil {
 			line += " " + status(err)

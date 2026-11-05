@@ -34,8 +34,8 @@ bf unknown-field 0a120a011910fbffffffffffffffff0118404803
 bf duplicate-fields 0a200a011910fbffffffffffffffff0118400a010710ffffffffffffffffff011820
 bf two-records 0a120a011910fbffffffffffffffff01184020010a100a010710ffffffffffffffffff011820
 bf repeated-elements 22100a011910fbffffffffffffffff011840220022022001
-past carries-past-bound 0a080a01ff10f87f1801
-past carries-past-int32 0a0b0a01ff10f7ffffff071801
+bf carries-past-bound 0a080a01ff10f87f1801
+bf carries-past-int32 0a0b0a01ff10f7ffffff071801
 bf prec-past-uint32 0a140a011910fbffffffffffffffff01188080808010
 bf prec-max 0a140a011910fbffffffffffffffff0118ffffffff0f
 bf prec-at-bound 0a110a011910fbffffffffffffffff0118a36a
