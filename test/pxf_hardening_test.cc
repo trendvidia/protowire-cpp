@@ -217,6 +217,34 @@ TEST(HardeningDataset, RowBytesLiteralUnderTheCallersLimit) {
   EXPECT_TRUE(first_row(0).ok()) << first_row(0).ToString();  // 0 is the default
 }
 
+// The header too: a @header block before @dataset is parsed under the
+// caller's limits, so Create refuses it as protowire-go's NewDatasetReader does.
+TEST(HardeningDataset, HeaderUnderTheCallersLimits) {
+  const std::string bytes_doc =
+      "@header x.H { raw = b\"" + std::string(256, 'A') + "\" }\n@dataset x.Row ( raw )\n( 1 )\n";
+  const std::string deep_doc =
+      "@header x.H { a { b { c { d = 1 } } } }\n@dataset x.Row ( d )\n( 1 )\n";
+  auto create = [](const std::string& doc, UnmarshalOptions opts) {
+    std::istringstream in(doc);
+    return protowire::pxf::DatasetReader::Create(&in, opts).status();
+  };
+  UnmarshalOptions opts;
+  opts.max_bytes_literal_length = 191;
+  protowire::Status st = create(bytes_doc, opts);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("bytes literal decodes to more than MaxBytesLiteralLength=191 bytes"),
+            std::string::npos)
+      << st.ToString();
+  EXPECT_TRUE(create(bytes_doc, {}).ok());
+  opts = {};
+  opts.max_nesting_depth = 3;
+  st = create(deep_doc, opts);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("MaxNestingDepth=3"), std::string::npos) << st.ToString();
+  opts.max_nesting_depth = 4;
+  EXPECT_TRUE(create(deep_doc, opts).ok()) << create(deep_doc, opts).ToString();
+}
+
 TEST_F(Hardening, RepeatedCountBound) {
   std::string list = "values = [";
   for (int i = 0; i < 16; ++i) list += (i ? ", " : "") + std::to_string(i);

@@ -13,7 +13,7 @@ number says nothing about any other port. See the Releases section of
 
 ### Fixed
 
-- **`DatasetReader` reads a row under the caller's `max_bytes_literal_length`** (#160), as protowire-go does. A row's cells were parsed under the default `kMaxBytesLiteralLength` whatever the options said. A caller who lowered the limit still got a row whose `b"…"` cell was past it, and a caller who raised it had that cell refused. `0` still means the default. Only the nesting depth used to reach the row parser.
+- **`DatasetReader` reads a row under the caller's `max_bytes_literal_length`** (#160), as protowire-go does. A row's cells were parsed under the default `kMaxBytesLiteralLength` whatever the options said. A caller who lowered the limit still got a row whose `b"…"` cell was past it, and a caller who raised it had that cell refused. `0` still means the default. Only the nesting depth used to reach the row parser. The header (a `@header` block and the `@dataset` line) was parsed under the defaults for both limits. It is now parsed under the caller's `max_nesting_depth` and `max_bytes_literal_length`, so `Create` refuses such a header as protowire-go's `NewDatasetReader` does, with the same text and position.
 
 ## [2.0.0] — 2026-11-05
 
