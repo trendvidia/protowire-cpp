@@ -120,7 +120,7 @@ std::string Bytes(const pbuf::Message& m) {
   pbuf::io::StringOutputStream raw(&out);
   pbuf::io::CodedOutputStream coded(&raw);
   coded.SetSerializationDeterministic(true);
-  m.SerializeToCodedStream(&coded);
+  EXPECT_TRUE(m.SerializeToCodedStream(&coded));
   return out;
 }
 

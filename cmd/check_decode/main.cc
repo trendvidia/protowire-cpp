@@ -10,10 +10,10 @@
 //
 // Contract:
 //
-//   check_decode --format <pxf|pxf-pb|pb|pb-render|pb-text|sbe|envelope> \
-//                --schema <fully.qualified.MessageType> \
-//                --proto  <path-to-adversarial.proto> \
-//                --input  <path> \
+//   check_decode --format <pxf|pxf-pb|pb|pb-render|pb-text|sbe|envelope>
+//                --schema <fully.qualified.MessageType>
+//                --proto  <path-to-adversarial.proto>
+//                --input  <path>
 //                [--limit NAME=VALUE ...]
 //
 //   Exit 0 → input was accepted (decode succeeded)

@@ -13,13 +13,13 @@ add_executable(protowire_detail_test
   detail_rfc3339_test.cc
   detail_duration_test.cc)
 target_link_libraries(protowire_detail_test PRIVATE
-  protowire_detail GTest::gtest GTest::gtest_main)
+  protowire_detail GTest::gtest_main)
 gtest_discover_tests(protowire_detail_test)
 
 if(TARGET protowire_pb AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pb_test.cc)
   add_executable(protowire_pb_test pb_test.cc pb_stream_test.cc pb_utf8_test.cc pb_values_table_test.cc)
   target_link_libraries(protowire_pb_test PRIVATE
-    protowire_pb GTest::gtest GTest::gtest_main)
+    protowire_pb GTest::gtest_main)
   target_compile_definitions(protowire_pb_test PRIVATE
     TESTDATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../testdata")
   gtest_discover_tests(protowire_pb_test)
@@ -28,7 +28,7 @@ endif()
 if(TARGET protowire_envelope AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/envelope_test.cc)
   add_executable(protowire_envelope_test envelope_test.cc)
   target_link_libraries(protowire_envelope_test PRIVATE
-    protowire_envelope GTest::gtest GTest::gtest_main)
+    protowire_envelope GTest::gtest_main)
   gtest_discover_tests(protowire_envelope_test)
 endif()
 
@@ -52,7 +52,7 @@ if(TARGET protowire_pxf)
     add_executable(protowire_pxf_test ${_pxf_test_srcs})
     target_link_libraries(protowire_pxf_test PRIVATE
       protowire_pxf protobuf::libprotoc
-      GTest::gtest GTest::gtest_main)
+      GTest::gtest_main)
     target_compile_definitions(protowire_pxf_test PRIVATE
       TESTDATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../testdata"
       PROTO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../proto"
@@ -74,7 +74,7 @@ if(TARGET protowire_sbe)
     add_executable(protowire_sbe_test ${_sbe_test_srcs})
     target_link_libraries(protowire_sbe_test PRIVATE
       protowire_sbe protobuf::libprotoc
-      GTest::gtest GTest::gtest_main)
+      GTest::gtest_main)
     target_compile_definitions(protowire_sbe_test PRIVATE
       PROTO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../proto"
       WKT_PROTO_DIR="${Protobuf_INCLUDE_DIR}")

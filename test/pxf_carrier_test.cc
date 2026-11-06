@@ -63,10 +63,10 @@ std::string Other() {
 struct FieldSpec {
   std::string name;
   pb::FieldDescriptorProto::Type type;
-  std::string carrier;
-  std::string bracket_default;  // (pxf.default) at extension 1315
+  std::string carrier = {};
+  std::string bracket_default = {};  // (pxf.default) at extension 1315
   bool bracket_required = false;
-  std::string type_name;
+  std::string type_name = {};
 };
 
 // Schema builds one message M in a pool of its own.

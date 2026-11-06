@@ -1380,7 +1380,9 @@ TEST(RewriterKeyedComments, AnonCommentsSurviveEveryEdit) {
           ASSERT_TRUE(pxf::Parse(got).ok()) << got;
           ++checked;
           for (const std::string& k : keys) {
-            if (between) EXPECT_TRUE(Has(got, "// before " + k + "\n")) << got;
+            if (between) {
+              EXPECT_TRUE(Has(got, "// before " + k + "\n")) << got;
+            }
             if (trail.empty() || k == gone) continue;
             bool ok = false;
             std::istringstream lines(got);

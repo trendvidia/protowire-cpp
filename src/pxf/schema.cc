@@ -41,7 +41,8 @@ void WalkEnumsForFile(std::string_view path,
         out->push_back(Violation{std::string(path),
                                  std::string(v->full_name()),
                                  std::string(v->name()),
-                                 ViolationKind::kEnumValue});
+                                 ViolationKind::kEnumValue,
+                                 /*detail=*/{}});
       }
     }
   }
@@ -58,7 +59,8 @@ void WalkEnumsForMessage(std::string_view path,
         out->push_back(Violation{std::string(path),
                                  std::string(v->full_name()),
                                  std::string(v->name()),
-                                 ViolationKind::kEnumValue});
+                                 ViolationKind::kEnumValue,
+                                 /*detail=*/{}});
       }
     }
   }
@@ -241,7 +243,8 @@ void WalkMessages(std::string_view path, const pb::Descriptor* md, std::vector<V
       out->push_back(Violation{std::string(path),
                                std::string(f->full_name()),
                                std::string(f->name()),
-                               ViolationKind::kField});
+                               ViolationKind::kField,
+                               /*detail=*/{}});
     }
     // A field declared with no options shares the default instance and can
     // carry no annotation. Most fields in a closure are like this, and this
@@ -263,7 +266,8 @@ void WalkMessages(std::string_view path, const pb::Descriptor* md, std::vector<V
       out->push_back(Violation{std::string(path),
                                std::string(o->full_name()),
                                std::string(o->name()),
-                               ViolationKind::kOneof});
+                               ViolationKind::kOneof,
+                               /*detail=*/{}});
     }
   }
   for (int i = 0; i < md->nested_type_count(); ++i) {
