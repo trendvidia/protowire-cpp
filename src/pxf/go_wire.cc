@@ -13,6 +13,7 @@
 #include <google/protobuf/io/coded_stream.h>
 #include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/unknown_field_set.h>
+#include <google/protobuf/wire_format.h>
 #include <google/protobuf/wire_format_lite.h>
 
 namespace protowire::pxf {
@@ -199,9 +200,8 @@ void WriteMessage(const pb::Message& msg, pb::io::CodedOutputStream* out) {
   r->ListFields(msg, &fields);
   std::sort(fields.begin(), fields.end(), GoFieldLess);
   for (const FieldDescriptor* fd : fields) WriteField(msg, fd, out);
-  std::string unknown;
-  r->GetUnknownFields(msg).SerializeToString(&unknown);
-  out->WriteString(unknown);
+  // Straight into the stream: no copy, and no result to drop (#158).
+  pb::internal::WireFormat::SerializeUnknownFields(r->GetUnknownFields(msg), out);
 }
 
 }  // namespace
