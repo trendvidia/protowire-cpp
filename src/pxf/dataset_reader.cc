@@ -474,7 +474,9 @@ Status DatasetReader::Next(DatasetRow* out) {
       auto parsed =
           ParseDatasetRow(row_bytes,
                           static_cast<int>(columns_.size()),
-                          opts_.max_nesting_depth > 0 ? opts_.max_nesting_depth : kMaxNestingDepth);
+                          opts_.max_nesting_depth > 0 ? opts_.max_nesting_depth : kMaxNestingDepth,
+                          opts_.max_bytes_literal_length > 0 ? opts_.max_bytes_literal_length
+                                                             : kMaxBytesLiteralLength);
       // Advance past the consumed bytes whether parse succeeded or not
       // — on failure we don't want to retry the same bad row forever.
       pending_.erase(0, static_cast<size_t>(end) + 1);

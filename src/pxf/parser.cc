@@ -1153,8 +1153,11 @@ StatusOr<DatasetDirective> ParseDatasetAt(Lexer* lex, Token* current, int max_de
   return tbl;
 }
 
-StatusOr<DatasetRow> ParseDatasetRow(std::string_view row, int expected, int max_depth) {
-  Parser p(row, max_depth, kMaxBytesLiteralLength);
+StatusOr<DatasetRow> ParseDatasetRow(std::string_view row,
+                                     int expected,
+                                     int max_depth,
+                                     int max_bytes_literal) {
+  Parser p(row, max_depth, max_bytes_literal);
   int end = 0;
   return p.ParseTableRow(expected, &end);
 }

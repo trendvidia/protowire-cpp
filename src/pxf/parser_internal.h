@@ -20,8 +20,12 @@ namespace protowire::pxf {
 // token *lex produces, and leaves both on the token after it.
 StatusOr<DatasetDirective> ParseDatasetAt(Lexer* lex, Token* current, int max_depth);
 
-// ParseDatasetRow parses one `( cell, ... )` of expected cells.
-StatusOr<DatasetRow> ParseDatasetRow(std::string_view row, int expected, int max_depth);
+// ParseDatasetRow parses one `( cell, ... )` of expected cells, under the
+// caller's nesting and bytes-literal limits.
+StatusOr<DatasetRow> ParseDatasetRow(std::string_view row,
+                                     int expected,
+                                     int max_depth,
+                                     int max_bytes_literal);
 
 // CheckDescriptorSchema runs ValidateDescriptor and joins any violations
 // into one error, the bind-time check Unmarshal and DatasetReader share.

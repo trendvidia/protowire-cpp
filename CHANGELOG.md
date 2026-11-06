@@ -11,6 +11,10 @@ number says nothing about any other port. See the Releases section of
 
 ## [Unreleased]
 
+### Fixed
+
+- **`DatasetReader` reads a row under the caller's `max_bytes_literal_length`** (#160), as protowire-go does. A row's cells were parsed under the default `kMaxBytesLiteralLength` whatever the options said. A caller who lowered the limit still got a row whose `b"…"` cell was past it, and a caller who raised it had that cell refused. `0` still means the default. Only the nesting depth used to reach the row parser.
+
 ## [2.0.0] — 2026-11-05
 
 A major release, because `pb::Marshal` now returns `StatusOr<std::vector<uint8_t>>` and every caller must change (#93). `pb::Marshal` and `pxf::Marshal` refuse what a decoder at the default limits refuses, instead of writing it. A PXF `BigFloat` literal is refused in protowire-go's words and order of checks, and a big-number message no longer counts as a nesting level. Several changes narrow what decodes, encodes or binds; each says so. This release also carries the change prepared as 1.2.1, which was never tagged.
