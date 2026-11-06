@@ -23,7 +23,10 @@ jobs:
   # ---------------------------------------------------------------------
   build:
     name: ${{ matrix.os }} / ${{ matrix.compiler }}
+    # Each job's timeout is about twice its slowest recent run, so a
+    # wedged runner fails in an hour at most, not GitHub's six (#156).
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -107,6 +110,7 @@ jobs:
   sanitizers:
     name: ASan + UBSan (Linux/clang)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -141,6 +145,7 @@ jobs:
   go-differential:
     name: Differential against protowire-go
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -181,6 +186,7 @@ jobs:
   clang-format:
     name: clang-format check
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
 
@@ -203,6 +209,7 @@ jobs:
   clang-tidy:
     name: clang-tidy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -234,6 +241,7 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
