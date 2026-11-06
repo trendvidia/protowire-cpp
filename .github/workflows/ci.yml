@@ -96,7 +96,10 @@ jobs:
             "-DVCPKG_TARGET_TRIPLET=x64-windows"
 
       - name: Build
-        run: cmake --build build --config Release -j
+        # A bare -j starts every compile at once and runs the runner out of
+        # memory (#156). Bound it by the cores. bash, so this runs on Windows too.
+        shell: bash
+        run: cmake --build build --config Release -j "$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
       - name: Test
         run: ctest --test-dir build --build-config Release --output-on-failure
@@ -133,7 +136,7 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: |
-          cmake --build build-asan -j
+          cmake --build build-asan -j "$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
           ctest --test-dir build-asan --output-on-failure
 
   # ---------------------------------------------------------------------
@@ -172,7 +175,7 @@ jobs:
       - name: Build pxf_diff
         run: |
           cmake -S . -B build -DPROTOWIRE_BUILD_TESTS=OFF
-          cmake --build build --target pxf_diff -j
+          cmake --build build --target pxf_diff -j "$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
       - name: Compare
         env:
@@ -226,7 +229,7 @@ jobs:
         run: cmake -S . -B build-tidy -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: Generate proto-derived sources (clang-tidy needs them present)
-        run: cmake --build build-tidy --target protowire_proto -j 2>/dev/null || cmake --build build-tidy -j
+        run: cmake --build build-tidy --target protowire_proto -j "$(nproc 2>/dev/null || sysctl -n hw.ncpu)" 2>/dev/null || cmake --build build-tidy -j "$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
       - name: Run clang-tidy
         run: |
@@ -268,7 +271,7 @@ jobs:
           # disambiguate test binaries from each other.
           LLVM_PROFILE_FILE: "${{ github.workspace }}/build-cov/coverage/%m_%p.profraw"
         run: |
-          cmake --build build-cov -j
+          cmake --build build-cov -j "$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
           mkdir -p build-cov/coverage
           ctest --test-dir build-cov --output-on-failure
           echo "--- profraw files produced ---"
