@@ -21,6 +21,16 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
 endif()
 
+# Abseil, pulled in by protobuf, uses Clang's _Nonnull and diagnose_if.
+# Because protobuf's headers come in as -I (above), -Wpedantic flags each use
+# in every file that includes protobuf: 460 warnings per file, about 35,000
+# per macOS CI build (#156). Both only say that a Clang extension is in use,
+# which is noise when the compiler is Clang. The GCC build still checks our
+# own code for GCC portability.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wno-nullability-extension -Wno-gcc-compat)
+endif()
+
 if(MSVC)
   # /utf-8           — treat source files (and narrow string literals)
   #                    as UTF-8 so literal multi-byte characters
