@@ -144,32 +144,57 @@ Status DecodeBothWays(const Schema& schema,
 // is 3.21, which cannot compile nulls_editions.proto. Editions presence goes
 // through FieldDescriptor::has_presence like every other syntax, so what a
 // runtime that old skips is one spelling of a rule it still enforces.
+// The editions fixtures have tests of their own, which say so when they skip
+// (#154), so a run on an older runtime never reports them as run.
 constexpr bool kHasEditions = GOOGLE_PROTOBUF_VERSION >= 5027000;
 
-std::vector<std::string> NullProtos() {
-  std::vector<std::string> protos = {"nulls.proto", "nulls_proto2.proto"};
-  if (kHasEditions) protos.push_back("nulls_editions.proto");
-  return protos;
-}
+const std::vector<std::string> kNullProtos = {"nulls.proto", "nulls_proto2.proto"};
+const std::vector<std::string> kNullEditionsProtos = {
+    "nulls.proto", "nulls_proto2.proto", "nulls_editions.proto"};
 
 bool NeedsEditions(const fs::path& p) {
   return p.filename().string().find("editions") != std::string::npos;
 }
 
+bool WithoutEditions(const fs::path& p) {
+  return !NeedsEditions(p);
+}
+
+// The names of the fixtures in dir that need editions, for a skip message.
+std::string EditionsFixtures(const std::string& dir) {
+  std::string names;
+  for (const auto& path : Fixtures(dir)) {
+    if (!NeedsEditions(path)) continue;
+    if (!names.empty()) names += ", ";
+    names += path.filename().string();
+  }
+  return names;
+}
+
+// Skips the calling test, naming the runtime and what it leaves unrun.
+#define SKIP_WITHOUT_EDITIONS(dir)                          \
+  if (!kHasEditions)                                        \
+  GTEST_SKIP() << "libprotobuf " << GOOGLE_PROTOBUF_VERSION \
+               << " predates editions (5027000); not run: " << EditionsFixtures(dir)
+
 // ParseVerdict says what the schema-less Parse of a directory must do.
 enum class ParseVerdict { kSameAsDecoder, kAccepts };
 
+// Runs the fixtures in dir that select accepts, which defaults to all of them.
 void RunDecoderCorpus(const std::string& dir,
                       const std::vector<std::string>& protos,
-                      ParseVerdict parse) {
+                      ParseVerdict parse,
+                      bool (*select)(const fs::path&) = nullptr) {
   Schema schema(dir, protos);
-  auto files = Fixtures(dir);
+  std::vector<fs::path> files;
+  for (const auto& path : Fixtures(dir)) {
+    if (select == nullptr || select(path)) files.push_back(path);
+  }
   ASSERT_FALSE(files.empty());
   int ran = 0;
   for (const auto& path : files) {
     SCOPED_TRACE(path.filename().string());
     ++ran;
-    if (!kHasEditions && NeedsEditions(path)) continue;
     std::string text = ReadFile(path);
     Status st = DecodeBothWays(schema, text);
     if (IsReject(path)) {
@@ -196,7 +221,12 @@ TEST(PxfCorpus, Strings) {
 }
 
 TEST(PxfCorpus, Nulls) {
-  RunDecoderCorpus("nulls", NullProtos(), ParseVerdict::kAccepts);
+  RunDecoderCorpus("nulls", kNullProtos, ParseVerdict::kAccepts, WithoutEditions);
+}
+
+TEST(PxfCorpus, NullsEditions) {
+  SKIP_WITHOUT_EDITIONS("nulls");
+  RunDecoderCorpus("nulls", kNullEditionsProtos, ParseVerdict::kAccepts, NeedsEditions);
 }
 
 TEST(PxfCorpus, Duplicates) {
@@ -405,11 +435,14 @@ TEST(PxfCorpus, AnyBodyDoesNotMarkRootPresence) {
 
 // Every accept fixture in nulls/ binds null and nothing else: the message
 // stays empty and a full decode reports the field present-but-null.
-TEST(PxfCorpus, NullsLeaveTheFieldUnsetAndNull) {
-  Schema schema("nulls", NullProtos());
-  int ran = 0;
+// Sets *ran to how many fixtures it checked.
+void CheckNullsBindNull(const std::vector<std::string>& protos,
+                        bool (*select)(const fs::path&),
+                        int* ran) {
+  Schema schema("nulls", protos);
+  *ran = 0;
   for (const auto& path : Fixtures("nulls")) {
-    if (IsReject(path) || (!kHasEditions && NeedsEditions(path))) continue;
+    if (IsReject(path) || !select(path)) continue;
     SCOPED_TRACE(path.filename().string());
     std::string text = ReadFile(path);
     auto doc = pxf::Parse(text);
@@ -421,9 +454,21 @@ TEST(PxfCorpus, NullsLeaveTheFieldUnsetAndNull) {
     ASSERT_TRUE(r.ok()) << r.status().ToString();
     EXPECT_TRUE(r->IsNull(a->key));
     EXPECT_EQ(msg->ByteSizeLong(), 0u);
-    ++ran;
+    ++*ran;
   }
-  EXPECT_EQ(ran, kHasEditions ? 8 : 7);
+}
+
+TEST(PxfCorpus, NullsLeaveTheFieldUnsetAndNull) {
+  int ran = 0;
+  CheckNullsBindNull(kNullProtos, WithoutEditions, &ran);
+  EXPECT_EQ(ran, 7);
+}
+
+TEST(PxfCorpus, NullsEditionsLeaveTheFieldUnsetAndNull) {
+  SKIP_WITHOUT_EDITIONS("nulls");
+  int ran = 0;
+  CheckNullsBindNull(kNullEditionsProtos, NeedsEditions, &ran);
+  EXPECT_EQ(ran, 1);
 }
 
 // An escaped line feed in a cell survives BindRow's trip through PXF text.
