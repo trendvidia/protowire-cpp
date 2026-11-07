@@ -13,6 +13,7 @@
 #include <fstream>
 #include <memory>
 #include <sstream>
+#include <streambuf>
 #include <string>
 
 #include <google/protobuf/compiler/importer.h>
@@ -659,6 +660,99 @@ TEST(DatasetReaderScan, HeaderIsLinear) {
     ASSERT_TRUE(tr.ok()) << name << ": " << tr.status().ToString();
     EXPECT_EQ((*tr)->Columns(), std::vector<std::string>{"a"}) << name;
     const size_t scanned = protowire::pxf::DatasetReaderTestPeer::Scanned(**tr);
+    EXPECT_GT(scanned, 0u) << name;
+    EXPECT_LE(scanned, 2 * in.size()) << name;
+  }
+}
+
+// ---- A stream that stays open (#171) ----------------------------------------
+
+// OneByteBuf serves its bytes one per read, as a pipe fed a byte at a time
+// does. Asked for a byte past them, it records it: on a live stream that read
+// would block until more bytes came, or forever.
+class OneByteBuf : public std::streambuf {
+ public:
+  explicit OneByteBuf(std::string data) : data_(std::move(data)) {}
+  bool asked_past_end() const { return asked_past_end_; }
+
+ protected:
+  int_type underflow() override {
+    if (gptr() != nullptr && gptr() < egptr()) return traits_type::to_int_type(*gptr());
+    if (next_ >= data_.size()) {
+      asked_past_end_ = true;
+      return traits_type::eof();
+    }
+    char* at = &data_[next_++];
+    setg(at, at, at + 1);
+    return traits_type::to_int_type(*at);
+  }
+
+ private:
+  std::string data_;
+  size_t next_ = 0;
+  bool asked_past_end_ = false;
+};
+
+// A row whose `)` is the last byte read is returned at once: the reader must
+// not wait for bytes that may never come (a live, append-only stream). The
+// rows are protowire-go's (TestDatasetReader_CompleteRowIsNotHeldBack); each
+// arrives a byte per read, so every byte of it ends a read.
+TEST(DatasetReaderLive, CompleteRowIsNotHeldBack) {
+  const char* rows[] = {
+      "(1)",
+      "(\"\")",
+      R"(("a\"b"))",
+      "(abc)",
+      "(2026-10-23T00:00:00Z)",
+      "(5s)",
+      "(-1.5e3)",
+      "(b\"QQ==\")",
+      "({ k = [1, 2] })",
+      "(\"\"\"\nx\n\"\"\")",
+      "(1 /* c */)",
+      "(1h.5m)",
+      "(1\xc2\xb5s)",
+      "(-inf)",
+      R"(("\x41\U0001F600"))",
+      "(aaaaaaaaaaaa)",
+  };
+  for (const char* row : rows) {
+    OneByteBuf buf(std::string("@dataset T (a)\n") + row);
+    std::istream src(&buf);
+    auto tr = DatasetReader::Create(&src);
+    ASSERT_TRUE(tr.ok()) << row << ": " << tr.status().ToString();
+    DatasetRow got;
+    ASSERT_TRUE((*tr)->Next(&got).ok()) << row << ": " << (*tr)->StickyStatus().ToString();
+    EXPECT_FALSE((*tr)->Done()) << row;
+    EXPECT_FALSE(buf.asked_past_end()) << row << ": the complete row waited for more input";
+  }
+}
+
+// The same scans stay linear when every read returns one byte, as protowire-go
+// holds them with iotest.OneByteReader.
+TEST(DatasetReaderScan, IsLinearOneByteAtATime) {
+  const std::pair<const char*, std::string> shapes[] = {
+      {"short tokens",
+       [] {
+         std::string s;
+         for (int i = 0; i < (128 << 10); ++i) s += "1 ";
+         return s;
+       }()},
+      {"unterminated string", "\"" + std::string(256 << 10, 'a')},
+      {"line comment", "1 # " + std::string(256 << 10, 'x')},
+      {"one long number", std::string(256 << 10, '7')},
+  };
+  for (const auto& [name, body] : shapes) {
+    const std::string in = "@dataset T (a)\n(" + body;
+    OneByteBuf buf(in);
+    std::istream src(&buf);
+    auto tr = DatasetReader::Create(&src);
+    ASSERT_TRUE(tr.ok()) << name << ": " << tr.status().ToString();
+    size_t& scanned = protowire::pxf::DatasetReaderTestPeer::Scanned(**tr);
+    scanned = 0;
+    DatasetRow row;
+    EXPECT_FALSE((*tr)->Next(&row).ok()) << name << ": an unclosed row was accepted";
+    // Short tokens in one-byte reads come to about 1.5x.
     EXPECT_GT(scanned, 0u) << name;
     EXPECT_LE(scanned, 2 * in.size()) << name;
   }
