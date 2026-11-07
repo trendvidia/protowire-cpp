@@ -118,7 +118,11 @@ class DatasetReader {
   Status Pull(size_t n);
 
   std::istream* src_ = nullptr;
+  Position PosAt(size_t i) const;
+  void Consume(size_t n);
+
   std::string pending_;  // bytes pulled from src_ but not yet consumed
+  Position base_;        // where pending_[0] is in the stream
   bool src_eof_ = false;
   bool finished_ = false;
   Status err_;

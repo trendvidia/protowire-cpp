@@ -17,6 +17,14 @@ class Lexer {
   // The input must outlive the lexer; tokens reference into it.
   explicit Lexer(std::string_view input) : input_(input) {}
 
+  // A lexer over a piece of a larger document that starts at `start` in it,
+  // as a dataset row does in its stream. Positions count from `start`: the
+  // first byte is at start.line and start.column, and offsets add
+  // start.offset. Input(), Mark and RepositionTo still index the piece
+  // itself.
+  Lexer(std::string_view input, Position start)
+      : input_(input), line_(start.line), column_(start.column), start_(start) {}
+
   Token Next();
 
   // Bounds the decoded length of a b"…" literal (HARDENING.md
@@ -46,7 +54,9 @@ class Lexer {
     column_ = m.column;
   }
 
-  Position CurrentPos() const { return Position{line_, column_, static_cast<int>(pos_)}; }
+  Position CurrentPos() const {
+    return Position{line_, column_, start_.offset + static_cast<int>(pos_)};
+  }
 
   // Raw input view — used by parseDirective to slice the body bytes
   // between '{' and '}' once the matching brace has been located.
@@ -59,8 +69,8 @@ class Lexer {
   void RepositionTo(int target) {
     if (target < static_cast<int>(pos_)) {
       pos_ = 0;
-      line_ = 1;
-      column_ = 1;
+      line_ = start_.line;
+      column_ = start_.column;
     }
     while (static_cast<int>(pos_) < target && pos_ < input_.size()) {
       uint8_t ch = static_cast<uint8_t>(input_[pos_++]);
@@ -109,6 +119,7 @@ class Lexer {
   size_t pos_ = 0;
   int line_ = 1;
   int column_ = 1;
+  Position start_{1, 1, 0};  // where input_[0] is in the document
   int max_bytes_literal_ = kMaxBytesLiteralLength;
   std::deque<std::string> owned_;  // pointer-stable storage
   std::vector<Error>* errors_ = nullptr;

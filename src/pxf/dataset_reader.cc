@@ -476,10 +476,11 @@ Status DatasetReader::Next(DatasetRow* out) {
                           static_cast<int>(columns_.size()),
                           opts_.max_nesting_depth > 0 ? opts_.max_nesting_depth : kMaxNestingDepth,
                           opts_.max_bytes_literal_length > 0 ? opts_.max_bytes_literal_length
-                                                             : kMaxBytesLiteralLength);
+                                                             : kMaxBytesLiteralLength,
+                          PosAt(static_cast<size_t>(start)));
       // Advance past the consumed bytes whether parse succeeded or not
       // — on failure we don't want to retry the same bad row forever.
-      pending_.erase(0, static_cast<size_t>(end) + 1);
+      Consume(static_cast<size_t>(end) + 1);
       if (!parsed.ok()) {
         err_ = parsed.status();
         return err_;
@@ -538,6 +539,28 @@ std::unique_ptr<std::istream> DatasetReader::Tail() {
 
 // ---- DatasetReader internals ------------------------------------------------
 
+// PosAt is the stream position of pending_[i], counted as the lexer counts:
+// a byte is a column, and a newline starts the next line.
+Position DatasetReader::PosAt(size_t i) const {
+  Position p = base_;
+  for (size_t k = 0; k < i; ++k) {
+    if (pending_[k] == '\n') {
+      ++p.line;
+      p.column = 1;
+    } else {
+      ++p.column;
+    }
+  }
+  p.offset += static_cast<int>(i);
+  return p;
+}
+
+// Consume drops the first n pending bytes, moving base_ past them.
+void DatasetReader::Consume(size_t n) {
+  base_ = PosAt(n);
+  pending_.erase(0, n);
+}
+
 Status DatasetReader::Pull(size_t n) {
   if (src_eof_) return Status::OK();
   std::string buf(n, '\0');
@@ -575,7 +598,7 @@ Status DatasetReader::ReadHeader() {
       type_ = std::move(doc->datasets[0].type);
       columns_ = std::move(doc->datasets[0].columns);
       directives_ = std::move(doc->directives);
-      pending_.erase(0, static_cast<size_t>(header_end) + 1);
+      Consume(static_cast<size_t>(header_end) + 1);
       return Status::OK();
     }
     if (src_eof_) {
