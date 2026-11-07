@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string_view>
 
 #include <google/protobuf/descriptor.h>
@@ -26,6 +27,22 @@ StatusOr<DatasetDirective> ParseDatasetAt(Lexer* lex, Token* current, int max_de
 // because the body can never close, a simple string or bytes literal meeting
 // a newline, *failed (if given) is set; otherwise the input ends first.
 int FindMatchingBrace(std::string_view input, int open_offset, bool* failed = nullptr);
+
+// BraceMatch matches an @proto body's braces as FindMatchingBrace does, and
+// can resume: Scan reads input from i and returns where it stopped, with
+// *state kClosed at the matching `}`, kFailed where the body can never
+// close, or kOpen where the input ended first, to scan again from there
+// once more input has arrived. Mirrors protowire-go's braceMatch.
+struct BraceMatch {
+  enum class State : uint8_t { kOpen, kClosed, kFailed };
+  enum class Mode : uint8_t { kCode, kString, kTripleString, kBytes, kLineComment, kBlockComment };
+  int Scan(std::string_view input, int i, State* state);
+
+  int depth = 1;  // the opening `{` is read
+  Mode mode = Mode::kCode;
+  bool esc = false;  // in a string, after a backslash
+  int run = 0;       // quotes just seen in a triple string, or 1 after a '*'
+};
 
 // The error for anything after a @dataset header that is neither a row nor
 // a directive (draft §3.4.4).

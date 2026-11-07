@@ -323,7 +323,11 @@ void DatasetReader::Consume(size_t n) {
   const int k = static_cast<int>(n);
   scan_pos_ = std::max(scan_pos_ - k, 0);
   if (row_start_ >= 0) row_start_ = row_start_ >= k ? row_start_ - k : -1;
+  // Bytes are consumed only between tokens, when none is waiting.
+  waiting_ = false;
 }
+
+DatasetReader::~DatasetReader() = default;
 
 Status DatasetReader::Fail(Status st) {
   err_ = std::move(st);
@@ -373,19 +377,29 @@ Status DatasetReader::RowError(int start) const {
 }
 
 // ScanRow finds the next row with the lexer Parse uses, resuming at
-// scan_pos_, so a complete token is not lexed again on the next read.
+// scan_pos_, so a complete token is not lexed again on the next read, and a
+// token still open is lexed again only once bytes arrive that could end it
+// (Resume): a row costs time linear in its size however many reads it
+// arrives in (#168).
 // Between rows it skips newlines and comments: `(` starts a row, a directive
 // ends the sequence, and anything else is not a row. Inside a row it stops
 // at the `)` that closes it, or at a `(` (no value holds one) or a token the
 // lexer rejects, which make the row bad. Returns kNeedMore with *start the
 // open row's `(`, or -1 between rows, when the buffer ends first.
 DatasetReader::RowScan DatasetReader::ScanRow(int* start, int* end) {
+  if (!Resume()) {
+    *start = row_start_;
+    return RowScan::kNeedMore;
+  }
   Lexer lx(std::string_view(pending_).substr(scan_pos_), Position{1, 1, scan_pos_});
   lx.SetMaxBytesLiteral(MaxBytesLiteral());
   for (;;) {
+    const int from = lx.CurrentPos().offset;
     const Token tok = lx.Next();
     const int tok_end = lx.CurrentPos().offset;
+    scanned_ += static_cast<size_t>(tok_end - from);
     if (tok.kind == TokenKind::kEOF || !Complete(tok_end)) {
+      if (!src_eof_) Wait(tok.pos.offset);
       *start = row_start_;
       return RowScan::kNeedMore;
     }
@@ -464,54 +478,179 @@ bool DatasetReader::Complete(int tok_end) const {
   return src_eof_ || tok_end + kLookahead <= static_cast<int>(pending_.size());
 }
 
+// Wait records the token at pending_[at], which the scan could not yet take
+// as complete. The scan resumes at its start: the spaces before it are
+// decided, and lexing them again would cost as much as the token.
+void DatasetReader::Wait(int at) {
+  waiting_ = true;
+  wait_at_ = at;
+  wait_from_ = static_cast<int>(pending_.size());
+  scan_pos_ = at;
+}
+
+// Resume reports whether a scan may lex on: no token is waiting, the source
+// has ended, or the bytes read since the waiting token was last lexed could
+// end it.
+bool DatasetReader::Resume() {
+  if (waiting_ && !src_eof_ && !MayEndToken()) {
+    wait_from_ = static_cast<int>(pending_.size());
+    return false;
+  }
+  waiting_ = false;
+  return true;
+}
+
+namespace {
+
+// kShortWait is the length under which a waiting token is lexed again
+// whatever bytes arrive. What may still change a token this short is a byte
+// or two of the lexer's lookahead (`""` opening `"""`, `b` opening `b"`, `/`
+// opening a comment, `-in` reading `-inf`, a multi-byte rune cut in half, no
+// token at all yet), and lexing a few bytes again costs nothing.
+constexpr int kShortWait = 8;
+
+bool IsDigitByte(char c) {
+  return c >= '0' && c <= '9';
+}
+
+// As the lexer's IsIdentPart.
+bool IsIdentByte(char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || IsDigitByte(c) || c == '.';
+}
+
+// The bytes that end a timestamp, as the lexer's LexTimestamp has them.
+bool EndsRun(char c) {
+  return c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == ',' || c == ']' || c == '}' ||
+         c == ')' || c == '#';
+}
+
+}  // namespace
+
+// MayEndToken reports whether the bytes read since the waiting token was
+// last lexed could end it: a closing quote for a string (one not escaped by
+// an odd run of backslashes) or a newline, which a simple string cannot
+// hold; `"""` for a triple-quoted one; a quote or newline for a bytes
+// literal, or enough characters that the lexer refuses it
+// (max_bytes_literal_length); a newline for a line comment; `*/` for a block
+// comment; a byte that ends a run, or a comment opener, for a timestamp; and
+// for any other token a byte that cannot continue an identifier, number or
+// duration. Each of those does end the token, so a token is lexed again only
+// once it is short or decided, and the scan stays linear. It decides only
+// when the lexer looks again, never what the token is. Ported from
+// protowire-go's mayEndToken.
+bool DatasetReader::MayEndToken() const {
+  const std::string_view buf = pending_;
+  const int at = wait_at_;
+  const int from = wait_from_;
+  if (from - at < kShortWait) return true;
+  const std::string_view tok = buf.substr(at);
+  const std::string_view fresh = buf.substr(from);
+  if (tok.substr(0, 3) == "\"\"\"") {
+    return buf.substr(std::max(from - 2, at + 3)).find("\"\"\"") != std::string_view::npos;
+  }
+  if (tok[0] == '"') {
+    for (size_t i = 0; i < fresh.size(); ++i) {
+      if (fresh[i] == '\n') return true;  // a simple string cannot hold one
+      if (fresh[i] != '"') continue;
+      int backslashes = 0;
+      for (int j = from + static_cast<int>(i) - 1; j > at && buf[j] == '\\'; --j) ++backslashes;
+      if (backslashes % 2 == 0) return true;
+    }
+    return false;
+  }
+  if (tok.substr(0, 2) == "b\"") {
+    // The lexer checks the cap before each character it reads past the
+    // opening quote, the last one included.
+    const int chars = static_cast<int>(buf.size()) - 1 - (at + 2);
+    const int limit = MaxBytesLiteral();
+    return fresh.find_first_of("\"\n") != std::string_view::npos ||
+           (limit > 0 && chars / 4 * 3 > limit);
+  }
+  if (tok[0] == '#' || tok.substr(0, 2) == "//") return fresh.find('\n') != std::string_view::npos;
+  if (tok.substr(0, 2) == "/*") {
+    return buf.substr(std::max(from - 1, at + 2)).find("*/") != std::string_view::npos;
+  }
+  if (IsDigitByte(tok[0]) && IsDigitByte(tok[1]) && IsDigitByte(tok[2]) && IsDigitByte(tok[3]) &&
+      tok[4] == '-') {
+    // A timestamp runs to a byte that ends a run, or to `//` or `/*`, whose
+    // '/' may be the last byte checked before.
+    for (size_t i = std::max(from - 1, at); i < buf.size(); ++i) {
+      if (EndsRun(buf[i])) return true;
+      if (buf[i] == '/' && i + 1 < buf.size() && (buf[i + 1] == '/' || buf[i + 1] == '*')) {
+        return true;
+      }
+    }
+    return false;
+  }
+  for (const char c : fresh) {
+    if (!(IsIdentByte(c) || c == '+' || c == '-' || static_cast<unsigned char>(c) >= 0x80)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // ScanHeader finds the end of the first `@dataset TYPE ( cols )` header with
 // the lexer Parse uses: the offset just past the `)` that closes the column
 // list, the first `)` after an @dataset token. An @proto body is raw
 // protobuf source, which Parse skips by matching its braces, so the scan
 // does too. Returns kNeedMore when the buffer ends first, and kBad at a
-// token the lexer rejects or an @proto body that can never close.
-DatasetReader::RowScan DatasetReader::ScanHeader(int* end) const {
-  Lexer lx(pending_);
-  lx.SetMaxBytesLiteral(MaxBytesLiteral());
-  bool in_dataset = false;
-  int proto = 0;  // 1 after @proto, 2 after its type name
+// token the lexer rejects or an @proto body that can never close. Like
+// ScanRow it resumes where the last read left it, so a header costs time
+// linear in its size however many reads it arrives in (#168).
+DatasetReader::RowScan DatasetReader::ScanHeader(int* end) {
+  if (!hdr_in_body_ && !Resume()) return RowScan::kNeedMore;
   for (;;) {
-    const Token tok = lx.Next();
-    const int tok_end = lx.CurrentPos().offset;
-    if (tok.kind == TokenKind::kEOF || !Complete(tok_end)) return RowScan::kNeedMore;
-    switch (tok.kind) {
-      case TokenKind::kIllegal:
-        return RowScan::kBad;
-      case TokenKind::kNewline:
-      case TokenKind::kComment:
+    if (hdr_in_body_) {
+      BraceMatch::State st = BraceMatch::State::kOpen;
+      const int i = hdr_body_->Scan(pending_, scan_pos_, &st);
+      scanned_ += static_cast<size_t>(i - scan_pos_);
+      scan_pos_ = i;
+      if (st == BraceMatch::State::kOpen) return RowScan::kNeedMore;
+      if (st == BraceMatch::State::kFailed) return RowScan::kBad;
+      hdr_in_body_ = false;
+      ++scan_pos_;  // the closing `}`
+    }
+    Lexer lx(std::string_view(pending_).substr(scan_pos_), Position{1, 1, scan_pos_});
+    lx.SetMaxBytesLiteral(MaxBytesLiteral());
+    for (;;) {
+      const int from = lx.CurrentPos().offset;
+      const Token tok = lx.Next();
+      const int tok_end = lx.CurrentPos().offset;
+      scanned_ += static_cast<size_t>(tok_end - from);
+      if (tok.kind == TokenKind::kEOF && src_eof_) return RowScan::kNeedMore;
+      if (tok.kind == TokenKind::kEOF || !Complete(tok_end)) {
+        Wait(tok.pos.offset);
+        return RowScan::kNeedMore;
+      }
+      if (tok.kind == TokenKind::kIllegal) return RowScan::kBad;
+      scan_pos_ = tok_end;
+      if (tok.kind == TokenKind::kNewline || tok.kind == TokenKind::kComment) {
         // Parse skips these between @proto, its name and `{`.
         continue;
-      default:
-        break;
-    }
-    if (in_dataset) {
-      if (tok.kind == TokenKind::kRParen) {
-        *end = tok_end;
-        return RowScan::kRow;
       }
-      continue;
-    }
-    if (tok.kind == TokenKind::kAtDataset) {
-      in_dataset = true;
-      proto = 0;
-    } else if (tok.kind == TokenKind::kAtProto) {
-      proto = 1;
-    } else if (tok.kind == TokenKind::kIdent && proto == 1) {
-      proto = 2;
-    } else if (tok.kind == TokenKind::kLBrace && proto > 0) {
-      bool failed = false;
-      const int close = FindMatchingBrace(pending_, tok.pos.offset, &failed);
-      if (failed) return RowScan::kBad;
-      if (close < 0) return RowScan::kNeedMore;
-      lx.RepositionTo(close + 1);
-      proto = 0;
-    } else {
-      proto = 0;
+      if (hdr_in_dataset_) {
+        if (tok.kind == TokenKind::kRParen) {
+          *end = tok_end;
+          return RowScan::kRow;
+        }
+        continue;
+      }
+      if (tok.kind == TokenKind::kAtDataset) {
+        hdr_in_dataset_ = true;
+        hdr_proto_ = 0;
+      } else if (tok.kind == TokenKind::kAtProto) {
+        hdr_proto_ = 1;
+      } else if (tok.kind == TokenKind::kIdent && hdr_proto_ == 1) {
+        hdr_proto_ = 2;
+      } else if (tok.kind == TokenKind::kLBrace && hdr_proto_ > 0) {
+        hdr_proto_ = 0;
+        hdr_in_body_ = true;
+        hdr_body_ = std::make_unique<BraceMatch>();
+        break;  // the body is matched as bytes, not lexed
+      } else {
+        hdr_proto_ = 0;
+      }
     }
   }
 }

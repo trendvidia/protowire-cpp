@@ -39,6 +39,8 @@
 
 namespace protowire::pxf {
 
+struct BraceMatch;  // src/pxf/parser_internal.h
+
 // Default cap on the @dataset header (leading directives plus the
 // `@dataset TYPE ( cols )` declaration). Real headers are tiny — a few
 // hundred bytes at most. The cap exists to fail-fast on misuse: a
@@ -121,7 +123,12 @@ class DatasetReader {
   // which will desync the next reader.
   std::unique_ptr<std::istream> Tail();
 
+  ~DatasetReader();
+  DatasetReader(const DatasetReader&) = delete;
+  DatasetReader& operator=(const DatasetReader&) = delete;
+
  private:
+  friend class DatasetReaderTestPeer;  // reads scanned_
   DatasetReader() = default;
 
   // What ScanRow or ScanHeader found; see dataset_reader.cc.
@@ -135,8 +142,11 @@ class DatasetReader {
   std::optional<DatasetRow> TryWholeRow();
   Status RowError(int start) const;
   RowScan ScanRow(int* start, int* end);
-  RowScan ScanHeader(int* end) const;
+  RowScan ScanHeader(int* end);
   bool Complete(int tok_end) const;
+  void Wait(int at);
+  bool Resume();
+  bool MayEndToken() const;
 
   std::istream* src_ = nullptr;
   Position PosAt(size_t i) const;
@@ -149,6 +159,22 @@ class DatasetReader {
   // or -1 between rows. Both index pending_.
   int scan_pos_ = 0;
   int row_start_ = -1;
+  // While a token runs past the buffer's end, the scan does not lex it again
+  // until bytes arrive that could end it (MayEndToken): wait_at_ is the
+  // token's start, wait_from_ the buffer length already checked.
+  bool waiting_ = false;
+  int wait_at_ = 0;
+  int wait_from_ = 0;
+  // Where the header scan stands: past the @dataset token, how far into an
+  // @proto directive (1 after @proto, 2 after its type name), and in its
+  // body, whose braces are matched as bytes.
+  bool hdr_in_dataset_ = false;
+  int hdr_proto_ = 0;
+  bool hdr_in_body_ = false;
+  std::unique_ptr<BraceMatch> hdr_body_;
+  // The bytes the header and row scans have lexed, for the tests that hold
+  // them linear in the input.
+  size_t scanned_ = 0;
   bool src_eof_ = false;
   bool finished_ = false;
   Status err_;
