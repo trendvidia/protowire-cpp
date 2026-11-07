@@ -554,4 +554,29 @@ TEST(DatasetReaderEnds, MatchProtowireGo) {
   EXPECT_EQ(errors, 230);
 }
 
+// A timestamp ends at a row's `)`, as protowire-go's lexer ends it (#169):
+// the `)` was read into the timestamp, which then failed to parse.
+TEST(DatasetTimestampCell, EndsAtTheRowsParen) {
+  const std::string doc = "@dataset x.Row ( a )\n(2024-01-02T03:04:05Z)\n";
+  auto parsed = protowire::pxf::Parse(doc);
+  ASSERT_TRUE(parsed.ok()) << parsed.status().ToString();
+  ASSERT_EQ(parsed->datasets.size(), 1u);
+  ASSERT_EQ(parsed->datasets[0].rows.size(), 1u);
+  const auto& cell = parsed->datasets[0].rows[0].cells[0];
+  ASSERT_TRUE(cell.has_value());
+  const auto* ts = std::get_if<std::unique_ptr<protowire::pxf::TimestampVal>>(&*cell);
+  ASSERT_NE(ts, nullptr);
+  EXPECT_EQ((*ts)->raw, "2024-01-02T03:04:05Z");
+
+  std::istringstream src(doc);
+  auto tr = DatasetReader::Create(&src);
+  ASSERT_TRUE(tr.ok()) << tr.status().ToString();
+  DatasetRow row;
+  ASSERT_TRUE((*tr)->Next(&row).ok());
+  ASSERT_FALSE((*tr)->Done());
+  ASSERT_EQ(row.cells.size(), 1u);
+  ASSERT_TRUE(row.cells[0].has_value());
+  EXPECT_NE(std::get_if<std::unique_ptr<protowire::pxf::TimestampVal>>(&*row.cells[0]), nullptr);
+}
+
 }  // namespace
