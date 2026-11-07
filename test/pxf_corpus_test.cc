@@ -556,6 +556,9 @@ Status BindMaterialized(const Schema& schema, const std::string& text) {
 }
 
 // BindStreaming reads every dataset of the document through DatasetReader.
+// The reader decides where the rows end: a table's rows end at the end of
+// the input or at the next directive, which its Tail starts with, and
+// anything else is its error (#164).
 Status BindStreaming(const Schema& schema, const std::string& text) {
   auto input = std::make_unique<std::istringstream>(text);
   for (;;) {
@@ -570,17 +573,7 @@ Status BindStreaming(const Schema& schema, const std::string& text) {
     }
     auto tail = (*reader)->Tail();
     std::string rest((std::istreambuf_iterator<char>(*tail)), std::istreambuf_iterator<char>());
-    bool blank = true;
-    std::istringstream lines(rest);
-    std::string line;
-    while (std::getline(lines, line)) {
-      auto at = line.find_first_not_of(" \t\r");
-      if (at != std::string::npos && line[at] != '#') blank = false;
-    }
-    if (blank) return Status::OK();
-    if (rest.find("@dataset") == std::string::npos) {
-      return Status::Error("junk after the rows: top-level field entries");
-    }
+    if (rest.empty()) return Status::OK();
     input = std::make_unique<std::istringstream>(std::move(rest));
   }
 }
@@ -599,8 +592,8 @@ TEST(PxfCorpus, Dataset) {
     std::string text = ReadFile(path);
     Status materialized = BindMaterialized(schema, text);
     Status streamed = BindStreaming(schema, text);
-    EXPECT_EQ(materialized.ok(), streamed.ok())
-        << "materialized: " << materialized.ToString() << "\nstreamed: " << streamed.ToString();
+    // The reader reports the error Parse reports, at the same position.
+    EXPECT_EQ(materialized.ToString(), streamed.ToString());
     if (it->second.gap != nullptr) {
       // A closed gap fails here until its entry is removed.
       EXPECT_NE(materialized.ok(), it->second.accept)

@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include "protoc_compat.h"
 
+#include <fstream>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -479,6 +480,78 @@ TEST(DatasetReaderPositions, MatchProtowireGo) {
   for (const Case& c : cases) {
     EXPECT_EQ(ReadAll(c.in, c.scan, c.skip), c.want) << c.name;
   }
+}
+
+// ---- A row ends at a `)`, a directive or the end of input (#164) ---------
+
+std::string FromHex(const std::string& hex) {
+  std::string out;
+  for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+    out.push_back(static_cast<char>(std::stoi(hex.substr(i, 2), nullptr, 16)));
+  }
+  return out;
+}
+
+// testdata/dataset-stream/go_sweep.tsv is protowire-go's verdict on streaming
+// inputs: rows and headers cut short, junk where a row could begin, the cap on the bytes
+// held while a row's end is sought, Scan's limits, and the 4096-byte read
+// boundary at every offset in and around a row. Each line is name,
+// max_message_size, mode, head, pad, tail and the result: the rows read, then
+// EOF or the error. tools/dataset_stream_sweep wrote it; its header says how
+// to regenerate it.
+TEST(DatasetReaderEnds, MatchProtowireGo) {
+  std::ifstream in(std::string(TESTDATA_DIR) + "/dataset-stream/go_sweep.tsv");
+  ASSERT_TRUE(in) << "testdata/dataset-stream/go_sweep.tsv";
+  int cases = 0;
+  int errors = 0;
+  for (std::string line; std::getline(in, line);) {
+    std::vector<std::string> f;
+    for (size_t at = 0;;) {
+      const size_t tab = line.find('\t', at);
+      f.push_back(line.substr(at, tab == std::string::npos ? std::string::npos : tab - at));
+      if (tab == std::string::npos) break;
+      at = tab + 1;
+    }
+    ASSERT_EQ(f.size(), 7u) << line;
+    SCOPED_TRACE(f[0] + " max_message_size=" + f[1]);
+    std::string input = FromHex(f[3]);
+    if (const int pad = std::stoi(f[4]); pad >= 0) {
+      input += "(\"" + std::string(pad, 'p') + "\")\n";
+    }
+    input += FromHex(f[5]);
+    std::istringstream src(input);
+    protowire::pxf::UnmarshalOptions opts;
+    opts.max_message_size = std::stoi(f[1]);
+    auto tr = DatasetReader::Create(&src, opts);
+    std::string got;
+    if (!tr.ok()) {
+      got = "create: " + tr.status().ToString();
+    } else {
+      for (int rows = 0;; ++rows) {
+        protowire::Status st;
+        if (f[2] == "scan") {
+          pb::FileOptions msg;
+          st = (*tr)->Scan(&msg);
+        } else {
+          DatasetRow row;
+          st = (*tr)->Next(&row);
+        }
+        if (!st.ok() || (*tr)->Done()) {
+          got = "rows=" + std::to_string(rows) + " " + (st.ok() ? "EOF" : st.ToString());
+          break;
+        }
+      }
+    }
+    EXPECT_EQ(got, f[6]);
+    ++cases;
+    if (f[6].rfind("rows=", 0) != 0 || f[6].find(' ') != f[6].size() - 4 ||
+        f[6].substr(f[6].size() - 4) != " EOF") {
+      ++errors;
+    }
+  }
+  // The table reads whole: 590 cases, of which 230 end in an error.
+  EXPECT_EQ(cases, 590);
+  EXPECT_EQ(errors, 230);
 }
 
 }  // namespace

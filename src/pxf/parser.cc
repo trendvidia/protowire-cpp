@@ -49,6 +49,19 @@ class Parser {
     Advance();
   }
 
+  // A parser that reads no comments before its first token.
+  struct DropLeadingCommentsTag {};
+  Parser(DropLeadingCommentsTag,
+         std::string_view input,
+         int max_depth,
+         int max_bytes_literal,
+         Position start)
+      : lex_(input, start), max_depth_(max_depth), drop_comments_(true) {
+    lex_.SetMaxBytesLiteral(max_bytes_literal);
+    Advance();
+    drop_comments_ = false;
+  }
+
   struct TolerantTag {};
   Parser(TolerantTag, std::string_view input, int max_depth, int max_bytes_literal)
       : lex_(input), max_depth_(max_depth), tolerant_(true) {
@@ -66,9 +79,10 @@ class Parser {
     *current = current_;
   }
 
+  const Token& current() const { return current_; }
   StatusOr<Document> ParseDocument();
   StatusOr<DatasetDirective> ParseTableDirective(int* end_offset);
-  StatusOr<DatasetRow> ParseTableRow(int expected, int* end_offset);
+  StatusOr<DatasetRow> ParseTableRow(int expected, int* end_offset, bool read_past = true);
 
   std::vector<Error> TakeErrors() {
     std::stable_sort(errs_.begin(), errs_.end(), [](const Error& a, const Error& b) {
@@ -153,6 +167,9 @@ class Parser {
   int max_depth_ = kMaxNestingDepth;
   bool for_decoder_ = false;
   bool tolerant_ = false;
+  // Advance skips comments without keeping them, for a caller that reads
+  // none: DatasetReader's row parse, before the row's `(`.
+  bool drop_comments_ = false;
   std::vector<Error> errs_;
   Position err_pos_;
   // Just past the last significant token consumed: where a missing value
@@ -160,18 +177,13 @@ class Parser {
   Position prev_end_;
 };
 
-// FindMatchingBrace returns the offset of the `}` matching the `{` at
-// open_offset, or -1 if there is none. Mirrors protowire-go's braceMatch, so
-// braces inside literals and comments don't count.
-int FindMatchingBrace(std::string_view input, int open_offset);
-
 void Parser::Advance() {
   prev_end_ = lex_.CurrentPos();
   for (;;) {
     current_ = lex_.Next();
     if (current_.kind == TokenKind::kNewline) continue;
     if (current_.kind == TokenKind::kComment) {
-      comments_.push_back(Comment{current_.pos, std::string(current_.value)});
+      if (!drop_comments_) comments_.push_back(Comment{current_.pos, std::string(current_.value)});
       continue;
     }
     return;
@@ -342,10 +354,7 @@ StatusOr<Document> Parser::ParseDocument() {
       }
     }
     if (current_.kind != TokenKind::kEOF) {
-      if (Status s = Soft(current_.pos,
-                          "@dataset directive cannot coexist with top-level field entries; the "
-                          "document's payload is the @dataset rows (draft §3.4.4)");
-          !s.ok()) {
+      if (Status s = Soft(current_.pos, kDatasetBesideEntries); !s.ok()) {
         return s;
       }
     }
@@ -915,7 +924,7 @@ StatusOr<DatasetDirective> Parser::ParseTableDirective(int* end_offset) {
 // ParseTableRow reads `( cell ( ',' cell )* )` with an arity check
 // against `expected`. kLParen is current on entry. Writes the byte
 // offset immediately past the closing `)` to *end_offset.
-StatusOr<DatasetRow> Parser::ParseTableRow(int expected, int* end_offset) {
+StatusOr<DatasetRow> Parser::ParseTableRow(int expected, int* end_offset, bool read_past) {
   Position pos = current_.pos;
   Advance();  // consume (
 
@@ -939,7 +948,9 @@ StatusOr<DatasetRow> Parser::ParseTableRow(int expected, int* end_offset) {
                std::string("expected ',' or ')' in @dataset row, got ") + DatasetTokenMsg());
   }
   int eo = current_.pos.offset + 1;
-  Advance();  // consume )
+  // Consume the `)`, unless the caller reads nothing after the row: lexing on
+  // would read the comments after it for nothing.
+  if (read_past) Advance();
 
   if (static_cast<int>(row.cells.size()) != expected) {
     return Err(pos,
@@ -1051,7 +1062,9 @@ StatusOr<std::optional<ValuePtr>> Parser::ParseRowCell() {
   return std::optional<ValuePtr>(std::move(v).consume());
 }
 
-int FindMatchingBrace(std::string_view input, int open_offset) {
+}  // namespace
+
+int FindMatchingBrace(std::string_view input, int open_offset, bool* failed) {
   enum class Mode : uint8_t { kCode, kString, kTripleString, kBytes, kLineComment, kBlockComment };
   Mode mode = Mode::kCode;
   int depth = 1;
@@ -1069,6 +1082,7 @@ int FindMatchingBrace(std::string_view input, int open_offset) {
         } else if (ch == '"') {
           mode = Mode::kCode;
         } else if (ch == '\n') {
+          if (failed != nullptr) *failed = true;
           return -1;
         }
         continue;
@@ -1084,6 +1098,7 @@ int FindMatchingBrace(std::string_view input, int open_offset) {
         if (ch == '"') {
           mode = Mode::kCode;
         } else if (ch == '\n') {
+          if (failed != nullptr) *failed = true;
           return -1;
         }
         continue;
@@ -1143,8 +1158,6 @@ int FindMatchingBrace(std::string_view input, int open_offset) {
   return -1;
 }
 
-}  // namespace
-
 StatusOr<DatasetDirective> ParseDatasetAt(Lexer* lex, Token* current, int max_depth) {
   Parser p(std::move(*lex), *current, max_depth);
   int end = 0;
@@ -1153,11 +1166,22 @@ StatusOr<DatasetDirective> ParseDatasetAt(Lexer* lex, Token* current, int max_de
   return tbl;
 }
 
-StatusOr<DatasetRow> ParseDatasetRow(
-    std::string_view row, int expected, int max_depth, int max_bytes_literal, Position start) {
-  Parser p(row, max_depth, max_bytes_literal, start);
+StatusOr<DatasetRow> ParseDatasetRow(std::string_view row,
+                                     int expected,
+                                     int max_depth,
+                                     int max_bytes_literal,
+                                     Position start,
+                                     int* end_offset) {
+  Parser p(Parser::DropLeadingCommentsTag{}, row, max_depth, max_bytes_literal, start);
+  if (p.current().kind != TokenKind::kLParen) {
+    // Parse reports any token here, a lexical error included, as a
+    // top-level entry beside the dataset.
+    return Status::Error(p.current().pos.line, p.current().pos.column, kDatasetBesideEntries);
+  }
   int end = 0;
-  return p.ParseTableRow(expected, &end);
+  auto r = p.ParseTableRow(expected, &end, /*read_past=*/false);
+  if (r.ok() && end_offset != nullptr) *end_offset = end;
+  return r;
 }
 
 StatusOr<Document> Parse(std::string_view input, ParseOptions opts) {
