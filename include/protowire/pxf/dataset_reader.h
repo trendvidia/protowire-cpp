@@ -143,7 +143,7 @@ class DatasetReader {
   Status RowError(int start) const;
   RowScan ScanRow(int* start, int* end);
   RowScan ScanHeader(int* end);
-  bool Complete(int tok_end) const;
+  bool Complete(const Token& tok, int tok_end) const;
   void Wait(int at);
   bool Resume();
   bool MayEndToken() const;

@@ -398,7 +398,7 @@ DatasetReader::RowScan DatasetReader::ScanRow(int* start, int* end) {
     const Token tok = lx.Next();
     const int tok_end = lx.CurrentPos().offset;
     scanned_ += static_cast<size_t>(tok_end - from);
-    if (tok.kind == TokenKind::kEOF || !Complete(tok_end)) {
+    if (tok.kind == TokenKind::kEOF || !Complete(tok, tok_end)) {
       if (!src_eof_) Wait(tok.pos.offset);
       *start = row_start_;
       return RowScan::kNeedMore;
@@ -443,39 +443,82 @@ DatasetReader::RowScan DatasetReader::ScanRow(int* start, int* end) {
   }
 }
 
+// Pull reads up to n bytes, taking what the stream already has rather than
+// waiting for all n: on a stream that stays open, a complete row must not
+// wait for bytes that may never come (#171). It blocks only when nothing is
+// buffered, for one byte or the end of the stream.
 Status DatasetReader::Pull(size_t n) {
   if (src_eof_) return Status::OK();
-  std::string buf(n, '\0');
-  src_->read(buf.data(), static_cast<std::streamsize>(n));
-  std::streamsize got = src_->gcount();
-  if (got > 0) {
-    pending_.append(buf.data(), static_cast<size_t>(got));
-    // A stream that never ends a row cannot grow the buffer without bound.
-    const int max_size = opts_.max_message_size > 0 ? opts_.max_message_size : kMaxMessageSize;
-    if (pending_.size() > static_cast<size_t>(max_size)) {
-      return Status::Error(
-          "dataset input holds " + std::to_string(pending_.size()) +
-          " bytes without a row boundary, MaxMessageSize=" + std::to_string(max_size));
-    }
-  }
-  if (src_->eof()) {
+  using Traits = std::istream::traits_type;
+  std::streambuf* buf = src_->rdbuf();
+  if (buf == nullptr) return Status::Error("pxf: DatasetReader: istream has no buffer");
+  if (buf->in_avail() <= 0 && Traits::eq_int_type(src_->peek(), Traits::eof())) {
+    if (src_->bad()) return Status::Error("pxf: DatasetReader: istream read error");
     src_eof_ = true;
     return Status::OK();
   }
+  const std::streamsize avail = buf->in_avail();
+  const size_t want = avail > 0 ? std::min(n, static_cast<size_t>(avail)) : 1;
+  const size_t old = pending_.size();
+  pending_.resize(old + want);
+  const std::streamsize got =
+      src_->readsome(pending_.data() + old, static_cast<std::streamsize>(want));
+  pending_.resize(old + static_cast<size_t>(std::max<std::streamsize>(got, 0)));
   if (src_->bad()) return Status::Error("pxf: DatasetReader: istream read error");
-  // `fail` without `eof` is unusual; treat as a read error.
-  if (src_->fail() && got == 0) return Status::Error("pxf: DatasetReader: istream read failed");
+  if (got <= 0) return Status::Error("pxf: DatasetReader: istream read failed");
+  // A stream that never ends a row cannot grow the buffer without bound.
+  const int max_size = opts_.max_message_size > 0 ? opts_.max_message_size : kMaxMessageSize;
+  if (pending_.size() > static_cast<size_t>(max_size)) {
+    return Status::Error(
+        "dataset input holds " + std::to_string(pending_.size()) +
+        " bytes without a row boundary, MaxMessageSize=" + std::to_string(max_size));
+  }
   return Status::OK();
 }
 
-// Complete reports whether a token ending at pending_[tok_end] is known
-// complete: the source has ended, or a few bytes follow it. The lexer looks
-// at most one byte past a token to end it (the `.` of `1.5`, the `p` of a
-// precision, the second byte of `µs`), so bytes that arrive later cannot
-// change it.
-bool DatasetReader::Complete(int tok_end) const {
-  constexpr int kLookahead = 4;
-  return src_eof_ || tok_end + kLookahead <= static_cast<int>(pending_.size());
+// Complete reports whether tok, ending at pending_[tok_end], is known
+// complete: bytes that arrive later cannot change it. The source has ended;
+// or it is a one-byte token (punctuation, a newline); or the lexer has the
+// bytes it looks at past the token to end it. A closed string, bytes literal
+// or block comment needs none, but for `""`. Otherwise it is the byte at tok_end,
+// and the one after when that byte is `.` (`1.5`), `p` (a precision), `/`
+// (a comment after a timestamp) or the first byte of `µ` (`µs`). An error
+// token, or one that starts with a byte past ASCII, may have been decided
+// from a few bytes further, so it waits for four. Being exact here is what
+// lets a complete row through on a stream that stays open (#171).
+bool DatasetReader::Complete(const Token& tok, int tok_end) const {
+  if (src_eof_) return true;
+  const int n = static_cast<int>(pending_.size());
+  switch (tok.kind) {
+    case TokenKind::kNewline:
+    case TokenKind::kLBrace:
+    case TokenKind::kRBrace:
+    case TokenKind::kLBracket:
+    case TokenKind::kRBracket:
+    case TokenKind::kLParen:
+    case TokenKind::kRParen:
+    case TokenKind::kEquals:
+    case TokenKind::kColon:
+    case TokenKind::kComma:
+      return true;
+    case TokenKind::kIllegal:
+      return tok_end + 4 <= n;
+    default:
+      break;
+  }
+  if (static_cast<unsigned char>(pending_[tok.pos.offset]) >= 0x80) return tok_end + 4 <= n;
+  if (tok_end >= n) {
+    // A closed string, bytes literal or block comment ends at its own last
+    // byte, whatever follows: all but `""`, which a third quote would make
+    // the opening of a triple-quoted string.
+    const std::string_view text =
+        std::string_view(pending_).substr(tok.pos.offset, tok_end - tok.pos.offset);
+    if (tok.kind == TokenKind::kString || tok.kind == TokenKind::kBytes) return text != "\"\"";
+    return tok.kind == TokenKind::kComment && text.substr(0, 2) == "/*";
+  }
+  const unsigned char next = static_cast<unsigned char>(pending_[tok_end]);
+  if (next == '.' || next == 'p' || next == '/' || next == 0xC2) return tok_end + 1 < n;
+  return true;
 }
 
 // Wait records the token at pending_[at], which the scan could not yet take
@@ -619,7 +662,7 @@ DatasetReader::RowScan DatasetReader::ScanHeader(int* end) {
       const int tok_end = lx.CurrentPos().offset;
       scanned_ += static_cast<size_t>(tok_end - from);
       if (tok.kind == TokenKind::kEOF && src_eof_) return RowScan::kNeedMore;
-      if (tok.kind == TokenKind::kEOF || !Complete(tok_end)) {
+      if (tok.kind == TokenKind::kEOF || !Complete(tok, tok_end)) {
         Wait(tok.pos.offset);
         return RowScan::kNeedMore;
       }
