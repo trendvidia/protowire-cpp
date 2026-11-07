@@ -189,6 +189,17 @@ TEST_F(GoParity, OneofMembersSerializeLast) {
   EXPECT_EQ(copy->ShortDebugString(), msg->ShortDebugString());
 }
 
+// Unknown fields follow the known ones, byte for byte (#158: they used to go
+// through an unchecked SerializeToString).
+TEST_F(GoParity, UnknownFieldsSerializeAfterTheKnownOnes) {
+  auto msg = New("diff.v1.Leaf");
+  // number = 3, then field 99 (varint 5) and field 100 (bytes "zz"), unknown to Leaf.
+  const std::string wire("\x30\x03\x98\x06\x05\xa2\x06\x02zz", 10);
+  ASSERT_TRUE(msg->ParseFromString(wire));
+  ASSERT_EQ(msg->GetReflection()->GetUnknownFields(*msg).field_count(), 2);
+  EXPECT_EQ(pxf::SerializeGoOrder(*msg), wire);
+}
+
 TEST_F(GoParity, SecretHookTakesEveryForm) {
   std::vector<std::pair<std::string, std::string>> got;
   pxf::UnmarshalOptions opts;

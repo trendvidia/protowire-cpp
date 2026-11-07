@@ -217,8 +217,8 @@ payload {
   ASSERT_TRUE(protowire::pxf::Unmarshal(*encoded, msg2.get(), uopts).ok());
 
   std::string s1, s2;
-  msg1->SerializeToString(&s1);
-  msg2->SerializeToString(&s2);
+  ASSERT_TRUE(msg1->SerializeToString(&s1));
+  ASSERT_TRUE(msg2->SerializeToString(&s2));
   EXPECT_EQ(s1, s2);
 }
 

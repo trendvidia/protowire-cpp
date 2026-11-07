@@ -194,7 +194,9 @@ TEST(SbeHeaderBounds, NewCodec) {
       ADD_FAILURE() << "short header";
       continue;
     }
-    if (tc.block_size != 0) EXPECT_EQ(Le16(*data, 0), tc.block_size) << "blockLength";
+    if (tc.block_size != 0) {
+      EXPECT_EQ(Le16(*data, 0), tc.block_size) << "blockLength";
+    }
     EXPECT_EQ(std::to_string(Le16(*data, 4)), schema_id) << "schemaId";
     EXPECT_EQ(std::to_string(Le16(*data, 6)), version) << "version";
 

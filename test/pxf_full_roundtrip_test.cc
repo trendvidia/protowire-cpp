@@ -105,7 +105,7 @@ Trip RunFullPipeline(FullRoundTrip* f, const std::string& src) {
   t.m1 = f->NewAllTypes();
   EXPECT_TRUE(protowire::pxf::Unmarshal(src, t.m1.get()).ok());
   // Force size cache (required before SerializeWithCachedSizes).
-  t.m1->ByteSizeLong();
+  (void)t.m1->ByteSizeLong();
   SerializeDeterministic(*t.m1, &t.bin1);
 
   t.m2 = f->NewAllTypes();
@@ -117,7 +117,7 @@ Trip RunFullPipeline(FullRoundTrip* f, const std::string& src) {
 
   t.m3 = f->NewAllTypes();
   EXPECT_TRUE(protowire::pxf::Unmarshal(t.text1, t.m3.get()).ok());
-  t.m3->ByteSizeLong();
+  (void)t.m3->ByteSizeLong();  // the size cache, as for m1
   SerializeDeterministic(*t.m3, &t.bin3);
 
   return t;

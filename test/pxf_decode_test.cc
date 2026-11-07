@@ -182,8 +182,8 @@ TEST_F(PxfDecode, RoundTrip) {
   auto msg2 = NewAllTypes();
   ASSERT_TRUE(protowire::pxf::Unmarshal(*encoded, msg2.get()).ok());
   std::string s1, s2;
-  msg->SerializeToString(&s1);
-  msg2->SerializeToString(&s2);
+  ASSERT_TRUE(msg->SerializeToString(&s1));
+  ASSERT_TRUE(msg2->SerializeToString(&s2));
   EXPECT_EQ(s1, s2);
 }
 
