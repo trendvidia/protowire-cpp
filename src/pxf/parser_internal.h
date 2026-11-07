@@ -20,12 +20,32 @@ namespace protowire::pxf {
 // token *lex produces, and leaves both on the token after it.
 StatusOr<DatasetDirective> ParseDatasetAt(Lexer* lex, Token* current, int max_depth);
 
+// FindMatchingBrace returns the offset of the `}` matching the `{` at
+// open_offset, or -1 if there is none. Mirrors protowire-go's braceMatch, so
+// braces inside literals and comments don't count. When there is none
+// because the body can never close, a simple string or bytes literal meeting
+// a newline, *failed (if given) is set; otherwise the input ends first.
+int FindMatchingBrace(std::string_view input, int open_offset, bool* failed = nullptr);
+
+// The error for anything after a @dataset header that is neither a row nor
+// a directive (draft §3.4.4).
+inline constexpr const char* kDatasetBesideEntries =
+    "@dataset directive cannot coexist with top-level field entries; the document's payload is "
+    "the @dataset rows (draft §3.4.4)";
+
 // ParseDatasetRow parses one `( cell, ... )` of expected cells, under the
 // caller's nesting and bytes-literal limits. The row starts at `start` in
 // its stream, and the row, its cells and its errors carry positions in the
-// stream, as protowire-go's do (#161).
-StatusOr<DatasetRow> ParseDatasetRow(
-    std::string_view row, int expected, int max_depth, int max_bytes_literal, Position start);
+// stream, as protowire-go's do (#161). Input that does not open with `(`
+// is an entry beside the dataset, as Parse reports it. On success
+// *end_offset, if given, is the stream offset just past the row's `)`;
+// what follows it in `row` is not read.
+StatusOr<DatasetRow> ParseDatasetRow(std::string_view row,
+                                     int expected,
+                                     int max_depth,
+                                     int max_bytes_literal,
+                                     Position start,
+                                     int* end_offset = nullptr);
 
 // CheckDescriptorSchema runs ValidateDescriptor and joins any violations
 // into one error, the bind-time check Unmarshal and DatasetReader share.

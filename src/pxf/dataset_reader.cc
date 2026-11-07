@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -15,6 +16,7 @@
 #include "protowire/limits.h"
 #include "protowire/pxf.h"  // Unmarshal, UnmarshalOptions
 #include "protowire/pxf/format.h"
+#include "protowire/pxf/lexer.h"
 #include "protowire/pxf/parser.h"
 
 namespace protowire::pxf {
@@ -25,254 +27,6 @@ namespace {
 // smaller bounds per-row peak buffer occupancy. 4 KiB matches typical
 // row sizes and the Go reference's streamPullSize.
 constexpr size_t kStreamPullSize = 4096;
-
-bool IsIdentPart(char c) {
-  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
-}
-
-// SkipResult is the byte offset past a string / bytes literal / comment
-// starting at `i`. Returned value semantics mirror the Go reference's
-// skipStringOrComment:
-//   - returns `i` unchanged if the byte at `i` is not an opener
-//   - returns -1 if the construct is incomplete (caller pulls more)
-//   - sets `*err` to non-OK for malformed constructs that can't be
-//     fixed by more bytes (unterminated single-line string already
-//     containing a newline)
-//
-// Strings, triple-quoted strings, bytes literals (`b"..."`), `#`
-// line comments, `//` line comments, and `/* ... */` block comments
-// are all handled.
-int SkipStringOrComment(std::string_view input, int i, Status* err);
-
-int SkipSimpleString(std::string_view input, int i, Status* err) {
-  int j = i + 1;
-  while (j < static_cast<int>(input.size())) {
-    char c = input[j];
-    if (c == '\\') {
-      if (j + 1 >= static_cast<int>(input.size())) return -1;
-      j += 2;
-      continue;
-    }
-    if (c == '"') return j + 1;
-    if (c == '\n') {
-      *err = Status::Error("pxf: unterminated string literal");
-      return 0;
-    }
-    ++j;
-  }
-  return -1;
-}
-
-int SkipTripleString(std::string_view input, int i) {
-  int j = i + 3;
-  int n = static_cast<int>(input.size());
-  while (j + 2 < n) {
-    if (input[j] == '"' && input[j + 1] == '"' && input[j + 2] == '"') return j + 3;
-    ++j;
-  }
-  return -1;
-}
-
-int SkipBytesLiteral(std::string_view input, int i, Status* err) {
-  int j = i + 2;  // past `b"`
-  int n = static_cast<int>(input.size());
-  while (j < n) {
-    char c = input[j];
-    if (c == '"') return j + 1;
-    if (c == '\n') {
-      *err = Status::Error("pxf: unterminated bytes literal");
-      return 0;
-    }
-    ++j;
-  }
-  return -1;
-}
-
-int SkipLineComment(std::string_view input, int from) {
-  int j = from;
-  int n = static_cast<int>(input.size());
-  while (j < n && input[j] != '\n') ++j;
-  return j;
-}
-
-int SkipBlockComment(std::string_view input, int from) {
-  int j = from;
-  int n = static_cast<int>(input.size());
-  while (j + 1 < n) {
-    if (input[j] == '*' && input[j + 1] == '/') return j + 2;
-    ++j;
-  }
-  return -1;
-}
-
-int SkipStringOrComment(std::string_view input, int i, Status* err) {
-  int n = static_cast<int>(input.size());
-  if (i >= n) return i;
-  char c = input[i];
-  if (c == '"') {
-    if (i + 2 < n && input[i + 1] == '"' && input[i + 2] == '"') {
-      return SkipTripleString(input, i);
-    }
-    return SkipSimpleString(input, i, err);
-  }
-  if (c == 'b' && i + 1 < n && input[i + 1] == '"') {
-    return SkipBytesLiteral(input, i, err);
-  }
-  if (c == '#') return SkipLineComment(input, i + 1);
-  if (c == '/' && i + 1 < n && input[i + 1] == '/') return SkipLineComment(input, i + 2);
-  if (c == '/' && i + 1 < n && input[i + 1] == '*') return SkipBlockComment(input, i + 2);
-  return i;
-}
-
-// Returns (offset, found, err). On error, `*err` is set non-OK.
-int FindAtTable(std::string_view input, bool* found, Status* err) {
-  *found = false;
-  int i = 0;
-  int n = static_cast<int>(input.size());
-  static constexpr std::string_view kAtDataset = "@dataset";
-  while (i < n) {
-    int j = SkipStringOrComment(input, i, err);
-    if (!err->ok()) return 0;
-    if (j == -1) return 0;  // incomplete — pull more
-    if (j != i) {
-      i = j;
-      continue;
-    }
-    if (input[i] == '@' && i + static_cast<int>(kAtDataset.size()) <= n &&
-        input.substr(i, kAtDataset.size()) == kAtDataset) {
-      int after = i + static_cast<int>(kAtDataset.size());
-      if (after == n) return 0;  // could be `@dataset` + more bytes — conservative
-      if (!IsIdentPart(input[after])) {
-        *found = true;
-        return i;
-      }
-    }
-    ++i;
-  }
-  return 0;
-}
-
-int FindNextChar(std::string_view input, int start_from, char ch, bool* found, Status* err) {
-  *found = false;
-  int i = start_from;
-  int n = static_cast<int>(input.size());
-  while (i < n) {
-    int j = SkipStringOrComment(input, i, err);
-    if (!err->ok()) return 0;
-    if (j == -1) return 0;
-    if (j != i) {
-      i = j;
-      continue;
-    }
-    if (input[i] == ch) {
-      *found = true;
-      return i;
-    }
-    ++i;
-  }
-  return 0;
-}
-
-// FindMatchingParenSafe returns the index of the `)` matching the `(`
-// at `open_idx`. Sets `*found` to true on success; on incomplete
-// input, returns 0 with `*found=false` and `*err` OK; on malformed
-// string / comment inside, sets `*err` non-OK.
-int FindMatchingParenSafe(std::string_view input, int open_idx, bool* found, Status* err) {
-  *found = false;
-  int depth = 1;
-  int i = open_idx + 1;
-  int n = static_cast<int>(input.size());
-  while (i < n) {
-    int j = SkipStringOrComment(input, i, err);
-    if (!err->ok()) return 0;
-    if (j == -1) return 0;
-    if (j != i) {
-      i = j;
-      continue;
-    }
-    char c = input[i];
-    if (c == '(') {
-      ++depth;
-      ++i;
-    } else if (c == ')') {
-      --depth;
-      if (depth == 0) {
-        *found = true;
-        return i;
-      }
-      ++i;
-    } else {
-      ++i;
-    }
-  }
-  return 0;
-}
-
-// Locates the closing `)` of the first complete `@dataset TYPE ( cols )`
-// header in `input`. Returns the index of that `)`; `*found` is false
-// when more bytes are needed.
-int ScanHeaderEnd(std::string_view input, bool* found, Status* err) {
-  *found = false;
-  bool ok = false;
-  int at_idx = FindAtTable(input, &ok, err);
-  if (!err->ok()) return 0;
-  if (!ok) return 0;
-  bool lp_ok = false;
-  int lparen = FindNextChar(
-      input, at_idx + static_cast<int>(std::string_view("@dataset").size()), '(', &lp_ok, err);
-  if (!err->ok()) return 0;
-  if (!lp_ok) return 0;
-  bool rp_ok = false;
-  int end = FindMatchingParenSafe(input, lparen, &rp_ok, err);
-  if (!err->ok()) return 0;
-  if (!rp_ok) return 0;
-  *found = true;
-  return end;
-}
-
-// FindNextRow locates the next `( ... )` row in `input`, skipping
-// leading whitespace + comments. Sets *found true when a complete row
-// is in the buffer; returns inclusive [start, end] bounds via *out_start
-// / *out_end. Sets *out_done true when the next significant byte isn't
-// `(` — i.e. the row sequence is over.
-void FindNextRow(std::string_view input,
-                 bool* found,
-                 bool* out_done,
-                 int* out_start,
-                 int* out_end,
-                 Status* err) {
-  *found = false;
-  *out_done = false;
-  int i = 0;
-  int n = static_cast<int>(input.size());
-  while (i < n) {
-    char c = input[i];
-    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-      ++i;
-      continue;
-    }
-    int j = SkipStringOrComment(input, i, err);
-    if (!err->ok()) return;
-    if (j == -1) return;
-    if (j != i) {
-      i = j;
-      continue;
-    }
-    break;
-  }
-  if (i >= n) return;
-  if (input[i] != '(') {
-    *out_done = true;
-    return;
-  }
-  bool ok = false;
-  int end = FindMatchingParenSafe(input, i, &ok, err);
-  if (!err->ok()) return;
-  if (!ok) return;
-  *found = true;
-  *out_start = i;
-  *out_end = end;
-}
 
 // ---- BindRow helpers ------------------------------------------------------
 
@@ -450,7 +204,7 @@ StatusOr<std::unique_ptr<DatasetReader>> DatasetReader::Create(std::istream* src
   if (src == nullptr) return Status::Error("pxf: DatasetReader: null istream");
   auto tr = std::unique_ptr<DatasetReader>(new DatasetReader());
   tr->src_ = src;
-  tr->opts_ = opts;
+  tr->opts_ = std::move(opts);
   if (Status s = tr->ReadHeader(); !s.ok()) return s;
   return tr;
 }
@@ -458,48 +212,49 @@ StatusOr<std::unique_ptr<DatasetReader>> DatasetReader::Create(std::istream* src
 Status DatasetReader::Next(DatasetRow* out) {
   if (!err_.ok()) return err_;
   if (finished_) return Status::OK();
+  if (row_start_ < 0) {
+    if (auto row = TryWholeRow(); row.has_value()) {
+      *out = std::move(*row);
+      return Status::OK();
+    }
+  }
   for (;;) {
-    bool found = false;
-    bool done = false;
     int start = 0;
     int end = 0;
-    Status scan_err;
-    FindNextRow(pending_, &found, &done, &start, &end, &scan_err);
-    if (!scan_err.ok()) {
-      err_ = scan_err;
-      return err_;
-    }
-    if (found) {
-      std::string_view row_bytes(pending_.data() + start, end - start + 1);
-      auto parsed =
-          ParseDatasetRow(row_bytes,
-                          static_cast<int>(columns_.size()),
-                          opts_.max_nesting_depth > 0 ? opts_.max_nesting_depth : kMaxNestingDepth,
-                          opts_.max_bytes_literal_length > 0 ? opts_.max_bytes_literal_length
-                                                             : kMaxBytesLiteralLength,
-                          PosAt(static_cast<size_t>(start)));
-      // Advance past the consumed bytes whether parse succeeded or not
-      // — on failure we don't want to retry the same bad row forever.
-      Consume(static_cast<size_t>(end) + 1);
-      if (!parsed.ok()) {
-        err_ = parsed.status();
-        return err_;
+    switch (ScanRow(&start, &end)) {
+      case RowScan::kRow: {
+        auto parsed = ParseRow(start, end);
+        Consume(static_cast<size_t>(end));
+        if (!parsed.ok()) return Fail(parsed.status());
+        *out = std::move(parsed).consume();
+        return Status::OK();
       }
-      *out = std::move(parsed).consume();
-      return Status::OK();
+      case RowScan::kBad:
+        // Parse the rest of the buffer, not just through the token that
+        // stopped the scan: the lexer may reject a token before its end (an
+        // oversized bytes literal), and cut there it would read as
+        // unterminated instead.
+        return Fail(RowError(start));
+      case RowScan::kEnd:
+        // The directive and what precedes it stay buffered, for Tail.
+        finished_ = true;
+        return Status::OK();
+      case RowScan::kNotRow: {
+        const Position at = PosAt(static_cast<size_t>(start));
+        return Fail(Status::Error(at.line, at.column, kDatasetBesideEntries));
+      }
+      case RowScan::kNeedMore:
+        break;
     }
-    if (done) {
-      finished_ = true;
-      return Status::OK();
-    }
+    // At the end of the source only spaces and comments may remain; anything
+    // else is a row cut short.
     if (src_eof_) {
+      if (start >= 0) return Fail(RowError(start));
+      Consume(pending_.size());
       finished_ = true;
       return Status::OK();
     }
-    if (Status s = Pull(kStreamPullSize); !s.ok()) {
-      err_ = s;
-      return err_;
-    }
+    if (Status s = Pull(kStreamPullSize); !s.ok()) return Fail(s);
   }
 }
 
@@ -525,8 +280,13 @@ Status DatasetReader::Scan(google::protobuf::Message* msg) {
     }
     checked_type_ = desc;
   }
+  // The caller's limits but max_message_size, which is left at its default,
+  // as protowire-go binds a row: the row's bytes were capped as they were
+  // read, and the body it stands for repeats the column names, so it is
+  // wider than the row.
   UnmarshalOptions opts = opts_;
   opts.skip_validate = true;
+  opts.max_message_size = 0;
   return BindCheckedRow(msg, columns_, row, opts);
 }
 
@@ -555,10 +315,118 @@ Position DatasetReader::PosAt(size_t i) const {
   return p;
 }
 
-// Consume drops the first n pending bytes, moving base_ past them.
+// Consume drops the first n pending bytes, moving base_ and the scan's
+// offsets past them.
 void DatasetReader::Consume(size_t n) {
   base_ = PosAt(n);
   pending_.erase(0, n);
+  const int k = static_cast<int>(n);
+  scan_pos_ = std::max(scan_pos_ - k, 0);
+  if (row_start_ >= 0) row_start_ = row_start_ >= k ? row_start_ - k : -1;
+}
+
+Status DatasetReader::Fail(Status st) {
+  err_ = std::move(st);
+  return err_;
+}
+
+int DatasetReader::MaxBytesLiteral() const {
+  return opts_.max_bytes_literal_length > 0 ? opts_.max_bytes_literal_length
+                                            : kMaxBytesLiteralLength;
+}
+
+// ParseRow parses pending_ from `start` as one row, with the parser Parse
+// uses, at its stream position. `end` bounds the bytes it may read.
+StatusOr<DatasetRow> DatasetReader::ParseRow(int start, int end, int* end_offset) const {
+  return ParseDatasetRow(std::string_view(pending_).substr(start, end - start),
+                         static_cast<int>(columns_.size()),
+                         opts_.max_nesting_depth > 0 ? opts_.max_nesting_depth : kMaxNestingDepth,
+                         MaxBytesLiteral(),
+                         PosAt(static_cast<size_t>(start)),
+                         end_offset);
+}
+
+// TryWholeRow is the fast path for a row already in the buffer: the row
+// parser runs on the buffer directly, so the row is lexed once. If it
+// parses a complete row, every token in it ended before its `)`, so it is
+// the row Parse reads, and it is consumed. Anything else (a row cut by a
+// read, a malformed row, no row) returns nothing, and ScanRow finds the
+// boundary. Called only between rows.
+std::optional<DatasetRow> DatasetReader::TryWholeRow() {
+  int end_offset = 0;
+  auto row = ParseRow(scan_pos_, static_cast<int>(pending_.size()), &end_offset);
+  if (!row.ok()) return std::nullopt;
+  Consume(static_cast<size_t>(end_offset - base_.offset));
+  return std::move(row).consume();
+}
+
+// RowError is the error Parse reports for the row starting at pending_[start],
+// which the scan found cannot close well. Every token before the one that
+// stopped the scan is the same as Parse sees, so the row parser fails where
+// Parse fails on the whole document.
+Status DatasetReader::RowError(int start) const {
+  auto row = ParseRow(start, static_cast<int>(pending_.size()));
+  if (!row.ok()) return row.status();
+  // Unreachable: the bytes hold no `)` that closes the row.
+  return Status::Error("pxf: DatasetReader: row at offset " + std::to_string(start) +
+                       " neither closes nor fails");
+}
+
+// ScanRow finds the next row with the lexer Parse uses, resuming at
+// scan_pos_, so a complete token is not lexed again on the next read.
+// Between rows it skips newlines and comments: `(` starts a row, a directive
+// ends the sequence, and anything else is not a row. Inside a row it stops
+// at the `)` that closes it, or at a `(` (no value holds one) or a token the
+// lexer rejects, which make the row bad. Returns kNeedMore with *start the
+// open row's `(`, or -1 between rows, when the buffer ends first.
+DatasetReader::RowScan DatasetReader::ScanRow(int* start, int* end) {
+  Lexer lx(std::string_view(pending_).substr(scan_pos_), Position{1, 1, scan_pos_});
+  lx.SetMaxBytesLiteral(MaxBytesLiteral());
+  for (;;) {
+    const Token tok = lx.Next();
+    const int tok_end = lx.CurrentPos().offset;
+    if (tok.kind == TokenKind::kEOF || !Complete(tok_end)) {
+      *start = row_start_;
+      return RowScan::kNeedMore;
+    }
+    const int at = tok.pos.offset;
+    if (tok.kind == TokenKind::kNewline || tok.kind == TokenKind::kComment) {
+      scan_pos_ = tok_end;
+      continue;
+    }
+    if (row_start_ < 0) {
+      switch (tok.kind) {
+        case TokenKind::kLParen:
+          row_start_ = at;
+          scan_pos_ = tok_end;
+          continue;
+        case TokenKind::kAtType:
+        case TokenKind::kAtDirective:
+        case TokenKind::kAtDataset:
+        case TokenKind::kAtProto:
+          *start = at;
+          return RowScan::kEnd;
+        default:
+          *start = at;
+          return RowScan::kNotRow;
+      }
+    }
+    switch (tok.kind) {
+      case TokenKind::kRParen:
+        *start = row_start_;
+        *end = tok_end;
+        row_start_ = -1;
+        scan_pos_ = tok_end;
+        return RowScan::kRow;
+      case TokenKind::kLParen:
+      case TokenKind::kIllegal:
+        *start = row_start_;
+        *end = tok_end;
+        return RowScan::kBad;
+      default:
+        scan_pos_ = tok_end;
+    }
+  }
 }
 
 Status DatasetReader::Pull(size_t n) {
@@ -566,7 +434,16 @@ Status DatasetReader::Pull(size_t n) {
   std::string buf(n, '\0');
   src_->read(buf.data(), static_cast<std::streamsize>(n));
   std::streamsize got = src_->gcount();
-  if (got > 0) pending_.append(buf.data(), static_cast<size_t>(got));
+  if (got > 0) {
+    pending_.append(buf.data(), static_cast<size_t>(got));
+    // A stream that never ends a row cannot grow the buffer without bound.
+    const int max_size = opts_.max_message_size > 0 ? opts_.max_message_size : kMaxMessageSize;
+    if (pending_.size() > static_cast<size_t>(max_size)) {
+      return Status::Error(
+          "dataset input holds " + std::to_string(pending_.size()) +
+          " bytes without a row boundary, MaxMessageSize=" + std::to_string(max_size));
+    }
+  }
   if (src_->eof()) {
     src_eof_ = true;
     return Status::OK();
@@ -577,19 +454,87 @@ Status DatasetReader::Pull(size_t n) {
   return Status::OK();
 }
 
-Status DatasetReader::ReadHeader() {
+// Complete reports whether a token ending at pending_[tok_end] is known
+// complete: the source has ended, or a few bytes follow it. The lexer looks
+// at most one byte past a token to end it (the `.` of `1.5`, the `p` of a
+// precision, the second byte of `µs`), so bytes that arrive later cannot
+// change it.
+bool DatasetReader::Complete(int tok_end) const {
+  constexpr int kLookahead = 4;
+  return src_eof_ || tok_end + kLookahead <= static_cast<int>(pending_.size());
+}
+
+// ScanHeader finds the end of the first `@dataset TYPE ( cols )` header with
+// the lexer Parse uses: the offset just past the `)` that closes the column
+// list, the first `)` after an @dataset token. An @proto body is raw
+// protobuf source, which Parse skips by matching its braces, so the scan
+// does too. Returns kNeedMore when the buffer ends first, and kBad at a
+// token the lexer rejects or an @proto body that can never close.
+DatasetReader::RowScan DatasetReader::ScanHeader(int* end) const {
+  Lexer lx(pending_);
+  lx.SetMaxBytesLiteral(MaxBytesLiteral());
+  bool in_dataset = false;
+  int proto = 0;  // 1 after @proto, 2 after its type name
   for (;;) {
-    bool found = false;
-    Status scan_err;
-    int header_end = ScanHeaderEnd(pending_, &found, &scan_err);
-    if (!scan_err.ok()) return scan_err;
-    if (found) {
-      std::string_view header(pending_.data(), static_cast<size_t>(header_end) + 1);
-      // The header is parsed under the caller's limits, as the rows are and
-      // as protowire-go parses both (#160).
-      ParseOptions popts;
-      popts.max_nesting_depth = opts_.max_nesting_depth;
-      popts.max_bytes_literal_length = opts_.max_bytes_literal_length;
+    const Token tok = lx.Next();
+    const int tok_end = lx.CurrentPos().offset;
+    if (tok.kind == TokenKind::kEOF || !Complete(tok_end)) return RowScan::kNeedMore;
+    switch (tok.kind) {
+      case TokenKind::kIllegal:
+        return RowScan::kBad;
+      case TokenKind::kNewline:
+      case TokenKind::kComment:
+        // Parse skips these between @proto, its name and `{`.
+        continue;
+      default:
+        break;
+    }
+    if (in_dataset) {
+      if (tok.kind == TokenKind::kRParen) {
+        *end = tok_end;
+        return RowScan::kRow;
+      }
+      continue;
+    }
+    if (tok.kind == TokenKind::kAtDataset) {
+      in_dataset = true;
+      proto = 0;
+    } else if (tok.kind == TokenKind::kAtProto) {
+      proto = 1;
+    } else if (tok.kind == TokenKind::kIdent && proto == 1) {
+      proto = 2;
+    } else if (tok.kind == TokenKind::kLBrace && proto > 0) {
+      bool failed = false;
+      const int close = FindMatchingBrace(pending_, tok.pos.offset, &failed);
+      if (failed) return RowScan::kBad;
+      if (close < 0) return RowScan::kNeedMore;
+      lx.RepositionTo(close + 1);
+      proto = 0;
+    } else {
+      proto = 0;
+    }
+  }
+}
+
+Status DatasetReader::ReadHeader() {
+  // The header is parsed under the caller's limits, as the rows are and as
+  // protowire-go parses both (#160).
+  ParseOptions popts;
+  popts.max_nesting_depth = opts_.max_nesting_depth;
+  popts.max_bytes_literal_length = opts_.max_bytes_literal_length;
+  for (;;) {
+    int header_end = 0;
+    const RowScan scan = ScanHeader(&header_end);
+    if (scan == RowScan::kBad) {
+      // Every token before the one the scan stopped at is complete, so
+      // Parse fails at or before it.
+      auto doc = Parse(pending_, popts);
+      if (!doc.ok()) return doc.status();
+      // Unreachable: Parse reads what the scan read.
+      return Status::Error("pxf: DatasetReader: the @dataset header neither ends nor fails");
+    }
+    if (scan == RowScan::kRow) {
+      std::string_view header(pending_.data(), static_cast<size_t>(header_end));
       auto doc = Parse(header, popts);
       if (!doc.ok()) return doc.status();
       if (doc->datasets.empty()) {
@@ -598,10 +543,15 @@ Status DatasetReader::ReadHeader() {
       type_ = std::move(doc->datasets[0].type);
       columns_ = std::move(doc->datasets[0].columns);
       directives_ = std::move(doc->directives);
-      Consume(static_cast<size_t>(header_end) + 1);
+      Consume(static_cast<size_t>(header_end));
       return Status::OK();
     }
     if (src_eof_) {
+      // The input ended without a complete header. A malformed document (a
+      // header cut short, a literal that never closes) reports what Parse
+      // reports for it; only a well-formed one has no dataset.
+      auto doc = Parse(pending_, popts);
+      if (!doc.ok()) return doc.status();
       return Status::Error("pxf: no @dataset directive in stream");
     }
     if (static_cast<int>(pending_.size()) >= kDefaultHeaderMaxBytes) {

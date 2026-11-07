@@ -14,9 +14,9 @@
 // Per draft §3.4.4: streaming consumers MUST enforce per-row arity and
 // the v1 cell-grammar rule on each row as it is consumed (not deferred
 // to end-of-input) and MUST yield rows in source order. Both invariants
-// fall out of this implementation: the byte-level row scanner produces
-// one (...) slice at a time, and the same `Parse()` used by the
-// materializing path validates it.
+// fall out of this implementation: the row scanner, which reads with
+// the lexer `Parse()` uses, produces one (...) slice at a time, and the
+// row parser the materializing path uses validates it.
 //
 // Convenience: `Scan(msg)` reads the next row and binds its cells to
 // `msg`'s fields by column name; `BindRow` is exported for callers that
@@ -24,8 +24,10 @@
 
 #pragma once
 
+#include <cstdint>
 #include <istream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -65,9 +67,13 @@ class DatasetReader {
   // stream") or on a parse / I/O error.
   static StatusOr<std::unique_ptr<DatasetReader>> Create(std::istream* src);
 
-  // Create under options: Scan binds rows with them, so a cell holding an
-  // Any block needs opts.type_resolver, and opts.skip_validate turns off
-  // Scan's schema check.
+  // Create under options. The bytes held while a row's end is sought are
+  // capped at opts.max_message_size, and the header and every row are
+  // parsed under its nesting and bytes-literal limits. Scan binds rows with
+  // the options, but under the default max_message_size, since a row's body
+  // repeats the column names. So a cell holding an Any block needs
+  // opts.type_resolver, and opts.skip_validate turns off Scan's schema
+  // check.
   static StatusOr<std::unique_ptr<DatasetReader>> Create(std::istream* src, UnmarshalOptions opts);
 
   // Row message type declared by the @dataset header (e.g. "trades.v1.Trade").
@@ -83,8 +89,12 @@ class DatasetReader {
 
   // Reads the next row into `*out`. Returns OK on success; returns OK
   // and sets `done_` when the row sequence is exhausted (callers check
-  // `Done()` to distinguish "got a row" from "EOF"). Returns a non-OK
-  // Status on parse / I/O error.
+  // `Done()` to distinguish "got a row" from "EOF"): at the end of the
+  // input, or before the next directive (read it via Tail). Anything else
+  // that is not a well-formed row, a row cut short at the end of the input
+  // included, is an error, and it is the error Parse reports for the same
+  // input, at the same position. So is a read failure, and holding more
+  // than the options' max_message_size bytes while seeking a row's end.
   //
   // After EOF or error, all subsequent calls return the same sticky
   // result.
@@ -114,8 +124,19 @@ class DatasetReader {
  private:
   DatasetReader() = default;
 
+  // What ScanRow or ScanHeader found; see dataset_reader.cc.
+  enum class RowScan : uint8_t { kNeedMore, kRow, kBad, kEnd, kNotRow };
+
   Status ReadHeader();
   Status Pull(size_t n);
+  Status Fail(Status st);
+  int MaxBytesLiteral() const;
+  StatusOr<DatasetRow> ParseRow(int start, int end, int* end_offset = nullptr) const;
+  std::optional<DatasetRow> TryWholeRow();
+  Status RowError(int start) const;
+  RowScan ScanRow(int* start, int* end);
+  RowScan ScanHeader(int* end) const;
+  bool Complete(int tok_end) const;
 
   std::istream* src_ = nullptr;
   Position PosAt(size_t i) const;
@@ -123,6 +144,11 @@ class DatasetReader {
 
   std::string pending_;  // bytes pulled from src_ but not yet consumed
   Position base_;        // where pending_[0] is in the stream
+  // The row scan resumes where the last read left it: scan_pos_ is the
+  // first token not known to be complete, row_start_ the open row's `(`
+  // or -1 between rows. Both index pending_.
+  int scan_pos_ = 0;
+  int row_start_ = -1;
   bool src_eof_ = false;
   bool finished_ = false;
   Status err_;
