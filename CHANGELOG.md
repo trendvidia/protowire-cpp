@@ -19,6 +19,7 @@ number says nothing about any other port. See the Releases section of
 - **`DatasetReader` caps the bytes it holds while looking for a row's end at `max_message_size`** (#164), as protowire-go does: `dataset input holds N bytes without a row boundary, MaxMessageSize=M`. A row that never closed was buffered whole, whatever the limit.
 - **`DatasetReader::Scan` binds a row under the default `max_message_size`** (#164), as protowire-go does. The body a row is bound as repeats the column names, so it is wider than the row, and a row whose bytes fit the caller's limit could still be refused when bound. The row's bytes are still capped as they are read. The other limits apply as before.
 - **A broken `@dataset` header is refused with the error `Parse` gives** (#164), as protowire-go does. `Create` said `no @dataset directive in stream` for a header cut short, and gave its own text for an unterminated string in it. The reader now finds the header's and each row's end with the lexer `Parse` uses rather than a byte scanner of its own. Streaming is about 15% faster on a 300,000-row table.
+- **A timestamp cell right before a row's `)` parses** (#169), as protowire-go does. `(2024-01-02T03:04:05Z)` was refused with `invalid timestamp: 2024-01-02T03:04:05Z)`, because the lexer read the `)` into the timestamp. A space before the `)`, or a later cell, hid it.
 
 ## [2.0.0] — 2026-11-05
 

@@ -681,8 +681,10 @@ Token Lexer::LexFloat(Position pos, size_t start) {
 Token Lexer::LexTimestamp(Position pos, size_t start) {
   while (pos_ < input_.size()) {
     uint8_t c = Peek();
+    // The bytes that end a run, as protowire-go's endsRun has them: `)` ends
+    // the last cell of a @dataset row (#169).
     if (c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == ',' || c == ']' || c == '}' ||
-        c == '#') {
+        c == ')' || c == '#') {
       break;
     }
     if (c == '/' && (Peek(1) == '/' || Peek(1) == '*')) break;
