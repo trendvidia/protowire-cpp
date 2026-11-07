@@ -1065,13 +1065,17 @@ StatusOr<std::optional<ValuePtr>> Parser::ParseRowCell() {
 }  // namespace
 
 int FindMatchingBrace(std::string_view input, int open_offset, bool* failed) {
-  enum class Mode : uint8_t { kCode, kString, kTripleString, kBytes, kLineComment, kBlockComment };
-  Mode mode = Mode::kCode;
-  int depth = 1;
-  bool esc = false;
-  int run = 0;  // quotes just seen in a triple string, or 1 after a '*'
+  BraceMatch m;
+  BraceMatch::State st = BraceMatch::State::kOpen;
+  const int i = m.Scan(input, open_offset + 1, &st);
+  if (st == BraceMatch::State::kClosed) return i;
+  if (st == BraceMatch::State::kFailed && failed != nullptr) *failed = true;
+  return -1;
+}
+
+int BraceMatch::Scan(std::string_view input, int i, State* state) {
   const int n = static_cast<int>(input.size());
-  for (int i = open_offset + 1; i < n; ++i) {
+  for (; i < n; ++i) {
     const char ch = input[i];
     switch (mode) {
       case Mode::kString:
@@ -1082,8 +1086,8 @@ int FindMatchingBrace(std::string_view input, int open_offset, bool* failed) {
         } else if (ch == '"') {
           mode = Mode::kCode;
         } else if (ch == '\n') {
-          if (failed != nullptr) *failed = true;
-          return -1;
+          *state = State::kFailed;
+          return i;
         }
         continue;
       case Mode::kTripleString:
@@ -1098,8 +1102,8 @@ int FindMatchingBrace(std::string_view input, int open_offset, bool* failed) {
         if (ch == '"') {
           mode = Mode::kCode;
         } else if (ch == '\n') {
-          if (failed != nullptr) *failed = true;
-          return -1;
+          *state = State::kFailed;
+          return i;
         }
         continue;
       case Mode::kLineComment:
@@ -1121,10 +1125,17 @@ int FindMatchingBrace(std::string_view input, int open_offset, bool* failed) {
         ++depth;
         break;
       case '}':
-        if (--depth == 0) return i;
+        if (--depth == 0) {
+          *state = State::kClosed;
+          return i;
+        }
         break;
       case '"':
-        if (i + 2 >= n) return -1;
+        // Whether it opens a triple-quoted string needs the next two bytes.
+        if (i + 2 >= n) {
+          *state = State::kOpen;
+          return i;
+        }
         if (input[i + 1] == '"' && input[i + 2] == '"') {
           mode = Mode::kTripleString;
           i += 2;
@@ -1137,7 +1148,10 @@ int FindMatchingBrace(std::string_view input, int open_offset, bool* failed) {
         break;
       case 'b':
       case '/': {
-        if (i + 1 >= n) return -1;
+        if (i + 1 >= n) {
+          *state = State::kOpen;
+          return i;
+        }
         const char next = input[i + 1];
         if (ch == 'b' && next == '"') {
           mode = Mode::kBytes;
@@ -1155,7 +1169,8 @@ int FindMatchingBrace(std::string_view input, int open_offset, bool* failed) {
         break;
     }
   }
-  return -1;
+  *state = State::kOpen;
+  return i;
 }
 
 StatusOr<DatasetDirective> ParseDatasetAt(Lexer* lex, Token* current, int max_depth) {

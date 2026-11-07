@@ -19,6 +19,14 @@
 #include <google/protobuf/descriptor.pb.h>
 #include <google/protobuf/dynamic_message.h>
 
+namespace protowire::pxf {
+// Reads the bytes a reader's scans have lexed (#168).
+class DatasetReaderTestPeer {
+ public:
+  static size_t& Scanned(DatasetReader& r) { return r.scanned_; }
+};
+}  // namespace protowire::pxf
+
 namespace {
 
 namespace pb = google::protobuf;
@@ -577,6 +585,83 @@ TEST(DatasetTimestampCell, EndsAtTheRowsParen) {
   ASSERT_EQ(row.cells.size(), 1u);
   ASSERT_TRUE(row.cells[0].has_value());
   EXPECT_NE(std::get_if<std::unique_ptr<protowire::pxf::TimestampVal>>(&*row.cells[0]), nullptr);
+}
+
+// ---- The scans are linear in their input (#168) ---------------------------
+
+// The row scan lexes each byte of a row about once, however many reads the
+// row arrives in: a token still open at a read's end is lexed again only once
+// bytes arrive that could end it. These count the bytes the scan lexes rather
+// than timing it, so a slow machine cannot fail them. The shapes are
+// protowire-go's (dataset_scan_linear_test.go). Without the waiting rule, an
+// unclosed 1 MiB row in 4 KiB reads is lexed about 128 MB.
+TEST(DatasetReaderScan, IsLinear) {
+  struct Shape {
+    const char* name;
+    std::string (*body)(int n);
+  };
+  auto rep = [](const std::string& s, int count) {
+    std::string out;
+    out.reserve(s.size() * count);
+    for (int i = 0; i < count; ++i) out += s;
+    return out;
+  };
+  static decltype(rep)* r = &rep;
+  const Shape shapes[] = {
+      {"short tokens", [](int n) { return (*r)("1 ", n / 2); }},
+      {"unterminated string", [](int n) { return "\"" + std::string(n, 'a'); }},
+      {"string of escaped quotes", [](int n) { return "\"" + (*r)("a\\\"", n / 3); }},
+      {"unterminated triple string", [](int n) { return "\"\"\"" + (*r)("a\"\"b", n / 4); }},
+      {"one long number", [](int n) { return std::string(n, '7'); }},
+      {"line comment", [](int n) { return "1 # " + std::string(n, 'x'); }},
+      {"unterminated block comment", [](int n) { return "1 /* " + (*r)("/ * x", n / 5); }},
+      // A timestamp runs to a byte that ends a run; '=' and '/' are not one,
+      // and must not make the scan lex it again.
+      {"one long timestamp", [](int n) { return "2026-10-23T" + (*r)("0=/", n / 3); }},
+      {"one long identifier", [](int n) { return "a" + (*r)("b.", n / 2); }},
+      {"one long bytes literal", [](int n) { return "b\"" + std::string(n, 'Q'); }},
+  };
+  for (const Shape& sh : shapes) {
+    for (const int size : {1 << 20, 2 << 20}) {
+      const std::string in = "@dataset T (a)\n(" + sh.body(size);
+      std::istringstream src(in);
+      auto tr = DatasetReader::Create(&src);
+      ASSERT_TRUE(tr.ok()) << sh.name << ": " << tr.status().ToString();
+      size_t& scanned = protowire::pxf::DatasetReaderTestPeer::Scanned(**tr);
+      scanned = 0;  // the row, not the header
+      DatasetRow row;
+      EXPECT_FALSE((*tr)->Next(&row).ok()) << sh.name << ": an unclosed row was accepted";
+      // A token cut by a read is lexed again once.
+      EXPECT_GT(scanned, 0u) << sh.name;
+      EXPECT_LE(scanned, 2 * in.size()) << sh.name << ", " << size << " bytes";
+    }
+  }
+}
+
+// The header scan resumes too: a header near the 64 KiB budget, read 4 KiB
+// at a time, was lexed from its start on every read.
+TEST(DatasetReaderScan, HeaderIsLinear) {
+  constexpr int n = 60 << 10;
+  auto rep = [](const std::string& s, int count) {
+    std::string out;
+    for (int i = 0; i < count; ++i) out += s;
+    return out;
+  };
+  const std::pair<const char*, std::string> shapes[] = {
+      {"short tokens", "@x { " + rep("a = 1 ", n / 6) + "}\n"},
+      {"one long string", "@x { k = \"" + std::string(n, 'a') + "\" }\n"},
+      {"@proto body", "@proto { " + rep("string a = 1; ", n / 14) + "}\n"},
+  };
+  for (const auto& [name, header] : shapes) {
+    const std::string in = header + "@dataset T (a)\n(1)\n";
+    std::istringstream src(in);
+    auto tr = DatasetReader::Create(&src);
+    ASSERT_TRUE(tr.ok()) << name << ": " << tr.status().ToString();
+    EXPECT_EQ((*tr)->Columns(), std::vector<std::string>{"a"}) << name;
+    const size_t scanned = protowire::pxf::DatasetReaderTestPeer::Scanned(**tr);
+    EXPECT_GT(scanned, 0u) << name;
+    EXPECT_LE(scanned, 2 * in.size()) << name;
+  }
 }
 
 }  // namespace
