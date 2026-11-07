@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <istream>
 #include <memory>
 #include <optional>
@@ -124,7 +125,7 @@ class DatasetReader {
   DatasetReader() = default;
 
   // What ScanRow or ScanHeader found; see dataset_reader.cc.
-  enum class RowScan { kNeedMore, kRow, kBad, kEnd, kNotRow };
+  enum class RowScan : uint8_t { kNeedMore, kRow, kBad, kEnd, kNotRow };
 
   Status ReadHeader();
   Status Pull(size_t n);
