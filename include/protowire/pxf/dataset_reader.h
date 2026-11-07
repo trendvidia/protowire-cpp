@@ -71,11 +71,13 @@ class DatasetReader {
 
   // Create under options. The bytes held while a row's end is sought are
   // capped at opts.max_message_size, and the header and every row are
-  // parsed under its nesting and bytes-literal limits. Scan binds rows with
-  // the options, but under the default max_message_size, since a row's body
-  // repeats the column names. So a cell holding an Any block needs
-  // opts.type_resolver, and opts.skip_validate turns off Scan's schema
-  // check.
+  // parsed under its nesting and bytes-literal limits. Scan binds each row
+  // as BindRow does under the same options, except that max_message_size
+  // stays at its default, since a row's body repeats the column names. So
+  // the other limits, type_resolver (which a cell holding an Any block
+  // needs), discard_unknown, skip_post_decode, skip_validate,
+  // on_secret_field, validator and report all apply to a streamed row, as
+  // they do in protowire-go (#166).
   static StatusOr<std::unique_ptr<DatasetReader>> Create(std::istream* src, UnmarshalOptions opts);
 
   // Row message type declared by the @dataset header (e.g. "trades.v1.Trade").
@@ -216,8 +218,11 @@ Status BindRow(google::protobuf::Message* msg,
                const std::vector<std::string>& columns,
                const DatasetRow& row);
 
-// BindRow under options: their limits, skip_validate, and type_resolver,
-// which a cell holding an Any block that opens with a type entry needs.
+// BindRow under options: every one of them applies to the row, as
+// Unmarshal applies it to a body. type_resolver is what a cell holding an
+// Any block that opens with a type entry needs. A decode error carries the
+// row's position; a schema violation or a validator's error is returned as
+// it is, as protowire-go returns them.
 Status BindRow(google::protobuf::Message* msg,
                const std::vector<std::string>& columns,
                const DatasetRow& row,

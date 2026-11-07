@@ -13,6 +13,7 @@
 
 #include "dataset_paths.h"
 #include "parser_internal.h"
+#include "protowire/check_seam.h"
 #include "protowire/limits.h"
 #include "protowire/pxf.h"  // Unmarshal, UnmarshalOptions
 #include "protowire/pxf/format.h"
@@ -180,15 +181,31 @@ Status AtRow(const Status& st,
 // UnmarshalFull rather than Unmarshal because its post-decode pass is what
 // gives an empty cell the field's (pxf.default), rejects it for
 // (pxf.required), and lets a null cell satisfy required (draft §3.4.4).
+//
+// Only a decode error is moved to the row, as protowire-go's atRow moves
+// only its *Error. The schema check runs before the decode and the
+// validator after it, so their errors are returned as they are (#166).
 Status BindCheckedRow(google::protobuf::Message* msg,
                       const std::vector<std::string>& columns,
                       const DatasetRow& row,
-                      const UnmarshalOptions& opts) {
+                      UnmarshalOptions opts) {
+  if (!opts.skip_validate) {
+    if (Status s = CheckDescriptorSchema(msg->GetDescriptor()); !s.ok()) return s;
+  }
+  check::Validator* validator = opts.validator;
+  check::Report* report_out = opts.report;
+  opts.skip_validate = true;
+  opts.validator = nullptr;
+  opts.report = nullptr;
   BodyWriter w(row);
   WriteRowBody(columns, row, &w);
   auto r = UnmarshalFull(w.body(), msg, opts);
-  if (r.ok()) return Status::OK();
-  return AtRow(r.status(), row.pos, columns, w.spans());
+  if (!r.ok()) return AtRow(r.status(), row.pos, columns, w.spans());
+  check::Report report;
+  bool has_report = false;
+  Status st = check::Validate(validator, *msg, &report, &has_report);
+  if (has_report && report_out != nullptr) *report_out = std::move(report);
+  return st;
 }
 
 }  // namespace
@@ -271,19 +288,20 @@ Status DatasetReader::Scan(google::protobuf::Message* msg) {
   // one type, which is the usual case, and a caller alternating types pays
   // only for what it does.
   const auto* desc = msg->GetDescriptor();
+  // The paths are checked first, as protowire-go checks them.
   if (desc != checked_type_) {
-    if (!opts_.skip_validate) {
-      if (Status s = CheckDescriptorSchema(desc); !s.ok()) return s;
-    }
     if (std::string path_err = CheckColumnPaths(desc, columns_); !path_err.empty()) {
       return HeaderError(std::move(path_err), row.pos);
     }
+    if (!opts_.skip_validate) {
+      if (Status s = CheckDescriptorSchema(desc); !s.ok()) return s;
+    }
     checked_type_ = desc;
   }
-  // The caller's limits but max_message_size, which is left at its default,
-  // as protowire-go binds a row: the row's bytes were capped as they were
-  // read, and the body it stands for repeats the column names, so it is
-  // wider than the row.
+  // The caller's options but max_message_size, which is left at its
+  // default, as protowire-go binds a row: the row's bytes were capped as
+  // they were read, and the body it stands for repeats the column names, so
+  // it is wider than the row.
   UnmarshalOptions opts = opts_;
   opts.skip_validate = true;
   opts.max_message_size = 0;
