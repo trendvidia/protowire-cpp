@@ -474,7 +474,9 @@ Status DatasetReader::Next(DatasetRow* out) {
       auto parsed =
           ParseDatasetRow(row_bytes,
                           static_cast<int>(columns_.size()),
-                          opts_.max_nesting_depth > 0 ? opts_.max_nesting_depth : kMaxNestingDepth);
+                          opts_.max_nesting_depth > 0 ? opts_.max_nesting_depth : kMaxNestingDepth,
+                          opts_.max_bytes_literal_length > 0 ? opts_.max_bytes_literal_length
+                                                             : kMaxBytesLiteralLength);
       // Advance past the consumed bytes whether parse succeeded or not
       // — on failure we don't want to retry the same bad row forever.
       pending_.erase(0, static_cast<size_t>(end) + 1);
@@ -560,7 +562,12 @@ Status DatasetReader::ReadHeader() {
     if (!scan_err.ok()) return scan_err;
     if (found) {
       std::string_view header(pending_.data(), static_cast<size_t>(header_end) + 1);
-      auto doc = Parse(header);
+      // The header is parsed under the caller's limits, as the rows are and
+      // as protowire-go parses both (#160).
+      ParseOptions popts;
+      popts.max_nesting_depth = opts_.max_nesting_depth;
+      popts.max_bytes_literal_length = opts_.max_bytes_literal_length;
+      auto doc = Parse(header, popts);
       if (!doc.ok()) return doc.status();
       if (doc->datasets.empty()) {
         return Status::Error("pxf: no @dataset directive in stream");

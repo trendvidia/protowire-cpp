@@ -9,6 +9,7 @@
 
 #include "protowire/limits.h"
 #include "protowire/pxf.h"
+#include "protowire/pxf/dataset_reader.h"
 #include "protowire/pxf/lexer.h"
 #include "protowire/pxf/parser.h"
 
@@ -17,6 +18,7 @@
 #include "protoc_compat.h"
 
 #include <memory>
+#include <sstream>
 #include <string>
 
 #include <google/protobuf/compiler/importer.h>
@@ -190,6 +192,57 @@ TEST_F(Hardening, BytesLiteralLengthBound) {
   popts.max_bytes_literal_length = 128;
   EXPECT_FALSE(protowire::pxf::Parse(doc, popts).ok());
   EXPECT_TRUE(protowire::pxf::Parse(doc).ok());
+}
+
+// A dataset row is read under the caller's limit too, as protowire-go reads
+// it (#160). It used to be read under the default whatever the options said.
+TEST(HardeningDataset, RowBytesLiteralUnderTheCallersLimit) {
+  // 256 characters of base64 decode to 192 bytes.
+  const std::string doc = "@dataset x.Row ( raw )\n( b\"" + std::string(256, 'A') + "\" )\n";
+  auto first_row = [&](int limit) {
+    std::istringstream in(doc);
+    UnmarshalOptions opts;
+    opts.max_bytes_literal_length = limit;
+    auto tr = protowire::pxf::DatasetReader::Create(&in, opts);
+    EXPECT_TRUE(tr.ok()) << tr.status().ToString();
+    protowire::pxf::DatasetRow row;
+    return (*tr)->Next(&row);
+  };
+  protowire::Status st = first_row(191);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("bytes literal decodes to more than MaxBytesLiteralLength=191 bytes"),
+            std::string::npos)
+      << st.ToString();
+  EXPECT_TRUE(first_row(192).ok()) << first_row(192).ToString();
+  EXPECT_TRUE(first_row(0).ok()) << first_row(0).ToString();  // 0 is the default
+}
+
+// The header too: a @header block before @dataset is parsed under the
+// caller's limits, so Create refuses it as protowire-go's NewDatasetReader does.
+TEST(HardeningDataset, HeaderUnderTheCallersLimits) {
+  const std::string bytes_doc =
+      "@header x.H { raw = b\"" + std::string(256, 'A') + "\" }\n@dataset x.Row ( raw )\n( 1 )\n";
+  const std::string deep_doc =
+      "@header x.H { a { b { c { d = 1 } } } }\n@dataset x.Row ( d )\n( 1 )\n";
+  auto create = [](const std::string& doc, UnmarshalOptions opts) {
+    std::istringstream in(doc);
+    return protowire::pxf::DatasetReader::Create(&in, opts).status();
+  };
+  UnmarshalOptions opts;
+  opts.max_bytes_literal_length = 191;
+  protowire::Status st = create(bytes_doc, opts);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("bytes literal decodes to more than MaxBytesLiteralLength=191 bytes"),
+            std::string::npos)
+      << st.ToString();
+  EXPECT_TRUE(create(bytes_doc, {}).ok());
+  opts = {};
+  opts.max_nesting_depth = 3;
+  st = create(deep_doc, opts);
+  ASSERT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("MaxNestingDepth=3"), std::string::npos) << st.ToString();
+  opts.max_nesting_depth = 4;
+  EXPECT_TRUE(create(deep_doc, opts).ok()) << create(deep_doc, opts).ToString();
 }
 
 TEST_F(Hardening, RepeatedCountBound) {
