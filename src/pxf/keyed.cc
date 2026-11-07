@@ -35,10 +35,11 @@ void CanonEntries(std::vector<EntryPtr>& entries, const pb::Descriptor* desc);
 // redundant agreeing spelling of an entry's key — from entries. Disagreeing
 // or non-string assignments are kept (the document is invalid; formatting
 // must not silently change its meaning). Leading comments of a dropped
-// assignment move to the next surviving entry.
-void DropKeyAssignments(std::vector<EntryPtr>& entries,
-                        std::string_view key_name,
-                        std::string_view entry_name) {
+// assignment move to the next surviving entry; when none follows, they are
+// returned, for the block's trailing comments (#176).
+std::vector<Comment> DropKeyAssignments(std::vector<EntryPtr>& entries,
+                                        std::string_view key_name,
+                                        std::string_view entry_name) {
   std::vector<Comment> pending;
   std::vector<EntryPtr> out;
   out.reserve(entries.size());
@@ -61,6 +62,13 @@ void DropKeyAssignments(std::vector<EntryPtr>& entries,
     out.push_back(std::move(e));
   }
   entries = std::move(out);
+  return pending;
+}
+
+// PrependComments puts `left` before the comments already in *to.
+void PrependComments(std::vector<Comment> left, std::vector<Comment>* to) {
+  left.insert(left.end(), std::make_move_iterator(to->begin()), std::make_move_iterator(to->end()));
+  *to = std::move(left);
 }
 
 // CanonKeyedEntries normalizes the entries of a keyed block in place:
@@ -81,6 +89,7 @@ void CanonKeyedEntries(Block* b, const pb::FieldDescriptor* fd, const pb::FieldD
           nb->name_quoted = a->key_quoted;
           nb->entries = std::move(bv->entries);
           nb->leading_comments = std::move(a->leading_comments);
+          nb->trailing_comments = std::move(bv->trailing_comments);
           eb = nb.get();
           e = EntryPtr(std::move(nb));
         }
@@ -88,7 +97,7 @@ void CanonKeyedEntries(Block* b, const pb::FieldDescriptor* fd, const pb::FieldD
     }
     if (!eb) continue;  // malformed entry; leave untouched
     if (eb->name_quoted && IsIdentifierSafeEntryName(eb->name)) eb->name_quoted = false;
-    DropKeyAssignments(eb->entries, key_name, eb->name);
+    PrependComments(DropKeyAssignments(eb->entries, key_name, eb->name), &eb->trailing_comments);
     CanonEntries(eb->entries, fd->message_type());
   }
 }
@@ -129,7 +138,7 @@ void CanonAnonymousKeyed(EntryPtr& entry,
   blk->leading_comments = std::move(n->leading_comments);
   for (size_t i = 0; i < lv->elements.size(); ++i) {
     auto* bv = GetMut<ValuePtr, BlockVal>(lv->elements[i]);
-    DropKeyAssignments(bv->entries, key_name, keys[i]);
+    std::vector<Comment> left = DropKeyAssignments(bv->entries, key_name, keys[i]);
     CanonEntries(bv->entries, fd->message_type());
     auto eb = std::make_unique<Block>();
     eb->pos = bv->pos;
@@ -137,6 +146,8 @@ void CanonAnonymousKeyed(EntryPtr& entry,
     eb->name = keys[i];
     eb->name_quoted = !IsIdentifierSafeEntryName(keys[i]);
     eb->entries = std::move(bv->entries);
+    eb->trailing_comments = std::move(bv->trailing_comments);
+    PrependComments(std::move(left), &eb->trailing_comments);
     blk->entries.push_back(EntryPtr(std::move(eb)));
   }
   entry = EntryPtr(std::move(blk));
@@ -178,6 +189,7 @@ void CanonAssignment(EntryPtr& entry, Assignment* n, const pb::FieldDescriptor* 
       blk->name = n->key;
       blk->entries = std::move(bv->entries);
       blk->leading_comments = std::move(n->leading_comments);
+      blk->trailing_comments = std::move(bv->trailing_comments);
       CanonKeyedEntries(blk.get(), fd, key_fd);
       entry = EntryPtr(std::move(blk));
     }

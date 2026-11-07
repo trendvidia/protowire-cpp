@@ -372,6 +372,7 @@ class AstDump {
       Comments("", x.leading_comments);
       for (const auto& r : x.rows) {
         out_ += "row " + Pos(r.pos) + "\n";
+        Comments(" ", r.leading_comments);
         for (const auto& c : r.cells) {
           if (c.has_value()) {
             Value(" ", *c);
@@ -382,6 +383,7 @@ class AstDump {
       }
     }
     Entries("", doc.entries);
+    Comments("", doc.trailing_comments, "trailing");
   }
 
  private:
@@ -394,9 +396,11 @@ class AstDump {
     for (size_t i = 0; i < v.size(); ++i) out += (i ? " " : "") + v[i];
     return out;
   }
-  void Comments(const std::string& ind, const std::vector<pxf::Comment>& cs) {
+  void Comments(const std::string& ind,
+                const std::vector<pxf::Comment>& cs,
+                const char* label = "comment") {
     for (const auto& c : cs) {
-      out_ += ind + "comment " + Pos(c.pos) + " " + Quote(c.text) + "\n";
+      out_ += ind + label + " " + Pos(c.pos) + " " + Quote(c.text) + "\n";
     }
   }
   void Kind(const pxf::StringVal& v, const std::string&) {
@@ -430,6 +434,7 @@ class AstDump {
   void Kind(const pxf::BlockVal& v, const std::string& ind) {
     out_ += "blockval\n";
     Entries(ind + " ", v.entries);
+    Comments(ind + " ", v.trailing_comments, "trailing");
   }
   void Value(const std::string& ind, const pxf::ValuePtr& v) {
     auto [start, end] = pxf::ValueSpan(v);
@@ -456,6 +461,7 @@ class AstDump {
     out_ += "block " + Quote(e.name) + " " + Bool(e.name_quoted) + "\n";
     Comments(ind, e.leading_comments);
     Entries(ind + " ", e.entries);
+    Comments(ind + " ", e.trailing_comments, "trailing");
   }
   void Entries(const std::string& ind, const std::vector<pxf::EntryPtr>& es) {
     for (const auto& e : es) {

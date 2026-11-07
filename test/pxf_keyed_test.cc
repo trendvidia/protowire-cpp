@@ -517,4 +517,39 @@ TEST_F(Keyed, DiagnosticsToleratesNullDescriptor) {
   EXPECT_TRUE(protowire::pxf::KeyedDiagnostics(doc.document, nullptr).empty());
 }
 
+// CanonicalizeKeyed keeps a block's closing comments when it rewrites the
+// block, and the comments of a redundant key assignment it drops last in a
+// block (#176; protowire-go's TestCanonicalizeKeyed_KeepsClosingComments).
+TEST_F(Keyed, CanonicalizeKeepsClosingComments) {
+  struct Case {
+    const char* name;
+    std::string src;
+    std::string want;
+  };
+  const std::vector<Case> cases = {
+      {"dropped last key assignment",
+       "@type keyed.v1.Node\n\nchildren {\n  greeting {\n    type = \"Label\"\n    # about the "
+       "key\n    id = \"greeting\"\n  }\n  # end of children\n}\n",
+       "@type keyed.v1.Node\n\nchildren {\n  greeting {\n    type = \"Label\"\n    # about the "
+       "key\n  }\n  # end of children\n}\n"},
+      {"assignment form",
+       "@type keyed.v1.Node\n\nchildren = {\n  greeting = {\n    type = \"Label\"\n    # end of "
+       "greeting\n  }\n  # end of children\n}\n",
+       "@type keyed.v1.Node\n\nchildren {\n  greeting {\n    type = \"Label\"\n    # end of "
+       "greeting\n  }\n  # end of children\n}\n"},
+      {"anonymous list",
+       "@type keyed.v1.Node\n\nchildren = [\n  {\n    type = \"L\"\n    # about the key\n    id = "
+       "\"g\"\n  },\n  {\n    id = \"h\"\n    # end of h\n  }\n]\n",
+       "@type keyed.v1.Node\n\nchildren {\n  g {\n    type = \"L\"\n    # about the key\n  }\n  h "
+       "{\n    # end of h\n  }\n}\n"},
+  };
+  for (const auto& c : cases) {
+    const pb::Descriptor* d = DescOf(c.src);
+    ASSERT_NE(d, nullptr) << c.name;
+    const std::string out = Fmt(c.src, d);
+    EXPECT_EQ(out, c.want) << c.name;
+    EXPECT_EQ(Fmt(out, d), out) << c.name << ": formatting is not a fixed point";
+  }
+}
+
 }  // namespace
