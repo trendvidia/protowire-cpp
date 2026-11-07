@@ -49,19 +49,6 @@ class Parser {
     Advance();
   }
 
-  // A parser that reads no comments before its first token.
-  struct DropLeadingCommentsTag {};
-  Parser(DropLeadingCommentsTag,
-         std::string_view input,
-         int max_depth,
-         int max_bytes_literal,
-         Position start)
-      : lex_(input, start), max_depth_(max_depth), drop_comments_(true) {
-    lex_.SetMaxBytesLiteral(max_bytes_literal);
-    Advance();
-    drop_comments_ = false;
-  }
-
   struct TolerantTag {};
   Parser(TolerantTag, std::string_view input, int max_depth, int max_bytes_literal)
       : lex_(input), max_depth_(max_depth), tolerant_(true) {
@@ -134,7 +121,9 @@ class Parser {
   StatusOr<ValuePtr> ParseValue(int depth);
   StatusOr<ValuePtr> ParseList(int depth);
   StatusOr<ValuePtr> ParseBlockVal(int depth);
-  StatusOr<std::vector<EntryPtr>> ParseBody(int depth, Position* end);
+  StatusOr<std::vector<EntryPtr>> ParseBody(int depth,
+                                            Position* end,
+                                            std::vector<Comment>* trailing);
   StatusOr<Directive> ParseDirective(int* end_offset);
   StatusOr<ProtoDirective> ParseProtoDirective(int* end_offset);
   StatusOr<std::optional<ValuePtr>> ParseRowCell();
@@ -167,9 +156,6 @@ class Parser {
   int max_depth_ = kMaxNestingDepth;
   bool for_decoder_ = false;
   bool tolerant_ = false;
-  // Advance skips comments without keeping them, for a caller that reads
-  // none: DatasetReader's row parse, before the row's `(`.
-  bool drop_comments_ = false;
   std::vector<Error> errs_;
   Position err_pos_;
   // Just past the last significant token consumed: where a missing value
@@ -183,7 +169,7 @@ void Parser::Advance() {
     current_ = lex_.Next();
     if (current_.kind == TokenKind::kNewline) continue;
     if (current_.kind == TokenKind::kComment) {
-      if (!drop_comments_) comments_.push_back(Comment{current_.pos, std::string(current_.value)});
+      comments_.push_back(Comment{current_.pos, std::string(current_.value)});
       continue;
     }
     return;
@@ -369,6 +355,8 @@ StatusOr<Document> Parser::ParseDocument() {
     auto entry = std::move(e).consume();
     if (entry.has_value()) doc.entries.push_back(std::move(*entry));
   }
+  // The comments after the last entry, directive or row (#176).
+  doc.trailing_comments = FlushComments();
   return doc;
 }
 
@@ -488,7 +476,7 @@ StatusOr<std::optional<EntryPtr>> Parser::ParseEntry(int depth, bool allow_map_e
         return std::optional<EntryPtr>(EntryPtr(std::move(b)));
       }
       Advance();  // consume {
-      auto entries = ParseBody(depth + 1, &b->end);
+      auto entries = ParseBody(depth + 1, &b->end, &b->trailing_comments);
       if (!entries.ok()) return entries.status();
       b->entries = std::move(entries).consume();
       return std::optional<EntryPtr>(EntryPtr(std::move(b)));
@@ -689,14 +677,19 @@ StatusOr<ValuePtr> Parser::ParseBlockVal(int depth) {
     return ValuePtr(std::move(bv));
   }
   Advance();  // {
-  auto entries = ParseBody(depth + 1, &bv->end);
+  auto entries = ParseBody(depth + 1, &bv->end, &bv->trailing_comments);
   if (!entries.ok()) return entries.status();
   bv->entries = std::move(entries).consume();
   return ValuePtr(std::move(bv));
 }
 
-// ParseBody is entered just inside a `{` and leaves past its `}`.
-StatusOr<std::vector<EntryPtr>> Parser::ParseBody(int depth, Position* end) {
+// ParseBody is entered just inside a `{` and leaves past its `}`. The
+// comments after the last entry precede no entry, so no entry flushes them:
+// they go to *trailing, taken before the `}` is consumed, since Advance would
+// add the comments after it, which belong to what follows the block (#176).
+StatusOr<std::vector<EntryPtr>> Parser::ParseBody(int depth,
+                                                  Position* end,
+                                                  std::vector<Comment>* trailing) {
   std::vector<EntryPtr> out;
   while (current_.kind != TokenKind::kRBrace && current_.kind != TokenKind::kEOF &&
          !TolerantRowClose()) {
@@ -714,6 +707,7 @@ StatusOr<std::vector<EntryPtr>> Parser::ParseBody(int depth, Position* end) {
     auto entry = std::move(e).consume();
     if (entry.has_value()) out.push_back(std::move(*entry));
   }
+  *trailing = FlushComments();
   if (current_.kind != TokenKind::kRBrace) {
     if (!tolerant_) {
       return Err(current_.pos, std::string("expected '}', got ") + TokenKindName(current_.kind));
@@ -926,6 +920,11 @@ StatusOr<DatasetDirective> Parser::ParseTableDirective(int* end_offset) {
 // offset immediately past the closing `)` to *end_offset.
 StatusOr<DatasetRow> Parser::ParseTableRow(int expected, int* end_offset, bool read_past) {
   Position pos = current_.pos;
+  // The comments pending at the `(` and those inside the row are the row's
+  // leading_comments (#176). Left pending, they would pass to the next row or
+  // directive, or to the document's end. DatasetReader's row parser calls
+  // this too, so it files them as Parse does.
+  std::vector<Comment> leading = FlushComments();
   Advance();  // consume (
 
   DatasetRow row;
@@ -948,6 +947,13 @@ StatusOr<DatasetRow> Parser::ParseTableRow(int expected, int* end_offset, bool r
                std::string("expected ',' or ')' in @dataset row, got ") + DatasetTokenMsg());
   }
   int eo = current_.pos.offset + 1;
+  // Taken before the `)` is consumed: Advance would add the comments after
+  // it, which belong to what follows the row.
+  std::vector<Comment> inside = FlushComments();
+  leading.insert(leading.end(),
+                 std::make_move_iterator(inside.begin()),
+                 std::make_move_iterator(inside.end()));
+  row.leading_comments = std::move(leading);
   // Consume the `)`, unless the caller reads nothing after the row: lexing on
   // would read the comments after it for nothing.
   if (read_past) Advance();
@@ -1187,7 +1193,7 @@ StatusOr<DatasetRow> ParseDatasetRow(std::string_view row,
                                      int max_bytes_literal,
                                      Position start,
                                      int* end_offset) {
-  Parser p(Parser::DropLeadingCommentsTag{}, row, max_depth, max_bytes_literal, start);
+  Parser p(row, max_depth, max_bytes_literal, start);
   if (p.current().kind != TokenKind::kLParen) {
     // Parse reports any token here, a lexical error included, as a
     // top-level entry beside the dataset.

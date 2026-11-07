@@ -145,6 +145,7 @@ class Formatter {
     }
     out_ += " {\n";
     FormatEntries(b.entries, level + 1);
+    WriteComments(b.trailing_comments, level + 1);
     WriteIndent(level);
     out_ += "}\n";
   }
@@ -195,6 +196,7 @@ class Formatter {
   void FormatValueImpl(const BlockVal& v, int level) {
     out_ += "{\n";
     FormatEntries(v.entries, level + 1);
+    WriteComments(v.trailing_comments, level + 1);
     WriteIndent(level);
     out_.push_back('}');
   }
@@ -295,6 +297,7 @@ void FormatDataset(const DatasetDirective& d, Formatter& f, std::string& out) {
   }
   out += ")\n";
   for (const auto& row : d.rows) {
+    f.WriteComments(row.leading_comments, 0);
     out.push_back('(');
     for (size_t i = 0; i < row.cells.size(); ++i) {
       if (i > 0) out += ", ";
@@ -356,6 +359,7 @@ std::string FormatDocument(const Document& doc) {
     }
     f.WriteComments(doc.leading_comments, 0);
     f.FormatEntries(doc.entries, 0);
+    f.WriteComments(doc.trailing_comments, 0);
     return out;
   }
 
@@ -384,6 +388,7 @@ std::string FormatDocument(const Document& doc) {
     out.push_back('\n');
     f.FormatEntries(doc.entries, 0);
   }
+  f.WriteComments(doc.trailing_comments, 0);
   return out;
 }
 

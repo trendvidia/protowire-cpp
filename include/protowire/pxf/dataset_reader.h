@@ -140,9 +140,9 @@ class DatasetReader {
   Status Pull(size_t n);
   Status Fail(Status st);
   int MaxBytesLiteral() const;
-  StatusOr<DatasetRow> ParseRow(int start, int end, int* end_offset = nullptr) const;
+  StatusOr<DatasetRow> ParseRow(int end, int* end_offset = nullptr) const;
   std::optional<DatasetRow> TryWholeRow();
-  Status RowError(int start) const;
+  Status RowError() const;
   RowScan ScanRow(int* start, int* end);
   RowScan ScanHeader(int* end);
   bool Complete(const Token& tok, int tok_end) const;

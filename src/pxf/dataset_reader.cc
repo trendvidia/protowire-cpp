@@ -240,7 +240,7 @@ Status DatasetReader::Next(DatasetRow* out) {
     int end = 0;
     switch (ScanRow(&start, &end)) {
       case RowScan::kRow: {
-        auto parsed = ParseRow(start, end);
+        auto parsed = ParseRow(end);
         Consume(static_cast<size_t>(end));
         if (!parsed.ok()) return Fail(parsed.status());
         *out = std::move(parsed).consume();
@@ -251,7 +251,7 @@ Status DatasetReader::Next(DatasetRow* out) {
         // stopped the scan: the lexer may reject a token before its end (an
         // oversized bytes literal), and cut there it would read as
         // unterminated instead.
-        return Fail(RowError(start));
+        return Fail(RowError());
       case RowScan::kEnd:
         // The directive and what precedes it stay buffered, for Tail.
         finished_ = true;
@@ -266,7 +266,7 @@ Status DatasetReader::Next(DatasetRow* out) {
     // At the end of the source only spaces and comments may remain; anything
     // else is a row cut short.
     if (src_eof_) {
-      if (start >= 0) return Fail(RowError(start));
+      if (start >= 0) return Fail(RowError());
       Consume(pending_.size());
       finished_ = true;
       return Status::OK();
@@ -357,14 +357,16 @@ int DatasetReader::MaxBytesLiteral() const {
                                             : kMaxBytesLiteralLength;
 }
 
-// ParseRow parses pending_ from `start` as one row, with the parser Parse
-// uses, at its stream position. `end` bounds the bytes it may read.
-StatusOr<DatasetRow> DatasetReader::ParseRow(int start, int end, int* end_offset) const {
-  return ParseDatasetRow(std::string_view(pending_).substr(start, end - start),
+// ParseRow parses the row in pending_[:end] with the parser Parse uses, at
+// its stream position. It starts at pending_[0], as protowire-go's parseRow
+// does: only newlines and comments precede the row's `(` there, and those
+// comments are the row's leading_comments, as Parse files them (#176).
+StatusOr<DatasetRow> DatasetReader::ParseRow(int end, int* end_offset) const {
+  return ParseDatasetRow(std::string_view(pending_).substr(0, end),
                          static_cast<int>(columns_.size()),
                          opts_.max_nesting_depth > 0 ? opts_.max_nesting_depth : kMaxNestingDepth,
                          MaxBytesLiteral(),
-                         PosAt(static_cast<size_t>(start)),
+                         base_,
                          end_offset);
 }
 
@@ -376,22 +378,22 @@ StatusOr<DatasetRow> DatasetReader::ParseRow(int start, int end, int* end_offset
 // boundary. Called only between rows.
 std::optional<DatasetRow> DatasetReader::TryWholeRow() {
   int end_offset = 0;
-  auto row = ParseRow(scan_pos_, static_cast<int>(pending_.size()), &end_offset);
+  auto row = ParseRow(static_cast<int>(pending_.size()), &end_offset);
   if (!row.ok()) return std::nullopt;
   Consume(static_cast<size_t>(end_offset - base_.offset));
   return std::move(row).consume();
 }
 
-// RowError is the error Parse reports for the row starting at pending_[start],
-// which the scan found cannot close well. Every token before the one that
-// stopped the scan is the same as Parse sees, so the row parser fails where
-// Parse fails on the whole document.
-Status DatasetReader::RowError(int start) const {
-  auto row = ParseRow(start, static_cast<int>(pending_.size()));
+// RowError is the error Parse reports for the row being scanned, which the
+// scan found cannot close well. Only newlines and comments precede its `(` in
+// the buffer, and every token before the one that stopped the scan is the
+// same as Parse sees, so the row parser fails where Parse fails on the whole
+// document.
+Status DatasetReader::RowError() const {
+  auto row = ParseRow(static_cast<int>(pending_.size()));
   if (!row.ok()) return row.status();
   // Unreachable: the bytes hold no `)` that closes the row.
-  return Status::Error("pxf: DatasetReader: row at offset " + std::to_string(start) +
-                       " neither closes nor fails");
+  return Status::Error("pxf: DatasetReader: a row neither closes nor fails");
 }
 
 // ScanRow finds the next row with the lexer Parse uses, resuming at

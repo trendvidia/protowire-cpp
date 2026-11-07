@@ -317,9 +317,15 @@ type astDump struct{ w *bufio.Writer }
 
 func pos(p pxf.Position) string { return fmt.Sprintf("%d:%d:%d", p.Line, p.Column, p.Offset) }
 
-func (d astDump) comments(ind string, cs []pxf.Comment) {
+func (d astDump) comments(ind string, cs []pxf.Comment) { d.labeled(ind, "comment", cs) }
+
+// trailing writes the comments that follow a block's or document's last
+// entry (TrailingComments, protowire-go#279).
+func (d astDump) trailing(ind string, cs []pxf.Comment) { d.labeled(ind, "trailing", cs) }
+
+func (d astDump) labeled(ind, label string, cs []pxf.Comment) {
 	for _, c := range cs {
-		fmt.Fprintf(d.w, "%scomment %s %s\n", ind, pos(c.Pos), quote(c.Text))
+		fmt.Fprintf(d.w, "%s%s %s %s\n", ind, label, pos(c.Pos), quote(c.Text))
 	}
 }
 
@@ -355,6 +361,7 @@ func (d astDump) value(ind string, v pxf.Value) {
 	case *pxf.BlockVal:
 		fmt.Fprintf(d.w, "blockval\n")
 		d.entries(ind+" ", v.Entries)
+		d.trailing(ind+" ", v.TrailingComments)
 	}
 }
 
@@ -378,6 +385,7 @@ func (d astDump) entries(ind string, es []pxf.Entry) {
 			fmt.Fprintf(d.w, "block %s %v\n", quote(e.Name), e.NameQuoted)
 			d.comments(ind, e.LeadingComments)
 			d.entries(ind+" ", e.Entries)
+			d.trailing(ind+" ", e.TrailingComments)
 		}
 	}
 }
@@ -399,6 +407,7 @@ func (d astDump) document(doc *pxf.Document) {
 		d.comments("", x.LeadingComments)
 		for _, r := range x.Rows {
 			fmt.Fprintf(d.w, "row %s\n", pos(r.Pos))
+			d.comments(" ", r.LeadingComments)
 			for _, c := range r.Cells {
 				if c == nil {
 					fmt.Fprintf(d.w, " empty\n")
@@ -409,6 +418,7 @@ func (d astDump) document(doc *pxf.Document) {
 		}
 	}
 	d.entries("", doc.Entries)
+	d.trailing("", doc.TrailingComments)
 }
 
 // defaultTable is the same list in cmd/pxf_diff. The literals are a schema's,

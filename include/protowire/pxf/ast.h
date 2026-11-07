@@ -180,7 +180,11 @@ struct Block {
   // else.
   bool name_quoted = false;
   std::vector<EntryPtr> entries;
-  std::vector<Comment> leading_comments;
+  std::vector<Comment>
+      leading_comments;  // trailing_comments are the comments after the last entry, before the
+  // closing '}' (all of an empty block's comments), as protowire-go has them
+  // (#176).
+  std::vector<Comment> trailing_comments;
 };
 // TypeEntry is `@type = "<type-url>"` opening a block bound to
 // google.protobuf.Any (draft -01 "Any Blocks"). The rest of the block is a
@@ -197,7 +201,11 @@ struct TypeEntry {
 struct BlockVal {
   Position pos;
   Position end;  // just past the closing '}'
-  std::vector<EntryPtr> entries;
+  std::vector<EntryPtr>
+      entries;  // trailing_comments are the comments after the last entry, before the
+  // closing '}' (all of an empty block's comments), as protowire-go has them
+  // (#176).
+  std::vector<Comment> trailing_comments;
 };
 
 // Directive is a top-of-document `@<name> *(<prefix-id>) [{ ... }]`
@@ -237,6 +245,10 @@ struct Directive {
 struct DatasetRow {
   Position pos;
   std::vector<std::optional<ValuePtr>> cells;
+  // leading_comments are the comments before this row (after the column
+  // list or the previous row) and inside it. FormatDocument writes a row
+  // on one line, so it writes them all before the row (#176).
+  std::vector<Comment> leading_comments;
 };
 
 // DatasetDirective is a `@dataset <type> ( col1, col2, ... ) row*` entry
@@ -308,6 +320,9 @@ struct Document {
       0;  // byte offset where the schema-typed body begins (after all leading directives)
   std::vector<EntryPtr> entries;
   std::vector<Comment> leading_comments;
+  // trailing_comments are the comments after the document's last entry,
+  // directive or dataset row, which precede no entry of their own (#176).
+  std::vector<Comment> trailing_comments;
 };
 
 Position EntryPos(const EntryPtr& e);

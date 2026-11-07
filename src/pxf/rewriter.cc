@@ -88,6 +88,7 @@ EntryPtr CloneEntry(const EntryPtr& e) {
     n->name_quoted = b->name_quoted;
     n->entries = CloneEntries(b->entries);
     n->leading_comments = b->leading_comments;
+    n->trailing_comments = b->trailing_comments;
     return n;
   }
   return std::make_unique<TypeEntry>(*As<TypeEntry>(e));
@@ -115,6 +116,7 @@ ValuePtr CloneValue(const ValuePtr& v) {
     n->pos = b->pos;
     n->end = b->end;
     n->entries = CloneEntries(b->entries);
+    n->trailing_comments = b->trailing_comments;
     return n;
   }
   return std::visit(
