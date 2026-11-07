@@ -15,6 +15,7 @@
 #include <string>
 
 #include <google/protobuf/compiler/importer.h>
+#include <google/protobuf/descriptor.pb.h>
 #include <google/protobuf/dynamic_message.h>
 
 namespace {
@@ -368,6 +369,116 @@ TEST_F(PxfTableReader, BindRowUnknownColumnErrors) {
   auto msg = NewAllTypes();
   auto s = (*tr)->Scan(msg.get());
   EXPECT_FALSE(s.ok());
+}
+
+// ---- Positions count from the start of the stream (#161) --------------------
+
+// Each case reads rows until an error and writes one line per row as the Go
+// probe in #161's PR does: a row's position and its first cell's span, or the
+// error. The expected lines are protowire-go 903b4a7's output for the same
+// inputs, under MaxBytesLiteralLength=191. The first `skip` rows are read
+// and not written.
+std::string ReadAll(const std::string& in, bool scan, int skip) {
+  std::istringstream src(in);
+  protowire::pxf::UnmarshalOptions opts;
+  opts.max_bytes_literal_length = 191;
+  auto tr = DatasetReader::Create(&src, opts);
+  if (!tr.ok()) return "create: " + tr.status().ToString() + "\n";
+  auto at = [](const protowire::pxf::Position& p) {
+    return std::to_string(p.line) + ":" + std::to_string(p.column) + "@" + std::to_string(p.offset);
+  };
+  std::string out;
+  for (int i = 0; i < skip; ++i) {
+    DatasetRow row;
+    if (protowire::Status st = (*tr)->Next(&row); !st.ok()) return "skip: " + st.ToString() + "\n";
+  }
+  for (int i = skip; i < skip + 10; ++i) {
+    const std::string name = "row" + std::to_string(i) + ": ";
+    if (scan) {
+      pb::FieldDescriptorProto msg;
+      protowire::Status st = (*tr)->Scan(&msg);
+      if (!st.ok()) return out + name + st.ToString() + "\n";
+      continue;
+    }
+    DatasetRow row;
+    protowire::Status st = (*tr)->Next(&row);
+    if (!st.ok()) return out + name + st.ToString() + "\n";
+    if (row.cells.empty()) return out + name + "EOF\n";
+    out += name + "pos=" + at(row.pos);
+    if (row.cells[0].has_value()) {
+      auto [first, end] = protowire::pxf::ValueSpan(*row.cells[0]);
+      out += " cell0=" + at(first) + " end=" + at(end);
+    }
+    out += "\n";
+  }
+  return out;
+}
+
+TEST(DatasetReaderPositions, MatchProtowireGo) {
+  const std::string big = "b\"" + std::string(256, 'A') + "\"";
+  const std::string over = ": bytes literal decodes to more than MaxBytesLiteralLength=191 bytes\n";
+  struct Case {
+    const char* name;
+    std::string in;
+    bool scan;
+    std::string want;
+    int skip = 0;
+  };
+  const Case cases[] = {
+      {"first row", "@dataset x.Row ( raw )\n( " + big + " )\n", false, "row0: 2:3" + over},
+      {"later row",
+       "@dataset x.Row ( raw )\n( 1 )\n( 2 )\n\n  ( " + big + " )\n",
+       false,
+       "row0: pos=2:1@23 cell0=2:3@25 end=2:4@26\n"
+       "row1: pos=3:1@29 cell0=3:3@31 end=3:4@32\n"
+       "row2: 5:5" +
+           over},
+      {"rows on the header's line",
+       "@dataset x.Row ( raw ) ( 1 )   ( " + big + " )\n",
+       false,
+       "row0: pos=1:24@23 cell0=1:26@25 end=1:27@26\n"
+       "row1: 1:34" +
+           over},
+      {"a row's second line",
+       "@dataset x.Row ( a, b ) ( 1,\n    " + big + " )\n",
+       false,
+       "row0: 2:5" + over},
+      {"arity",
+       "@dataset x.Row ( a, b )\n( 1, 2 )\n   ( 1 )\n",
+       false,
+       "row0: pos=2:1@24 cell0=2:3@26 end=2:4@27\n"
+       "row1: 3:4: @dataset row has 1 cells, expected 2 (column count)\n"},
+      {"bad token",
+       "@dataset x.Row ( a )\n( 1 )\n  ( 1 2 )\n",
+       false,
+       "row0: pos=2:1@21 cell0=2:3@23 end=2:4@24\n"
+       "row1: 3:7: expected ',' or ')' in @dataset row, got integer\n"},
+      // 18000 bytes of rows before the bad one: it arrives several reads in.
+      {"many reads",
+       "@dataset x.Row ( raw )\n" +
+           [] {
+             std::string rows;
+             for (int i = 0; i < 3000; ++i) rows += "( 1 )\n";
+             return rows;
+           }() +
+           "  ( 1, 2 )\n",
+       false,
+       "row3000: 3002:3: @dataset row has 2 cells, expected 1 (column count)\n",
+       3000},
+      {"scan, a column the type lacks",
+       "@dataset google.protobuf.FieldDescriptorProto ( nope )\n\n  ( 1 )\n",
+       true,
+       "row0: 3:3: @dataset column \"nope\": google.protobuf.FieldDescriptorProto has no field "
+       "\"nope\"\n"},
+      {"scan",
+       "@dataset google.protobuf.FieldDescriptorProto ( name, number )\n(\"a\", 1)\n  (\"b\", "
+       "\"x\")\n",
+       true,
+       "row1: 3:3: column number: expected integer for field \"number\"\n"},
+  };
+  for (const Case& c : cases) {
+    EXPECT_EQ(ReadAll(c.in, c.scan, c.skip), c.want) << c.name;
+  }
 }
 
 }  // namespace

@@ -21,11 +21,11 @@ namespace protowire::pxf {
 StatusOr<DatasetDirective> ParseDatasetAt(Lexer* lex, Token* current, int max_depth);
 
 // ParseDatasetRow parses one `( cell, ... )` of expected cells, under the
-// caller's nesting and bytes-literal limits.
-StatusOr<DatasetRow> ParseDatasetRow(std::string_view row,
-                                     int expected,
-                                     int max_depth,
-                                     int max_bytes_literal);
+// caller's nesting and bytes-literal limits. The row starts at `start` in
+// its stream, and the row, its cells and its errors carry positions in the
+// stream, as protowire-go's do (#161).
+StatusOr<DatasetRow> ParseDatasetRow(
+    std::string_view row, int expected, int max_depth, int max_bytes_literal, Position start);
 
 // CheckDescriptorSchema runs ValidateDescriptor and joins any violations
 // into one error, the bind-time check Unmarshal and DatasetReader share.

@@ -45,10 +45,10 @@ const char* TokenKindName(TokenKind k);
 struct Position {
   int line = 1;
   int column = 1;
-  // Byte offset into the lexer's input. Used by directive Body
-  // extraction to slice the raw bytes between '{' and '}'; line/column
-  // remain the primary user-facing identifier. Zero is the start of
-  // input.
+  // Byte offset into the document. Used by directive Body extraction to
+  // slice the raw bytes between '{' and '}'; line/column remain the
+  // primary user-facing identifier. Zero is the start of input, and a
+  // DatasetReader's rows count from the start of its stream.
   int offset = 0;
   std::string ToString() const { return std::to_string(line) + ":" + std::to_string(column); }
 };

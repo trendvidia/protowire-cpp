@@ -43,8 +43,8 @@ std::string WrittenKey(const std::string& key, std::string_view prec) {
 // nearest entry or block boundary. Strict mode returns the first error.
 class Parser {
  public:
-  Parser(std::string_view input, int max_depth, int max_bytes_literal)
-      : lex_(input), max_depth_(max_depth) {
+  Parser(std::string_view input, int max_depth, int max_bytes_literal, Position start = {})
+      : lex_(input, start), max_depth_(max_depth) {
     lex_.SetMaxBytesLiteral(max_bytes_literal);
     Advance();
   }
@@ -1153,11 +1153,9 @@ StatusOr<DatasetDirective> ParseDatasetAt(Lexer* lex, Token* current, int max_de
   return tbl;
 }
 
-StatusOr<DatasetRow> ParseDatasetRow(std::string_view row,
-                                     int expected,
-                                     int max_depth,
-                                     int max_bytes_literal) {
-  Parser p(row, max_depth, max_bytes_literal);
+StatusOr<DatasetRow> ParseDatasetRow(
+    std::string_view row, int expected, int max_depth, int max_bytes_literal, Position start) {
+  Parser p(row, max_depth, max_bytes_literal, start);
   int end = 0;
   return p.ParseTableRow(expected, &end);
 }
