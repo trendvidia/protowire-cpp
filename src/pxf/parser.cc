@@ -972,7 +972,7 @@ StatusOr<DatasetRow> Parser::ParseTableRow(int expected, int* end_offset, bool r
 //
 //   - anonymous:  `@proto { <message-body> }`
 //   - named:      `@proto <dotted-name> { <message-body> }`
-//   - source:     `@proto """<proto-source>"""`
+//   - source:     `@proto """<proto-source>"""`, triple-quoted only
 //   - descriptor: `@proto b"<base64-FileDescriptorSet>"`
 //
 // For brace-bounded shapes the body is sliced as raw bytes between
@@ -1023,6 +1023,13 @@ StatusOr<ProtoDirective> Parser::ParseProtoDirective(int* end_offset) {
       return pd;
     }
     case TokenKind::kString: {
+      if (!TripleQuotedAt(lex_, current_.pos)) {
+        Status err = Err(current_.pos, kProtoSourceNotTriple);
+        // Consumed, so ParseTolerant does not resume at the string and read
+        // it as an entry's key.
+        Advance();
+        return err;
+      }
       pd.shape = ProtoShape::kSource;
       pd.body = std::string(current_.value);
       *end_offset = TokenEnd().offset;

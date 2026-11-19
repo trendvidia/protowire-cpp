@@ -7,13 +7,16 @@
 // descriptor. Plus reserved-directive-name rejection (draft §3.4.6).
 
 #include "protowire/pxf.h"
+#include "protowire/pxf/dataset_reader.h"
 #include "protowire/pxf/parser.h"
 
 #include <gtest/gtest.h>
 #include "protoc_compat.h"
 
 #include <memory>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include <google/protobuf/compiler/importer.h>
 #include <google/protobuf/dynamic_message.h>
@@ -183,6 +186,91 @@ TEST(ProtoShape, NameLookup) {
   EXPECT_STREQ(pp::ProtoShapeName(pp::ProtoShape::kDescriptor), "descriptor");
 }
 
+// ---- A source body must be triple-quoted (#180) --------------------------
+// The grammar's proto_source_body is a triple_string. A simple-quoted body
+// could carry `"""` through its escapes, and no formatter can write that
+// back. protowire-go refuses it as of trendvidia/protowire-go#311, with this
+// text. Both string forms lex to kString, so the check reads the input.
+
+constexpr const char* kNotTriple =
+    R"(1:8: @proto source body must be a triple-quoted string ("""..."""))";
+
+const std::vector<std::string>& SimpleQuotedSources() {
+  static const std::vector<std::string> v = {
+      R"(@proto "syntax = \"proto3\";")",
+      R"(@proto "syntax = \"proto3\"; // a \"\"\" b")",  // protowire-go#305's body
+      R"(@proto "")",
+  };
+  return v;
+}
+
+TEST(Proto, SourceMustBeTripleQuoted) {
+  for (const auto& in : SimpleQuotedSources()) {
+    auto doc = pp::Parse(in);
+    ASSERT_FALSE(doc.ok()) << in;
+    EXPECT_EQ(doc.status().ToString(), kNotTriple) << in;
+
+    // A dataset stream's header is read by Parse.
+    std::istringstream stream(in + "\n@dataset T (a)\n(1)\n");
+    auto tr = pp::DatasetReader::Create(&stream);
+    ASSERT_FALSE(tr.ok()) << in;
+    EXPECT_NE(std::string(tr.status().message())
+                  .find("@proto source body must be a triple-quoted string"),
+              std::string::npos)
+        << tr.status().message();
+  }
+}
+
+// The position is the string's, wherever the directive is.
+TEST(Proto, SourceMustBeTripleQuotedAfterType) {
+  auto doc = pp::Parse("@type a.v1.M\n@proto \"x\"\n");
+  ASSERT_FALSE(doc.ok());
+  EXPECT_EQ(doc.status().ToString(),
+            R"(2:8: @proto source body must be a triple-quoted string ("""..."""))");
+}
+
+// The triple-quoted form still reads, on the directive's line or the next,
+// and so does the descriptor form, b"…", which is a bytes token, not a string
+// (draft: proto-descr-body = 1*WSP bytes).
+TEST(Proto, TripleQuotedAndDescriptorStillAccepted) {
+  const std::string triple_same = "@proto \"\"\"syntax = \"proto3\";\"\"\"\n";
+  const std::string triple_next = "@proto\n\"\"\"syntax = \"proto3\";\"\"\"\n";
+  const std::string triple_ml = "@proto \"\"\"\nsyntax = \"proto3\";\n\"\"\"\n";
+  for (const auto& in : {triple_same, triple_next, triple_ml}) {
+    auto doc = pp::Parse(in);
+    ASSERT_TRUE(doc.ok()) << in << doc.status().message();
+    ASSERT_EQ(doc->protos.size(), 1u);
+    EXPECT_EQ(doc->protos[0].shape, pp::ProtoShape::kSource);
+    EXPECT_EQ(Body(doc->protos[0]).substr(0, 18), R"(syntax = "proto3";)") << in;
+
+    std::istringstream stream(in + "@dataset T (a)\n(1)\n");
+    auto tr = pp::DatasetReader::Create(&stream);
+    ASSERT_TRUE(tr.ok()) << in << tr.status().message();
+  }
+  for (const std::string in : {"@proto b\"\"\n", "@proto b\"aGVsbG8=\"\n"}) {
+    auto doc = pp::Parse(in);
+    ASSERT_TRUE(doc.ok()) << in << doc.status().message();
+    ASSERT_EQ(doc->protos.size(), 1u);
+    EXPECT_EQ(doc->protos[0].shape, pp::ProtoShape::kDescriptor) << in;
+
+    std::istringstream stream(in + "@dataset T (a)\n(1)\n");
+    auto tr = pp::DatasetReader::Create(&stream);
+    ASSERT_TRUE(tr.ok()) << in << tr.status().message();
+  }
+}
+
+// ParseTolerant reports the simple-quoted body once and parses on: the string
+// is consumed, so it is not read as an entry's key.
+TEST(Proto, TolerantSourceNotTripleQuoted) {
+  auto r = pp::ParseTolerant("@proto \"syntax\"\n@type a.v1.M\n\nx = 1\n");
+  ASSERT_EQ(r.errors.size(), 1u);
+  EXPECT_EQ(r.errors[0].ToString(),
+            R"(1:8: @proto source body must be a triple-quoted string ("""..."""))");
+  EXPECT_TRUE(r.document.protos.empty());
+  EXPECT_EQ(r.document.type_url, "a.v1.M");
+  EXPECT_EQ(r.document.entries.size(), 1u);
+}
+
 // ---- Fast-path coverage (decode_fast.cc) --------------------------------
 // Mirrors the AST tests above but routes through Unmarshal / UnmarshalFull
 // — covers consumeProtoDirective + capture_brace_body on the fast path,
@@ -312,6 +400,30 @@ TEST_F(ProtoFast, RejectsAnonymousUnmatchedBrace) {
   auto st = pp::Unmarshal("@proto { string symbol = 1;\n", msg.get());
   ASSERT_FALSE(st.ok());
   EXPECT_NE(st.message().find("unmatched"), std::string::npos);
+}
+
+// Unmarshal reads directives on a path of its own (#180).
+TEST_F(ProtoFast, SourceMustBeTripleQuoted) {
+  for (const auto& in : SimpleQuotedSources()) {
+    auto msg = NewAllTypes();
+    auto st = pp::Unmarshal(in + "\nstring_field = \"hi\"\n", msg.get());
+    ASSERT_FALSE(st.ok()) << in;
+    EXPECT_EQ(st.ToString(), kNotTriple) << in;
+  }
+}
+
+TEST_F(ProtoFast, TripleQuotedAndDescriptorStillAccepted) {
+  for (const std::string in : {
+           "@proto \"\"\"syntax = \"proto3\";\"\"\"\n",
+           "@proto\n\"\"\"syntax = \"proto3\";\"\"\"\n",
+           "@proto \"\"\"\nsyntax = \"proto3\";\n\"\"\"\n",
+           "@proto b\"\"\n",
+       }) {
+    auto msg = NewAllTypes();
+    auto rr = pp::UnmarshalFull(in + "string_field = \"hi\"\n", msg.get());
+    ASSERT_TRUE(rr.ok()) << in << rr.status().message();
+    ASSERT_EQ(rr->Protos().size(), 1u) << in;
+  }
 }
 
 TEST_F(ProtoFast, ReservedDirectiveRejected) {

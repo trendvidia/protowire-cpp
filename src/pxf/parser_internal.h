@@ -44,6 +44,26 @@ struct BraceMatch {
   int run = 0;       // quotes just seen in a triple string, or 1 after a '*'
 };
 
+// The error for a @proto source body that is not triple-quoted. The grammar
+// admits only `proto_source_body = triple_string`, and a simple-quoted body
+// could carry `"""` through its escapes, which no formatter can write back
+// (#180; protowire-go#311).
+inline constexpr const char* kProtoSourceNotTriple =
+    R"(@proto source body must be a triple-quoted string ("""..."""))";
+
+// TripleQuotedAt reports whether the kString token at pos, which lex
+// produced, was written triple-quoted. Both forms lex to kString, so only the
+// input can tell. CurrentPos counts from the stream and GetMark from the piece
+// lex reads, so their difference is where the piece starts.
+inline bool TripleQuotedAt(const Lexer& lex, Position pos) {
+  const std::string_view in = lex.Input();
+  const long long base =
+      static_cast<long long>(lex.CurrentPos().offset) - static_cast<long long>(lex.GetMark().pos);
+  const long long i = static_cast<long long>(pos.offset) - base;
+  return i >= 0 && static_cast<size_t>(i) + 3 <= in.size() &&
+         in.substr(static_cast<size_t>(i), 3) == R"(""")";
+}
+
 // The error for anything after a @dataset header that is neither a row nor
 // a directive (draft §3.4.4).
 inline constexpr const char* kDatasetBesideEntries =

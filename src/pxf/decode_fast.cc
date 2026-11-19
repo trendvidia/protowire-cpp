@@ -482,6 +482,9 @@ class DirectDecoder {
             break;
           }
           case TokenKind::kString: {
+            if (!TripleQuotedAt(lex_, current_.pos)) {
+              return PosError(current_.pos, kProtoSourceNotTriple);
+            }
             pd.shape = ProtoShape::kSource;
             pd.body = std::string(current_.value);
             Advance();
