@@ -505,11 +505,12 @@ class DirectDecoder {
             break;
           }
           default:
+            // The kind alone, as Parse and protowire-go's decoder give it.
             return PosError(
                 current_.pos,
                 "expected '{', dotted identifier, triple-quoted string, or b\"...\" after @proto, "
                 "got " +
-                    TokenErrMsg());
+                    std::string(TokenKindName(current_.kind)));
         }
         if (result_ != nullptr) result_->AddProto(std::move(pd));
       } else {

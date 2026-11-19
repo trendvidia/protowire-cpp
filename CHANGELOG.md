@@ -15,6 +15,10 @@ number says nothing about any other port. See the Releases section of
 
 - **A `@proto` source body must be triple-quoted** (#180), as protowire-go requires as of trendvidia/protowire-go#311. `Parse`, `ParseTolerant`, `Unmarshal` and `DatasetReader` read a simple-quoted `@proto "…"` as a source body, which the grammar does not admit (`proto_source_body = triple_string`). Its escapes could put `"""` in the body, which no triple-quoted string can hold, so `FormatDocument` could not write it back. It is now refused with protowire-go's text, `1:8: @proto source body must be a triple-quoted string ("""...""")`, and `ParseTolerant` reports it once and parses on. **This narrows what parses.** The descriptor form, `@proto b"…"`, is a bytes literal and is still accepted. protowire-python wraps this parser, so it follows once it takes this release.
 
+### Fixed
+
+- **`Unmarshal` names a bad `@proto` body as `Parse` does** (#180), as protowire-go does: by the token's kind alone. `@proto 42` gave `... after @proto, got integer ("42")` and `@proto 'x'` gave `... got unexpected character '\''`, where Go and `Parse` give `got integer` and `got ILLEGAL`.
+
 ## [2.1.0] — 2026-11-07
 
 A minor release. `pxf::DatasetReader` now streams a `@dataset` table as protowire-go's reader does. A row cut short, junk between rows and a broken header are refused with the error `Parse` gives, at the same position, instead of ending the table early. Positions count from the start of the stream. The caller's limits and options apply to every row, and a row on a stream that stays open is returned as soon as it is complete. A comment that no entry follows is now kept, at the end of a document, before a block's `}` and between dataset rows. Minor rather than a patch, because it adds a public constructor and four public AST fields.

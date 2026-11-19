@@ -16,6 +16,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <google/protobuf/compiler/importer.h>
@@ -386,6 +387,27 @@ TEST_F(ProtoFast, RejectsBadShape) {
   auto st = pp::Unmarshal("@proto 42\nstring_field = \"hi\"\n", msg.get());
   ASSERT_FALSE(st.ok());
   EXPECT_NE(st.message().find("@proto"), std::string::npos);
+}
+
+// Unmarshal names the token's kind alone, as Parse and protowire-go do.
+TEST_F(ProtoFast, RejectsBadShapeAsParseDoes) {
+  for (const auto& [in, got] : std::vector<std::pair<std::string, std::string>>{
+           {"@proto 42\n", "integer"},
+           {"@proto [\n", "["},
+           {"@proto 'x'\n", "ILLEGAL"},
+       }) {
+    const std::string want =
+        "1:8: expected '{', dotted identifier, triple-quoted string, or b\"...\" after @proto, "
+        "got " +
+        got;
+    auto msg = NewAllTypes();
+    auto st = pp::Unmarshal(in, msg.get());
+    ASSERT_FALSE(st.ok()) << in;
+    EXPECT_EQ(st.ToString(), want) << in;
+    auto doc = pp::Parse(in);
+    ASSERT_FALSE(doc.ok()) << in;
+    EXPECT_EQ(doc.status().ToString(), want) << in;
+  }
 }
 
 TEST_F(ProtoFast, RejectsNamedMissingBrace) {
