@@ -15,6 +15,10 @@ number says nothing about any other port. See the Releases section of
 
 - **`check_decode --format pxf-fmt`** (protowire#584): parses the document with `pxf::Parse`, writes what `pxf::FormatDocument` makes of it on stdout, and needs no `--schema` or `--proto`, as protowire-go's harness does. A document that does not parse is a rejection, exit 1. This is the mode the spec's format gate (`cross_fmt_check.sh`) drives.
 
+### Fixed
+
+- **`pxf::FormatDocument` writes a triple-quoted `@proto` with its `"""` on lines of their own**, as protowire-go does (protowire-go#303, PR #306). It wrote the body straight after the opening `"""` and straight before the closing one. Reading strips a line break after the opening `"""` and drops a last line holding only whitespace, so some bodies did not read back. A body ending in `"`, such as a last line `import "x.proto"`, was written as `...proto""""`, which does not parse. A body's leading line break, trailing line break, or whitespace-only last line was lost. Now the output is `@proto """`, a line break, the body, a line break, and `"""`. Every body without a `"""` in it reads back byte for byte. **The formatted text of such a document changes.**
+
 ## [2.1.0] — 2026-11-07
 
 A minor release. `pxf::DatasetReader` now streams a `@dataset` table as protowire-go's reader does. A row cut short, junk between rows and a broken header are refused with the error `Parse` gives, at the same position, instead of ending the table early. Positions count from the start of the stream. The caller's limits and options apply to every row, and a row on a stream that stays open is returned as soon as it is complete. A comment that no entry follows is now kept, at the end of a document, before a block's `}` and between dataset rows. Minor rather than a patch, because it adds a public constructor and four public AST fields.
