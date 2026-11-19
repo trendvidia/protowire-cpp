@@ -11,6 +11,10 @@ number says nothing about any other port. See the Releases section of
 
 ## [Unreleased]
 
+### Fixed
+
+- **`pb::Unmarshal` reads a field only from a tag of its wire type, as protobuf does** (#179, trendvidia/protowire#614), as protowire-go does since protowire-go#308. It read a known field by its C++ type whatever the tag said. Wire types 6 and 7 were accepted, and `0a01` on an `int64` read the length byte as the value 1. A well-formed record with another wire type, such as an `int64` sent as `0a0101`, was refused as corrupt. Now wire type 6 or 7 is refused on any field. A known field whose wire type does not match is skipped as an unknown field, and the field is left as it was. A repeated numeric field still reads both its own wire type and the packed form. Map entries and the `BigInt`, `Decimal` and `BigFloat` messages follow the same rule. **This rejects messages that were accepted before, and accepts some that were refused.** The error for a field that cannot be skipped now gives protobuf's reason, in protowire-go's words: `corrupt field 1: proto: cannot parse reserved wire type`, or `corrupt field 1 in BigInt: unexpected EOF`. A map entry's unknown field reads `corrupt field 3 in map entry: …` where it read `corrupt unknown field 3 in map entry`. Every verdict and value matches libprotobuf on 606 test inputs.
+
 ## [2.1.0] — 2026-11-07
 
 A minor release. `pxf::DatasetReader` now streams a `@dataset` table as protowire-go's reader does. A row cut short, junk between rows and a broken header are refused with the error `Parse` gives, at the same position, instead of ending the table early. Positions count from the start of the stream. The caller's limits and options apply to every row, and a row on a stream that stays open is returned as soon as it is complete. A comment that no entry follows is now kept, at the end of a document, before a block's `}` and between dataset rows. Minor rather than a patch, because it adds a public constructor and four public AST fields.
