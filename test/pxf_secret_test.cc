@@ -14,10 +14,12 @@
 #include "fixture_dir.h"
 #include "protoc_compat.h"
 
+#include <algorithm>
 #include <fstream>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <google/protobuf/compiler/importer.h>
 #include <google/protobuf/dynamic_message.h>
@@ -200,6 +202,73 @@ TEST_F(PxfSecret, ScalarMarksValuePresent) {
   ASSERT_TRUE(r.ok()) << r.status().ToString();
   EXPECT_TRUE(r->IsSet("db_password"));
   EXPECT_TRUE(r->IsSet("db_password.value"));
+}
+
+std::vector<std::string> Sorted(std::vector<std::string> v) {
+  std::sort(v.begin(), v.end());
+  return v;
+}
+
+// A literal in a list element or a map value records `value` present, as the
+// block form does there and as a field's literal does (protowire-go#289).
+// Before, IsSet("backup_keys[1].value") depended on which spelling of one
+// value the document used. The same holds with on_secret_field set, where the
+// value goes to the hook instead of into the message. Mirrors
+// TestSecretElementLiteral_MarksInnerValuePresent in protowire-go.
+TEST_F(PxfSecret, ElementLiteralMarksValuePresent) {
+  const std::string doc =
+      "db_password = \"x\"\n"
+      "backup_keys = [{ value = \"a\"  hint = \"h\" }, \"b\"]\n"
+      "tenant_keys = { \"acme\": \"k\"  \"z\": { value = \"v\" } }\n";
+  const std::vector<std::string> want = {
+      "backup_keys",
+      "backup_keys[0].hint",
+      "backup_keys[0].value",
+      "backup_keys[1].value",
+      "db_password",
+      "db_password.value",
+      "tenant_keys",
+      "tenant_keys[\"acme\"].value",
+      "tenant_keys[\"z\"].value",
+  };
+  for (bool hook : {false, true}) {
+    pxf::UnmarshalOptions opts;
+    if (hook) {
+      opts.on_secret_field = [](std::string_view, std::string_view) {
+        return protowire::Status::OK();
+      };
+    }
+    std::unique_ptr<pb::Message> m(factory_.GetPrototype(desc_)->New());
+    auto r = pxf::UnmarshalFull(doc, m.get(), opts);
+    ASSERT_TRUE(r.ok()) << r.status().ToString();
+    EXPECT_EQ(Sorted(r->PresentFields()), want) << "on_secret_field set: " << hook;
+  }
+}
+
+// Secret is the only well-known type whose element literal records an inner
+// field (protowire-go#298): a Timestamp, wrapper or bignum literal as a map
+// value records the map alone, while its block form records what it writes.
+TEST_F(PxfSecret, OtherElementLiteralsRecordOnlyTheElement) {
+  struct Case {
+    std::string doc;
+    std::vector<std::string> want;
+  };
+  const Case cases[] = {
+      {"seen = { a: 2026-01-02T03:04:05Z }\n", {"seen"}},
+      {"seen = { a: { seconds = 1 } }\n", {"seen", "seen[\"a\"].seconds"}},
+      {"counts = { a: 7 }\n", {"counts"}},
+      {"counts = { a: { value = 7 } }\n", {"counts", "counts[\"a\"].value"}},
+      {"weights = { a: -12 }\n", {"weights"}},
+      {"weights = { a: { negative = true } }\n", {"weights", "weights[\"a\"].negative"}},
+  };
+  for (const Case& c : cases) {
+    std::unique_ptr<pb::Message> m(factory_.GetPrototype(desc_)->New());
+    pxf::UnmarshalOptions opts;
+    opts.skip_post_decode = true;
+    auto r = pxf::UnmarshalFull(c.doc, m.get(), opts);
+    ASSERT_TRUE(r.ok()) << c.doc << r.status().ToString();
+    EXPECT_EQ(Sorted(r->PresentFields()), c.want) << c.doc;
+  }
 }
 
 TEST_F(PxfSecret, ScalarIsCheckedAsAStringField) {
