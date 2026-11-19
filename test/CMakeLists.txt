@@ -93,4 +93,19 @@ if(TARGET check_decode)
     set_tests_properties(check_decode_position_${fmt} PROPERTIES
       PASS_REGULAR_EXPRESSION "reject: 3:3: unknown field \"nope\" in test\\.v1\\.AllTypes")
   endforeach()
+  # pxf-fmt formats the parsed document and needs no --schema or --proto, for
+  # the spec's format gate (protowire#584). A document that does not parse is
+  # a clean rejection.
+  add_test(NAME check_decode_pxf_fmt
+    COMMAND check_decode --format pxf-fmt
+      --input ${CMAKE_CURRENT_SOURCE_DIR}/../testdata/check_decode/fmt.pxf)
+  set_tests_properties(check_decode_pxf_fmt PROPERTIES
+    PASS_REGULAR_EXPRESSION "^a = 1 # keep\n$")
+  add_test(NAME check_decode_pxf_fmt_reject
+    COMMAND check_decode --format pxf-fmt
+      --input ${CMAKE_CURRENT_SOURCE_DIR}/../testdata/check_decode/fmt-broken.pxf)
+  # The regex holds the parser's position, which neither a usage error nor an
+  # unsupported format prints.
+  set_tests_properties(check_decode_pxf_fmt_reject PROPERTIES
+    PASS_REGULAR_EXPRESSION "reject: 1:5: expected value")
 endif()
