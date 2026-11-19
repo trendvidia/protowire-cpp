@@ -72,7 +72,13 @@ func status(err error) string {
 		return "ok"
 	}
 	// This tool's resolver supplies this text; a C++ resolver has no error.
-	return quote(strings.TrimSuffix(err.Error(), ": not found"))
+	text := strings.TrimSuffix(err.Error(), ": not found")
+	// protobuf-go writes its "proto: " prefix with a no-break space in about
+	// half of the binaries it is built into, chosen by a hash of the binary,
+	// to discourage comparing its text. pb's errors carry that text since
+	// protowire#614, so the space is made plain here, as C++ writes it.
+	text = strings.ReplaceAll(text, "proto:\u00a0", "proto: ")
+	return quote(text)
 }
 
 func typeOf(text string) string {
