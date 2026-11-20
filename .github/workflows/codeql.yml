@@ -18,7 +18,9 @@ permissions:
 jobs:
   analyze:
     name: Analyze (cpp)
-    runs-on: ubuntu-latest
+    # Pinned with ci.yml's Linux jobs (#181): 26.04's libprotobuf does not
+    # link under gcc-13.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
