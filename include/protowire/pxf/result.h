@@ -20,6 +20,13 @@ namespace protowire::pxf {
 // in an Any body the Any's own path ("payload.code"). Set + Null are mutually
 // exclusive; Absent is the complement of both.
 //
+// A well-known-type literal records its inner fields as a field's value, but
+// not as a list element or map value: `d = 2s` records "d", "d.seconds" and
+// "d.nanos", while `ds = [2s]` records "ds" alone. The block form records what
+// it writes in every position, so `ds = [{ seconds = 2 }]` records "ds" and
+// "ds[0].seconds". pxf.Secret is the exception: its literal records "value" in
+// every position, so `keys = ["k"]` records "keys" and "keys[0].value".
+//
 // Result also surfaces the document-root directives the decoder saw:
 //   - Directives()  → generic `@<name> *(prefix) [{ ... }]` blocks, in
 //     source order, excluding @type / @dataset (which have their own

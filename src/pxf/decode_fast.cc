@@ -537,12 +537,13 @@ class DirectDecoder {
   Status DecodeBlockInto(Message* sub, const FieldDescriptor* fd);
   Status DecodeAnyInner(Message* any_msg);
   // RouteSecret hands a pxf.Secret at the current token to on_secret_, in
-  // either form. *routed stays false when nothing is to be routed. path is
-  // only read when something is.
+  // either form. The literal records `value` present in every position
+  // (protowire-go#289), and the block form the fields it writes. *routed
+  // stays false when nothing is to be routed. path is only read when
+  // something is.
   Status RouteSecret(Message* sub,
                      const FieldDescriptor* fd,
                      const std::string& path,
-                     bool mark_value,
                      bool* routed);
   Status DecodeSecretBlock(Message* sub, const std::string& path);
 
@@ -1119,15 +1120,15 @@ Status DirectDecoder::DecodeMsgValue(Message* msg, const FieldDescriptor* fd) {
 
   if (current_.kind == TokenKind::kString) {
     bool routed = false;
-    Status st =
-        RouteSecret(sub, fd, path_prefix_ + std::string(fd->name()), /*mark_value=*/true, &routed);
+    Status st = RouteSecret(sub, fd, path_prefix_ + std::string(fd->name()), &routed);
     if (routed || !st.ok()) return st;
   }
   bool bound = false;
   if (Status s = DecodeLiteral(sub, fd, &bound); !s.ok()) return s;
   if (bound) {
     // A block marks each field it binds, so a literal marks the ones it
-    // stands for. Elements and map values don't: the element is the unit.
+    // stands for. Elements and map values don't: the element is the unit,
+    // except for a pxf.Secret, whose literal marks `value` there too.
     if (result_) {
       const std::string base = path_prefix_ + std::string(fd->name()) + ".";
       for (const char* name : LiteralFields(d)) result_->MarkPresent(base + name);
@@ -1164,7 +1165,6 @@ Status DirectDecoder::DecodeBlockInto(Message* sub, const FieldDescriptor* fd) {
 Status DirectDecoder::RouteSecret(Message* sub,
                                   const FieldDescriptor* fd,
                                   const std::string& path,
-                                  bool mark_value,
                                   bool* routed) {
   if (!on_secret_ || !IsSecret(sub->GetDescriptor())) return Status::OK();
   if (current_.kind == TokenKind::kLBrace) {
@@ -1183,7 +1183,7 @@ Status DirectDecoder::RouteSecret(Message* sub,
     return PosError(pos, "pxf.Secret hook for " + detail::GoQuote(path) + ": " + st.message());
   }
   Advance();
-  if (mark_value && result_) result_->MarkPresent(path + ".value");
+  if (result_) result_->MarkPresent(path + ".value");
   return Status::OK();
 }
 
@@ -1319,11 +1319,18 @@ Status DirectDecoder::DecodeListInline(Message* msg, const FieldDescriptor* fd) 
       if (on_secret_) {
         const std::string path = path_prefix_ + std::string(fd->name()) +
                                  IndexSuffix(msg->GetReflection()->FieldSize(*msg, fd) - 1);
-        if (Status s = RouteSecret(sub, fd, path, /*mark_value=*/false, &routed); !s.ok()) return s;
+        if (Status s = RouteSecret(sub, fd, path, &routed); !s.ok()) return s;
       }
       bool bound = routed;
       if (!routed) {
         if (Status s = DecodeLiteral(sub, fd, &bound); !s.ok()) return s;
+        // A pxf.Secret literal records `value`, as its block form does and
+        // as a field's literal does (protowire-go#289).
+        if (bound && result_ && IsSecret(d)) {
+          result_->MarkPresent(path_prefix_ + std::string(fd->name()) +
+                               IndexSuffix(msg->GetReflection()->FieldSize(*msg, fd) - 1) +
+                               ".value");
+        }
       }
       if (!bound) {
         if (current_.kind != TokenKind::kLBrace) {
@@ -1505,12 +1512,19 @@ Status DirectDecoder::DecodeMapInline(Message* msg, const FieldDescriptor* fd, B
       if (on_secret_) {
         bool routed = false;
         const std::string path = path_prefix_ + std::string(fd->name()) + "[" + key_text + "]";
-        if (st = RouteSecret(value, fd, path, /*mark_value=*/false, &routed); !st.ok()) return st;
+        if (st = RouteSecret(value, fd, path, &routed); !st.ok()) return st;
         if (routed) continue;
       }
       bool bound = false;
       if (st = DecodeLiteral(value, fd, &bound); !st.ok()) return st;
-      if (bound) continue;
+      if (bound) {
+        // A pxf.Secret literal records `value`, as its block form does and
+        // as a field's literal does (protowire-go#289).
+        if (result_ && IsSecret(value->GetDescriptor())) {
+          result_->MarkPresent(path_prefix_ + std::string(fd->name()) + "[" + key_text + "].value");
+        }
+        continue;
+      }
       if (current_.kind != TokenKind::kLBrace) {
         return PosError(current_.pos,
                         std::string("expected ") + MsgValueForms(value->GetDescriptor()) +
