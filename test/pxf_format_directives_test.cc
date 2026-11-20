@@ -3,7 +3,9 @@
 // FormatDocument keeps every directive, with its dataset rows, in document
 // order (trendvidia/protowire#558, #130). Port of protowire-go's
 // encoding/pxf/format_directives_test.go (protowire-go#262); the expected
-// texts are the ones protowire-go and protowire-typescript write.
+// texts are the ones protowire-go writes, and protowire-typescript too except
+// for a triple-quoted @proto, whose delimiters protowire-go has written on
+// lines of their own since protowire-go#303.
 
 #include <gtest/gtest.h>
 
@@ -98,9 +100,11 @@ TEST(FormatDirectives, ProtoShapes) {
   const std::vector<Case> cases = {
       {"@proto { string id = 1; }\n@dataset (id)\n(\"a\")\n", ""},
       {"@proto a.v1.R { string id = 1; }\n@dataset a.v1.R (id)\n(\"a\")\n", ""},
+      // The triple quotes go on lines of their own (protowire-go#303).
       {"@proto \"\"\"syntax = \"proto3\"; message R { string id = 1; }\"\"\"\n@dataset R "
        "(id)\n(\"a\")\n",
-       ""},
+       "@proto \"\"\"\nsyntax = \"proto3\"; message R { string id = 1; }\n\"\"\"\n@dataset R "
+       "(id)\n(\"a\")\n"},
       // @type moves to the front: it binds no @proto, so this changes nothing.
       {"@proto b\"CgA=\"\n@type a.v1.M\n\nx = 1\n", "@type a.v1.M\n@proto b\"CgA=\"\n\nx = 1\n"},
       // The issue's @proto case, which formatted to nothing.
@@ -125,6 +129,52 @@ TEST(FormatDirectives, DirectiveComments) {
       "# about the rows\n@dataset t.v1.T (id)\n(1)\n# second\n@dataset t.v1.U (id)\n(2)\n");
   EXPECT_NE(out.find("# about the rows\n@dataset t.v1.T (id)"), std::string::npos) << out;
   EXPECT_NE(out.find("# second\n@dataset t.v1.U (id)"), std::string::npos) << out;
+}
+
+// A triple-quoted @proto is written with its delimiters on lines of their
+// own, and its body reads back byte for byte (protowire-go#303).
+TEST(FormatDirectives, ProtoSourceLayout) {
+  // protowire-go#303's document: the line breaks around the body stay.
+  EXPECT_EQ(
+      FormatRoundTrip("@proto \"\"\"\n  syntax = \"proto3\";\n  package fmt.v1;\n  message Doc "
+                      "{ string name = 1; }\n\"\"\"\n@type fmt.v1.Doc\n"),
+      "@type fmt.v1.Doc\n@proto \"\"\"\n  syntax = \"proto3\";\n  package fmt.v1;\n  message Doc "
+      "{ string name = 1; }\n\"\"\"\n");
+
+  struct Case {
+    const char* name;
+    std::string src;
+    std::string body;  // the body as read
+  };
+  const std::vector<Case> cases = {
+      // Written on the closing delimiter's line, the last quote would open
+      // the closing """ early, and the output would not parse.
+      {"body ends in a quote",
+       "@proto \"\"\"\n  syntax = \"proto3\";\n  import \"google/protobuf/empty.proto\"\n  "
+       "\"\"\"\n",
+       "syntax = \"proto3\";\nimport \"google/protobuf/empty.proto\""},
+      // Written on the closing delimiter's line, a last line of only
+      // whitespace would be taken for the delimiter's indent and dropped.
+      {"whitespace-only last line",
+       "@proto \"\"\"syntax = \"proto3\";\n  \n\"\"\"\n",
+       "syntax = \"proto3\";\n  "},
+      {"leading line break",
+       "@proto \"\"\"\n\nsyntax = \"proto3\";\"\"\"\n",
+       "\nsyntax = \"proto3\";"},
+      {"trailing line break",
+       "@proto \"\"\"syntax = \"proto3\";\n\n\"\"\"\n",
+       "syntax = \"proto3\";\n"},
+      {"empty body", "@proto \"\"\"\"\"\"\n", ""},
+  };
+  for (const auto& tc : cases) {
+    SCOPED_TRACE(tc.name);
+    auto doc = Parse(tc.src);
+    ASSERT_TRUE(doc.ok()) << doc.status().ToString();
+    ASSERT_EQ(doc->protos.size(), 1u);
+    ASSERT_EQ(doc->protos[0].body, tc.body) << "body as read";
+    // FormatRoundTrip also checks that the output reads back to the same body.
+    EXPECT_EQ(FormatRoundTrip(tc.src), "@proto \"\"\"\n" + tc.body + "\n\"\"\"\n");
+  }
 }
 
 // A document whose only directive is @type formats as it always has.

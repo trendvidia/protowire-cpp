@@ -10,7 +10,7 @@
 //
 // Contract:
 //
-//   check_decode --format <pxf|pxf-pb|pb|pb-render|pb-text|sbe|envelope>
+//   check_decode --format <pxf|pxf-pb|pxf-fmt|pb|pb-render|pb-text|sbe|envelope>
 //                --schema <fully.qualified.MessageType>
 //                --proto  <path-to-adversarial.proto>
 //                --input  <path>
@@ -18,11 +18,14 @@
 //
 //   Exit 0 → input was accepted (decode succeeded)
 //   Exit 1 → input was rejected (decode returned a clean error)
+//   Exit 2 → the harness cannot judge the row (bad flags), which the gate
+//            reports as a crash
 //   Other  → bug in the decoder (panic / abort / OOM / hang / SIGSEGV / ...)
 //
 // pb-text and pxf-pb also write their output on stdout, for the text gate and
 // the write gate (protowire/scripts/cross_text_check.sh and
-// cross_write_check.sh).
+// cross_write_check.sh). pxf-fmt writes the formatted document on stdout, for
+// the format gate (cross_fmt_check.sh); it needs no --schema or --proto.
 //
 // Mirrors the Go reference at protowire-go/scripts/check_decode/main.go:
 // PXF and SBE bind the message from --proto, compiled at runtime; PB goes
@@ -68,6 +71,7 @@
 #include "protowire/pb.h"
 #include "protowire/pb_big.h"
 #include "protowire/pxf.h"
+#include "protowire/pxf/format.h"
 #include "protowire/pxf/go_wire.h"
 #include "protowire/sbe.h"
 
@@ -365,6 +369,20 @@ bool PxfPb(std::string_view data,
   return WriteStdout(protowire::pxf::SerializeGoOrder(*msg), err);
 }
 
+// PxfFmt writes the formatted document on stdout, for the format gate
+// (protowire/scripts/cross_fmt_check.sh, protowire#584). Formatting works on
+// the parsed document, not a message, so it keeps comments, directives and
+// dataset rows and needs no schema. A document that does not parse is a
+// rejection.
+bool PxfFmt(std::string_view data, std::string* err) {
+  auto doc = protowire::pxf::Parse(data);
+  if (!doc.ok()) {
+    *err = doc.status().ToString();  // "line:col: msg", as Go prints it
+    return false;
+  }
+  return WriteStdout(protowire::pxf::FormatDocument(*doc), err);
+}
+
 // The producer's side of the bounds (HARDENING.md § Arbitrary-precision
 // magnitudes): the stock protobuf runtime reads the bytes, storing the fields
 // and bounding nothing, and they are then written as PXF. pb::Unmarshal is
@@ -478,9 +496,10 @@ bool SbeDecode(std::string_view data,
 }
 
 [[noreturn]] void Usage(int code) {
-  std::fprintf(stderr,
-               "usage: check_decode --format <pxf|pxf-pb|pb|pb-render|pb-text|sbe|envelope> "
-               "--schema <FQN> --input <path> [--proto <path>] [--limit NAME=VALUE ...]\n");
+  std::fprintf(
+      stderr,
+      "usage: check_decode --format <pxf|pxf-pb|pxf-fmt|pb|pb-render|pb-text|sbe|envelope> "
+      "--schema <FQN> --input <path> [--proto <path>] [--limit NAME=VALUE ...]\n");
   std::exit(code);
 }
 
@@ -518,7 +537,8 @@ int main(int argc, char** argv) {
       Usage(2);
     }
   }
-  if (format.empty() || schema.empty() || input.empty()) Usage(2);
+  // Formatting reads no schema, so pxf-fmt alone may leave --schema out.
+  if (format.empty() || (schema.empty() && format != "pxf-fmt") || input.empty()) Usage(2);
 
   std::string err;
   std::string safe_input;
@@ -537,6 +557,8 @@ int main(int argc, char** argv) {
     ok = PxfDecode(data, schema, proto_path, lim, &err);
   } else if (format == "pxf-pb") {
     ok = PxfPb(data, schema, proto_path, lim, &err);
+  } else if (format == "pxf-fmt") {
+    ok = PxfFmt(data, &err);
   } else if (format == "pb") {
     ok = PbDecode(data, schema, lim, &err);
   } else if (format == "pb-render" || format == "pb-text") {

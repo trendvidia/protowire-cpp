@@ -325,9 +325,15 @@ void FormatProto(const ProtoDirective& d, std::string& out) {
       out.push_back('}');
       break;
     case ProtoShape::kSource:
-      out += R"( """)";
+      // The delimiters go on lines of their own, as protowire-go writes them
+      // (protowire-go#303). Reading strips the line break after the opening
+      // """ and drops the last line when it holds only whitespace, so the
+      // body reads back byte for byte; written on the delimiters' lines
+      // instead, a body ending in '"' would close the string early and a
+      // whitespace-only last line would be dropped.
+      out += " \"\"\"\n";
       out += d.body;
-      out += R"(""")";
+      out += "\n\"\"\"";
       break;
     case ProtoShape::kDescriptor:
       out += " b\"";

@@ -11,6 +11,16 @@ number says nothing about any other port. See the Releases section of
 
 ## [Unreleased]
 
+### Added
+
+- **`check_decode --format pxf-fmt`** (protowire#584): parses the document with `pxf::Parse`, writes what `pxf::FormatDocument` makes of it on stdout, and needs no `--schema` or `--proto`, as protowire-go's harness does. A document that does not parse is a rejection, exit 1. This is the mode the spec's format gate (`cross_fmt_check.sh`) drives.
+
+### Fixed
+
+- **`pxf::FormatDocument` writes a triple-quoted `@proto` with its `"""` on lines of their own**, as protowire-go does (protowire-go#303, PR #306). It wrote the body straight after the opening `"""` and straight before the closing one. Reading strips a line break after the opening `"""` and drops a last line holding only whitespace, so some bodies did not read back. A body ending in `"`, such as a last line `import "x.proto"`, was written as `...proto""""`, which does not parse. A body's leading line break, trailing line break, or whitespace-only last line was lost. Now the output is `@proto """`, a line break, the body, a line break, and `"""`. Every body without a `"""` in it reads back byte for byte. **The formatted text of such a document changes.**
+### Fixed
+
+- **`pb::Unmarshal` reads a field only from a tag of its wire type, as protobuf does** (#179, trendvidia/protowire#614), as protowire-go does since protowire-go#308. It read a known field by its C++ type whatever the tag said. Wire types 6 and 7 were accepted, and `0a01` on an `int64` read the length byte as the value 1. A well-formed record with another wire type, such as an `int64` sent as `0a0101`, was refused as corrupt. Now wire type 6 or 7 is refused on any field. A known field whose wire type does not match is skipped as an unknown field, and the field is left as it was. A repeated numeric field still reads both its own wire type and the packed form. Map entries and the `BigInt`, `Decimal` and `BigFloat` messages follow the same rule. **This rejects messages that were accepted before, and accepts some that were refused.** The error for a field that cannot be skipped now gives protobuf's reason, in protowire-go's words: `corrupt field 1: proto: cannot parse reserved wire type`, or `corrupt field 1 in BigInt: unexpected EOF`. A map entry's unknown field reads `corrupt field 3 in map entry: …` where it read `corrupt unknown field 3 in map entry`. Every verdict and value matches libprotobuf on 606 test inputs.
 ### Changed
 
 - **A `@proto` source body must be triple-quoted** (#180), as protowire-go requires as of trendvidia/protowire-go#311. `Parse`, `ParseTolerant`, `Unmarshal` and `DatasetReader` read a simple-quoted `@proto "…"` as a source body, which the grammar does not admit (`proto_source_body = triple_string`). Its escapes could put `"""` in the body, which no triple-quoted string can hold, so `FormatDocument` could not write it back. It is now refused with protowire-go's text, `1:8: @proto source body must be a triple-quoted string ("""...""")`, and `ParseTolerant` reports it once and parses on. **This narrows what parses.** The descriptor form, `@proto b"…"`, is a bytes literal and is still accepted. protowire-python wraps this parser, so it follows once it takes this release.
