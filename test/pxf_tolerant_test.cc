@@ -184,6 +184,51 @@ TEST(PxfTolerant, MalformedDirectiveIsSkipped) {
   EXPECT_EQ(Keys(missing.document), (Strings{"x"}));
 }
 
+// A malformed directive gives one error, and recovery does not read the rest
+// of its line, or the rows of a dataset whose header failed, as entries
+// (#182). The table is protowire-go#312's TestParseTolerantDirectiveRecovery.
+// Each document here used to give one error per stray token and lose what
+// followed.
+TEST(PxfTolerant, DirectiveRecoveryAsGo312) {
+  struct Case {
+    std::string src, err, type_url;
+    size_t entries;
+  };
+  for (const auto& tc : std::vector<Case>{
+           {"@proto 5\n@type a.v1.M\n\nx = 1\n",
+            "1:8: expected '{', dotted identifier",
+            "a.v1.M",
+            1},
+           {"@proto a.b c\n@type a.v1.M\n\nx = 1\n",
+            "1:12: expected '{' after @proto a.b",
+            "a.v1.M",
+            1},
+           {"@type 5\n\nx = 1\n", "1:7: expected type name after @type", "", 1},
+           {"@dataset T 5\n(1)\n(2, \"a\")\n",
+            "1:12: expected '(' to start @dataset column list",
+            "",
+            0},
+       }) {
+    auto r = Tolerant(tc.src, 1);
+    ASSERT_FALSE(r.errors.empty()) << tc.src;
+    EXPECT_NE(r.errors[0].ToString().find(tc.err), std::string::npos)
+        << tc.src << r.errors[0].ToString();
+    EXPECT_EQ(r.document.type_url, tc.type_url) << tc.src;
+    EXPECT_EQ(r.document.entries.size(), tc.entries) << tc.src;
+  }
+
+  // A key on the directive's line that starts an entry still starts one: the
+  // dangling-@type recovery reads `x = 1` as the first entry.
+  auto dangling = Tolerant("@type x = 1\ny = 2\n", 1);
+  EXPECT_EQ(Keys(dangling.document), (Strings{"x", "y"}));
+
+  // A valid dataset after a failed one still parses.
+  auto after = Tolerant("@dataset T 5\n(1)\n@dataset U (a)\n(2)\n", 1);
+  ASSERT_EQ(after.document.datasets.size(), 1u);
+  EXPECT_EQ(after.document.datasets[0].type, "U");
+  EXPECT_EQ(after.document.datasets[0].rows.size(), 1u);
+}
+
 TEST(PxfTolerant, ErrorsAreInSourceOrder) {
   auto r = Tolerant("a =\nb = $\nc {\n", 3);
   for (size_t i = 1; i < r.errors.size(); ++i) {

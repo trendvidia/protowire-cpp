@@ -38,6 +38,9 @@ struct TolerantResult {
 //     triple-quoted strings and block comments end at EOF, bytes literals at
 //     the newline.
 //   - A malformed directive is skipped to the next directive or body entry.
+//     The rest of its line is skipped too, unless it starts an entry (a key
+//     then '=', ':' or '{'), and so is each `( … )` row after a @dataset
+//     header that failed, so each gives one error.
 //
 // The AST may hold BadVal nodes and is for tooling. It is not for decoding:
 // use Parse or Unmarshal once the document is valid.
