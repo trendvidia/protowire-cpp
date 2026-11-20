@@ -242,17 +242,22 @@ TEST(PbGoParity, TenthVarintByteMustFit) {
   EXPECT_TRUE(UnmarshalBytes(data).ok());
 }
 
+// The error of a skipped field names protobuf-go's reason, as protowire-go's
+// does since protowire#614: "corrupt field N: <protowire.ParseError>".
 TEST(PbGoParity, UnknownGroupIsSkipped) {
   // Field 15: start group, one varint field inside, end group; then field 1.
   EXPECT_TRUE(UnmarshalBytes({0x7b, 0x08, 0x01, 0x7c, 0x08, 0x05}).ok());
-  EXPECT_EQ(UnmarshalBytes({0x7b, 0x08, 0x01, 0x74}).message(), "corrupt field 15");  // wrong end
-  EXPECT_EQ(UnmarshalBytes({0x7c}).message(), "corrupt field 15");  // an end with no start
+  // A wrong end, and an end with no start.
+  EXPECT_EQ(UnmarshalBytes({0x7b, 0x08, 0x01, 0x74}).message(),
+            "corrupt field 15: proto: mismatching end group marker");
+  EXPECT_EQ(UnmarshalBytes({0x7c}).message(),
+            "corrupt field 15: proto: mismatching end group marker");
 }
 
 TEST(PbGoParity, DeepGroupsAreBounded) {
   // Past the limit: this overflowed the stack on Windows when it recursed.
   std::vector<uint8_t> data(200000, 0x7b);
-  EXPECT_EQ(UnmarshalBytes(data).message(), "corrupt field 15");
+  EXPECT_EQ(UnmarshalBytes(data).message(), "corrupt field 15: proto: parse error");
 
   // Go's limit, from running protowire.ConsumeFieldValue: 10001 groups nest
   // and 10002 do not.
@@ -262,7 +267,7 @@ TEST(PbGoParity, DeepGroupsAreBounded) {
     return out;
   };
   EXPECT_TRUE(UnmarshalBytes(nested(10001)).ok());
-  EXPECT_EQ(UnmarshalBytes(nested(10002)).message(), "corrupt field 15");
+  EXPECT_EQ(UnmarshalBytes(nested(10002)).message(), "corrupt field 15: proto: parse error");
 }
 
 }  // namespace
