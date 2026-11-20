@@ -478,6 +478,60 @@ inline Status MarshalStruct(const T& v, std::vector<uint8_t>& out, int depth, in
 
 // ---- Unmarshal dispatch -------------------------------------------------
 
+// WireTypes is the set of wire types a field is read from: the one its type
+// is written with and, for a repeated numeric scalar, the packed
+// (length-delimited) form. A tag with any other wire type is not that field's
+// value, so Unmarshal skips it as protobuf skips an unknown field and leaves
+// the field as it was (draft -01 § PB Binary Encoding, protowire#614). It
+// mirrors MarshalScalar's dispatch, as protowire-go's wireTypesOf does.
+struct WireTypes {
+  wire::WireType type;
+  bool packed = false;
+
+  constexpr bool Accepts(wire::WireType t) const {
+    return t == type || (packed && t == wire::kBytes);
+  }
+};
+
+template <class T>
+constexpr WireTypes WireTypesOf() {
+  if constexpr (IsOptional<T>::value) {
+    return WireTypesOf<typename IsOptional<T>::element>();
+  } else if constexpr (IsSmartPtr<T>::value) {
+    return WireTypesOf<typename IsSmartPtr<T>::element>();
+  } else if constexpr (IsVector<T>::value && !std::is_same_v<T, std::vector<uint8_t>>) {
+    using E = typename IsVector<T>::element;
+    WireTypes w = WireTypesOf<E>();
+    w.packed = IsPackable<E>;
+    return w;
+  } else if constexpr (std::is_same_v<T, double>) {
+    return {wire::kFixed64};
+  } else if constexpr (std::is_same_v<T, float>) {
+    return {wire::kFixed32};
+  } else if constexpr (std::is_integral_v<T>) {  // bool included
+    return {wire::kVarint};
+  } else {
+    // A string, bytes, a big number, a nested struct and a map entry.
+    return {wire::kBytes};
+  }
+}
+
+// SkipField consumes the value of a field read as unknown: one this struct
+// does not declare, or one whose wire type does not match its type. It refuses
+// wire types 6 and 7, a stray end-group and a value cut short, as protobuf
+// does, with protowire-go's text. `in` names the message it is in, if not the
+// struct's own.
+inline Status SkipField(std::span<const uint8_t> data,
+                        wire::FieldNumber num,
+                        wire::WireType type,
+                        std::string_view in,
+                        int& consumed) {
+  int n = wire::ConsumeFieldValue(data, num, type);
+  if (n < 0) return Status::Error(wire::CorruptFieldText(num, in, n));
+  consumed = n;
+  return Status::OK();
+}
+
 template <class T>
 inline Status UnmarshalScalar(std::span<const uint8_t> data,
                               wire::WireType type,
@@ -603,6 +657,8 @@ inline Status UnmarshalField(std::span<const uint8_t> data,
     if (depth + 1 > lim.max_depth) return DepthError(lim);
     K key{};
     V val{};
+    constexpr WireTypes key_wire = WireTypesOf<K>();
+    constexpr WireTypes val_wire = WireTypesOf<V>();
     while (!entry_bytes.empty()) {
       wire::FieldNumber enum_num;
       wire::WireType etyp;
@@ -610,22 +666,20 @@ inline Status UnmarshalField(std::span<const uint8_t> data,
       if (en < 0) return Status::Error("corrupt tag in map entry");
       entry_bytes = entry_bytes.subspan(en);
       int sub_consumed = 0;
-      if (enum_num == 1) {
+      if (enum_num == 1 && key_wire.Accepts(etyp)) {
         Status st = UnmarshalField(entry_bytes, 1, etyp, key, sub_consumed, zigzag, depth + 1, lim);
         if (!st.ok()) return Status::Error("map key: " + st.message());
-        entry_bytes = entry_bytes.subspan(sub_consumed);
-      } else if (enum_num == 2) {
+      } else if (enum_num == 2 && val_wire.Accepts(etyp)) {
         Status st = UnmarshalField(entry_bytes, 2, etyp, val, sub_consumed, zigzag, depth + 1, lim);
         if (!st.ok()) return Status::Error("map value: " + st.message());
-        entry_bytes = entry_bytes.subspan(sub_consumed);
       } else {
-        int skipped = wire::ConsumeFieldValue(entry_bytes, enum_num, etyp);
-        if (skipped < 0) {
-          return Status::Error("corrupt unknown field " + std::to_string(enum_num) +
-                               " in map entry");
+        // Unknown, or a key or value whose wire type does not match.
+        if (Status st = SkipField(entry_bytes, enum_num, etyp, " in map entry", sub_consumed);
+            !st.ok()) {
+          return st;
         }
-        entry_bytes = entry_bytes.subspan(skipped);
       }
+      entry_bytes = entry_bytes.subspan(sub_consumed);
     }
     if (static_cast<int>(v.size()) >= lim.max_repeated && v.find(key) == v.end()) {
       return Status::Error("map field exceeds MaxRepeatedCount=" +
@@ -685,12 +739,15 @@ inline Status UnmarshalStruct(std::span<const uint8_t> data, T& v, int depth, co
     if (n < 0) return Status::Error("corrupt tag");
     data = data.subspan(n);
 
+    // A field matches by its number and a wire type its type is read from.
+    // Anything else is skipped as unknown, as protobuf does (protowire#614).
     const char* matched = nullptr;
     Status st = Status::OK();
     int consumed = 0;
     std::apply(
         [&](auto&&... f) {
-          (((!matched && f.number == num)
+          (((!matched && f.number == num &&
+             WireTypesOf<std::remove_cvref_t<decltype(v.*(f.ptr))>>().Accepts(type))
                 ? (matched = f.name,
                    st = UnmarshalField(data, num, type, v.*(f.ptr), consumed, f.zigzag, depth, lim),
                    0)
@@ -701,12 +758,10 @@ inline Status UnmarshalStruct(std::span<const uint8_t> data, T& v, int depth, co
 
     if (matched) {
       if (!st.ok()) return Status::Error(std::string("field ") + matched + ": " + st.message());
-      data = data.subspan(consumed);
-    } else {
-      int skipped = wire::ConsumeFieldValue(data, num, type);
-      if (skipped < 0) return Status::Error("corrupt field " + std::to_string(num));
-      data = data.subspan(skipped);
+    } else if (Status skip = SkipField(data, num, type, "", consumed); !skip.ok()) {
+      return skip;
     }
+    data = data.subspan(consumed);
   }
   return Status::OK();
 }

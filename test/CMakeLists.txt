@@ -17,12 +17,21 @@ target_link_libraries(protowire_detail_test PRIVATE
 gtest_discover_tests(protowire_detail_test)
 
 if(TARGET protowire_pb AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/pb_test.cc)
-  add_executable(protowire_pb_test pb_test.cc pb_stream_test.cc pb_utf8_test.cc pb_values_table_test.cc)
+  add_executable(protowire_pb_test pb_test.cc pb_stream_test.cc pb_utf8_test.cc pb_values_table_test.cc
+    pb_wire_type_test.cc)
   target_link_libraries(protowire_pb_test PRIVATE
     protowire_pb GTest::gtest_main)
   target_compile_definitions(protowire_pb_test PRIVATE
     TESTDATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../testdata")
   gtest_discover_tests(protowire_pb_test)
+
+  # protowire_pb does not link protobuf; this test does, as its oracle.
+  if(TARGET protobuf::libprotobuf AND TARGET protobuf::libprotoc)
+    add_executable(protowire_pb_oracle_test pb_wire_type_oracle_test.cc)
+    target_link_libraries(protowire_pb_oracle_test PRIVATE
+      protowire_pb protobuf::libprotobuf protobuf::libprotoc GTest::gtest_main)
+    gtest_discover_tests(protowire_pb_oracle_test)
+  endif()
 endif()
 
 if(TARGET protowire_envelope AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/envelope_test.cc)
