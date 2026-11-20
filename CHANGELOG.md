@@ -17,6 +17,7 @@ number says nothing about any other port. See the Releases section of
 
 ### Fixed
 
+- **`ParseTolerant` reports a malformed directive once** (#182), as protowire-go does as of trendvidia/protowire-go#312. After a directive failed, recovery resumed at the next token that could start an entry, even one still on the directive's own line or inside the rows of a dataset whose header failed. Each stray token then gave an error of its own, and a following `@type` was read as body: `@proto 5` then `@type a.v1.M` and `x = 1` gave four errors, no type and three entries. Now the rest of the failed directive's line is skipped, unless it starts an entry (a key followed by `=`, `:` or `{`), and so is each parenthesized row after a failed `@dataset` header. That input gives one error, keeps the type and reads one entry. `Parse` is unchanged.
 - **`Unmarshal` names a bad `@proto` body as `Parse` does** (#180), as protowire-go does: by the token's kind alone. `@proto 42` gave `... after @proto, got integer ("42")` and `@proto 'x'` gave `... got unexpected character '\''`, where Go and `Parse` give `got integer` and `got ILLEGAL`.
 
 ## [2.1.0] — 2026-11-07

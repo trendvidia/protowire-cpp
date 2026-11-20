@@ -130,7 +130,7 @@ class Parser {
   TokenKind PeekKind();
   Position SkipBalanced(TokenKind open, TokenKind close);
   bool CurrentStartsEntry();
-  void SyncTopLevel();
+  void SyncTopLevel(int line);
   // A ')' is in no value, so tolerant mode reads one inside a list or block
   // as the end of the @dataset row the value is a cell of. Strict mode never
   // stops there; the ')' is its error.
@@ -233,8 +233,27 @@ bool Parser::CurrentStartsEntry() {
 }
 
 // SyncTopLevel advances to a directive, a token that can start a body entry,
-// or EOF.
-void Parser::SyncTopLevel() {
+// or EOF: tolerant recovery after a malformed directive that began on line.
+//
+// What is left of that line belongs to the directive, unless it starts an
+// entry (a key followed by '=', ':' or '{'). A parenthesized group is a row
+// of a @dataset whose header failed, since an entry never opens with '('.
+// Neither is read as an entry: `@proto 5`, `@type 5` and `@dataset T 5`
+// followed by rows each gave one error per stray token and lost the
+// directives after them (#182, protowire-go#312).
+void Parser::SyncTopLevel(int line) {
+  while (current_.pos.line == line && !CurrentStartsEntry()) {
+    switch (current_.kind) {
+      case TokenKind::kEOF:
+      case TokenKind::kAtType:
+      case TokenKind::kAtDirective:
+      case TokenKind::kAtDataset:
+      case TokenKind::kAtProto:
+        return;
+      default:
+        Advance();
+    }
+  }
   for (;;) {
     switch (current_.kind) {
       case TokenKind::kEOF:
@@ -246,6 +265,9 @@ void Parser::SyncTopLevel() {
       case TokenKind::kString:
       case TokenKind::kInt:
         return;
+      case TokenKind::kLParen:
+        SkipBalanced(TokenKind::kLParen, TokenKind::kRParen);
+        break;
       default:
         Advance();
     }
@@ -263,6 +285,7 @@ StatusOr<Document> Parser::ParseDocument() {
   for (bool in_directives = true; in_directives;) {
     switch (current_.kind) {
       case TokenKind::kAtType: {
+        const int line = current_.pos.line;
         Advance();
         bool missing_name = current_.kind != TokenKind::kIdent;
         // A dangling `@type` with the body right after it: an identifier
@@ -275,7 +298,7 @@ StatusOr<Document> Parser::ParseDocument() {
               !s.ok()) {
             return s;
           }
-          SyncTopLevel();
+          SyncTopLevel(line);
           continue;
         }
         doc.type_url = std::string(current_.value);
@@ -284,12 +307,13 @@ StatusOr<Document> Parser::ParseDocument() {
         break;
       }
       case TokenKind::kAtDirective: {
+        const int line = current_.pos.line;
         int end = 0;
         auto d = ParseDirective(&end);
         if (!d.ok()) {
           if (!tolerant_) return d.status();
           Record(d.status());
-          SyncTopLevel();
+          SyncTopLevel(line);
           continue;
         }
         doc.directives.push_back(std::move(d).consume());
@@ -297,12 +321,13 @@ StatusOr<Document> Parser::ParseDocument() {
         break;
       }
       case TokenKind::kAtDataset: {
+        const int line = current_.pos.line;
         int end = 0;
         auto tbl = ParseTableDirective(&end);
         if (!tbl.ok()) {
           if (!tolerant_) return tbl.status();
           Record(tbl.status());
-          SyncTopLevel();
+          SyncTopLevel(line);
           continue;
         }
         doc.datasets.push_back(std::move(tbl).consume());
@@ -310,12 +335,13 @@ StatusOr<Document> Parser::ParseDocument() {
         break;
       }
       case TokenKind::kAtProto: {
+        const int line = current_.pos.line;
         int end = 0;
         auto pd = ParseProtoDirective(&end);
         if (!pd.ok()) {
           if (!tolerant_) return pd.status();
           Record(pd.status());
-          SyncTopLevel();
+          SyncTopLevel(line);
           continue;
         }
         doc.protos.push_back(std::move(pd).consume());
