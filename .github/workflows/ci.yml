@@ -20,6 +20,12 @@ jobs:
   # Build + test matrix across Linux × {gcc-13, clang-18}, macOS,
   # Windows × MSVC. Protobuf comes from the platform package manager on
   # Linux/macOS and from vcpkg on Windows.
+  #
+  # Every Linux job names ubuntu-24.04, not ubuntu-latest (#181). The
+  # compilers are named by version, and the distro's libprotobuf has to
+  # match them: 26.04's libprotobuf needs a libstdc++ newer than gcc-13's
+  # (CXXABI_1.3.15), and its clang-18 ships no compiler-rt, so ASan and
+  # coverage cannot link. Move the image and the compilers together.
   # ---------------------------------------------------------------------
   build:
     name: ${{ matrix.os }} / ${{ matrix.compiler }}
@@ -31,12 +37,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             compiler: gcc-13
             cc: gcc-13
             cxx: g++-13
             cmake_args: ""
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             compiler: clang-18
             cc: clang-18
             cxx: clang++-18
@@ -112,7 +118,7 @@ jobs:
   # ---------------------------------------------------------------------
   sanitizers:
     name: ASan + UBSan (Linux/clang)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -188,7 +194,7 @@ jobs:
   # ---------------------------------------------------------------------
   clang-format:
     name: clang-format check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
@@ -211,7 +217,7 @@ jobs:
   # ---------------------------------------------------------------------
   clang-tidy:
     name: clang-tidy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -243,7 +249,7 @@ jobs:
   # ---------------------------------------------------------------------
   coverage:
     name: Coverage
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
